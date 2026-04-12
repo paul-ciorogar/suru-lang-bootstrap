@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Suru.CLI/Suru.CLI.csproj" />
+    <Project Path="src/Suru.Compiler/Suru.Compiler.csproj" />
+    <Project Path="src/Suru.LSP/Suru.LSP.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Suru.Tests/Suru.Tests.csproj" />
+  </Folder>
+</Solution>
