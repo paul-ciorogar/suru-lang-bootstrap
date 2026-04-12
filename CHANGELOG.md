@@ -11,3 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial solution structure with four projects: `Suru.Compiler`, `Suru.CLI`, `Suru.LSP`, `Suru.Tests`
 - `LLVMSharp 20.1.2` dependency in `Suru.Compiler`
 - All projects target `net10.0`
+- Full compiler pipeline: lexer → parser → semantic analysis → LLVM codegen → native executable
+- `suru build <file.suru>` CLI command; output placed in `build/` next to the source file
+- Empty `.suru` file compiles to a native executable with `main()` returning 0
