@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Lexer: identifiers, `true`/`false` keywords, integer literals (i64), float literals (f64), `(`, `)`, `,`
+- AST nodes: `BoolLitExpr`, `IntLitExpr`, `FloatLitExpr`, `CallExpr`, `ExprStmt`; `Module` now holds a statement list
+- Parser: recursive descent; parses top-level call expressions without a statement terminator
+- Built-in `printLn` compiles to a `printf` call; supports `bool`, `i64`, and `f64` arguments
+- `examples/hello.suru` — first working Suru program
+
+## [0.1.0] - 2026-04-12
+
+### Added
 - Initial solution structure with four projects: `Suru.Compiler`, `Suru.CLI`, `Suru.LSP`, `Suru.Tests`
 - `LLVMSharp 20.1.2` dependency in `Suru.Compiler`
 - All projects target `net10.0`
