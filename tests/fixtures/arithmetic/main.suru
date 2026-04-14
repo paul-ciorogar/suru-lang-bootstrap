@@ -1,0 +1,14 @@
+let x: 2.add(3)
+printLn(x)
+let y: 10.take(4)
+printLn(y)
+let z: 3.multiply(2)
+printLn(z)
+let w: 9.split(3)
+printLn(w)
+let n: 5.invert()
+printLn(n)
+let a: true
+let b: false
+printLn(a)
+printLn(b)

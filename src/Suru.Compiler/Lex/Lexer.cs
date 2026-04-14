@@ -31,6 +31,8 @@ public sealed class Lexer(string source)
                 case '(': Advance(); return new Token(TokenKind.LeftParen, startLine, startCol);
                 case ')': Advance(); return new Token(TokenKind.RightParen, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
+                case '.': Advance(); return new Token(TokenKind.Dot, startLine, startCol);
+                case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
                 default:
                     throw new Exception($"Unexpected character '{c}' at {_line}:{_column}");
             }
@@ -48,9 +50,13 @@ public sealed class Lexer(string source)
         var text = source[start.._pos];
         var kind = text switch
         {
-            "true" => TokenKind.True,
+            "true"  => TokenKind.True,
             "false" => TokenKind.False,
-            _ => TokenKind.Identifier,
+            "let"   => TokenKind.Let,
+            "not"   => TokenKind.Not,
+            "and"   => TokenKind.And,
+            "or"    => TokenKind.Or,
+            _       => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);
     }

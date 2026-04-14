@@ -13,6 +13,11 @@ public sealed class Tokens(Lexer lexer, string sourcePath)
         return _current;
     }
 
+    internal bool CurrentIs(TokenKind kind)
+    {
+        return _current.Kind == kind;
+    }
+
     private bool BufferHasTokens()
     {
         return _buffer.Count > 0 && _idx < _buffer.Count;
@@ -37,7 +42,7 @@ public sealed class Tokens(Lexer lexer, string sourcePath)
         return null;
     }
 
-    internal void Next()
+    internal void Advance()
     {
         _current = NextTokenFromBuffer() ?? lexer.NextToken();
     }

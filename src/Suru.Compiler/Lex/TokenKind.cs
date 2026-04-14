@@ -11,4 +11,10 @@ public enum TokenKind
     LeftParen,
     RightParen,
     Comma,
+    Dot,
+    Colon,
+    Let,
+    Not,
+    And,
+    Or,
 }
