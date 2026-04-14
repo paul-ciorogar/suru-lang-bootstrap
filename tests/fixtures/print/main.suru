@@ -1,0 +1,4 @@
+printLn(true)
+printLn(false)
+printLn(1)
+printLn(1.2)
