@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added Control Flow
+- Lex: `match` keyword; `{`, `}` tokens; `_` wildcard token
+- AST: `MatchExpression` and `MatchArm` nodes; wildcard arm represented as `Pattern = null`
+- Parse: `match cond { pattern: body, ... }` expression; patterns are `true`, `false`, integer/float literals, or `_`; arms separated by `,` or newlines
+- Semantic: validate match condition is `Bool`; `equals` and `lessThan` methods infer `Bool` return type
+- Codegen: LLVM test-chain with `icmp`/`fcmp`; conditional branches to per-arm basic blocks; `phi` node for expression-form match; statement-form match emits side effects without a phi
+- Standard library: `equals(n)` and `lessThan(n)` on `Int64`, `Float64`, and `Bool`
+- Test fixture `tests/fixtures/control-flow/main.suru`; `ControlFlowTests` integration test
+
 ### Added Arithmetic & Variables
 - Lex: `let`, `not`, `and`, `or` keywords; `.` (Dot) and `:` (Colon) tokens
 - AST: `LetStatement`, `AssignmentStatement`, `VariableReferenceExpression`, `MethodCallExpression`, `UnaryExpression` (not), `BinaryExpression` (and/or)

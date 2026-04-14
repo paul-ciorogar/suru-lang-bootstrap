@@ -1,6 +1,7 @@
 using LLVMSharp.Interop;
 using Suru.Compiler.Parse.Ast;
 using Suru.Compiler.Types;
+using System.Linq;
 
 namespace Suru.Compiler.Codegen;
 
@@ -52,6 +53,10 @@ public sealed class CodeGenerator
             case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args.Count: 1 } call }:
                 var (val, type) = EmitValue(call.Args[0]);
                 EmitPrintLn(val, type);
+                break;
+
+            case ExpressionStatement { Expression: MatchExpression matchStmt }:
+                EmitMatchAsStatement(matchStmt);
                 break;
 
             case ExpressionStatement exprStmt:
@@ -113,6 +118,9 @@ public sealed class CodeGenerator
                 return (result, SuruType.Bool);
             }
 
+            case MatchExpression match:
+                return EmitMatchAsExpression(match);
+
             default:
                 throw new InvalidOperationException($"Unsupported expression type {expr.GetType().Name}");
         }
@@ -132,6 +140,8 @@ public sealed class CodeGenerator
 
         var (arg, _) = EmitValue(method.Args[0]);
 
+        var isBoolResult = method.MethodName is "equals" or "lessThan";
+
         var value = (method.MethodName, receiverType) switch
         {
             ("add",      SuruType.Int64)   => _builder.BuildAdd(receiver, arg, ""),
@@ -142,10 +152,150 @@ public sealed class CodeGenerator
             ("multiply", SuruType.Float64) => _builder.BuildFMul(receiver, arg, ""),
             ("split",    SuruType.Int64)   => _builder.BuildSDiv(receiver, arg, ""),
             ("split",    SuruType.Float64) => _builder.BuildFDiv(receiver, arg, ""),
+            ("equals",   SuruType.Bool)    => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, receiver, arg, ""),
+            ("equals",   SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, receiver, arg, ""),
+            ("equals",   SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, receiver, arg, ""),
+            ("lessThan", SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, receiver, arg, ""),
+            ("lessThan", SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, receiver, arg, ""),
             _ => throw new InvalidOperationException($"Unknown method '{method.MethodName}' on {receiverType}"),
         };
 
-        return (value, receiverType);
+        return (value, isBoolResult ? SuruType.Bool : receiverType);
+    }
+
+    // Emit a match used as a statement (arms may have side effects; no value produced).
+    private void EmitMatchAsStatement(MatchExpression match)
+    {
+        var (condVal, condType, patternArms, wildcardArm, armBlocks, wildcardBlock, mergeBlock) =
+            EmitMatchTestChain(match);
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            _builder.PositionAtEnd(armBlocks[i]);
+            EmitMatchArmBodyAsStatement(patternArms[i].Body);
+            _builder.BuildBr(mergeBlock);
+        }
+
+        if (wildcardArm != null)
+        {
+            _builder.PositionAtEnd(wildcardBlock!.Value);
+            EmitMatchArmBodyAsStatement(wildcardArm.Body);
+            _builder.BuildBr(mergeBlock);
+        }
+
+        _builder.PositionAtEnd(mergeBlock);
+    }
+
+    private void EmitMatchArmBodyAsStatement(Expression body)
+    {
+        if (body is CallExpression { Name: "printLn", Args.Count: 1 } call)
+        {
+            var (v, t) = EmitValue(call.Args[0]);
+            EmitPrintLn(v, t);
+        }
+        else
+        {
+            EmitValue(body);
+        }
+    }
+
+    // Emit a match used as an expression (all arms produce a value; merged via phi).
+    private (LLVMValueRef Value, SuruType Type) EmitMatchAsExpression(MatchExpression match)
+    {
+        var (condVal, condType, patternArms, wildcardArm, armBlocks, wildcardBlock, mergeBlock) =
+            EmitMatchTestChain(match);
+
+        var incoming = new List<(LLVMValueRef Value, LLVMBasicBlockRef Block)>();
+        SuruType? resultType = null;
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            _builder.PositionAtEnd(armBlocks[i]);
+            var (armVal, armType) = EmitValue(patternArms[i].Body);
+            resultType ??= armType;
+            incoming.Add((armVal, _builder.InsertBlock));
+            _builder.BuildBr(mergeBlock);
+        }
+
+        if (wildcardArm != null)
+        {
+            _builder.PositionAtEnd(wildcardBlock!.Value);
+            var (armVal, armType) = EmitValue(wildcardArm.Body);
+            resultType ??= armType;
+            incoming.Add((armVal, _builder.InsertBlock));
+            _builder.BuildBr(mergeBlock);
+        }
+
+        _builder.PositionAtEnd(mergeBlock);
+
+        if (resultType.HasValue && incoming.Count > 0)
+        {
+            var phi = _builder.BuildPhi(LlvmTypeFor(resultType.Value), "match_result");
+            phi.AddIncoming(
+                incoming.Select(x => x.Value).ToArray(),
+                incoming.Select(x => x.Block).ToArray(),
+                (uint)incoming.Count);
+            return (phi, resultType.Value);
+        }
+
+        return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+    }
+
+    // Build the test-chain branching structure for a match expression.
+    // Returns the evaluated condition, separated arm lists, and the pre-created LLVM blocks.
+    // The builder is left with a terminator in the entry block; callers must PositionAtEnd each arm block.
+    private (
+        LLVMValueRef CondVal,
+        SuruType CondType,
+        List<MatchArm> PatternArms,
+        MatchArm? WildcardArm,
+        LLVMBasicBlockRef[] ArmBlocks,
+        LLVMBasicBlockRef? WildcardBlock,
+        LLVMBasicBlockRef MergeBlock
+    ) EmitMatchTestChain(MatchExpression match)
+    {
+        var (condVal, condType) = EmitValue(match.Condition);
+        var fn = _builder.InsertBlock.Parent;
+
+        var patternArms = match.Arms.Where(a => a.Pattern != null).ToList();
+        var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
+
+        var armBlocks = patternArms.Select((_, i) => fn.AppendBasicBlock($"match_arm_{i}")).ToArray();
+        LLVMBasicBlockRef? wildcardBlock = wildcardArm != null ? fn.AppendBasicBlock("match_wildcard") : null;
+        var mergeBlock = fn.AppendBasicBlock("match_merge");
+
+        var missBlock = wildcardBlock ?? mergeBlock;
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+
+            LLVMValueRef cmp = condType switch
+            {
+                SuruType.Float64 => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, condVal, patternVal, ""),
+                _                => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,     condVal, patternVal, ""),
+            };
+
+            LLVMBasicBlockRef elseBlock;
+            if (i + 1 < patternArms.Count)
+            {
+                elseBlock = fn.AppendBasicBlock($"match_test_{i + 1}");
+            }
+            else
+            {
+                elseBlock = missBlock;
+            }
+
+            _builder.BuildCondBr(cmp, armBlocks[i], elseBlock);
+
+            if (i + 1 < patternArms.Count)
+                _builder.PositionAtEnd(elseBlock);
+        }
+
+        if (patternArms.Count == 0)
+            _builder.BuildBr(missBlock);
+
+        return (condVal, condType, patternArms, wildcardArm, armBlocks, wildcardBlock, mergeBlock);
     }
 
     private void EmitPrintLn(LLVMValueRef val, SuruType type)

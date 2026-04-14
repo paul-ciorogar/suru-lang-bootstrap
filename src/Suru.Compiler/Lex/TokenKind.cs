@@ -17,4 +17,8 @@ public enum TokenKind
     Not,
     And,
     Or,
+    Match,
+    LeftBrace,
+    RightBrace,
+    Wildcard,
 }

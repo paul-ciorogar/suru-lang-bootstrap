@@ -83,6 +83,15 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(binary.Left);
                 AnalyzeExpression(binary.Right);
                 break;
+
+            case MatchExpression match:
+                AnalyzeExpression(match.Condition);
+                var condType = InferType(match.Condition);
+                if (condType.HasValue && condType.Value != SuruType.Bool)
+                    _errors.Add($"{_module.SourcePath}: match condition must be Bool, got {condType.Value}");
+                foreach (var arm in match.Arms)
+                    AnalyzeExpression(arm.Body);
+                break;
         }
     }
 
@@ -92,9 +101,11 @@ public sealed class SemanticAnalyzer
         IntLiteral                 => SuruType.Int64,
         FloatLiteral               => SuruType.Float64,
         VariableReferenceExpression v => _symbols.TryGetValue(v.Name, out var t) ? t : null,
+        MethodCallExpression { MethodName: "equals" or "lessThan" } => SuruType.Bool,
         MethodCallExpression m     => InferType(m.Receiver),
         UnaryExpression            => SuruType.Bool,
         BinaryExpression           => SuruType.Bool,
+        MatchExpression m          => m.Arms.Count > 0 ? InferType(m.Arms[0].Body) : null,
         _                          => null,
     };
 }

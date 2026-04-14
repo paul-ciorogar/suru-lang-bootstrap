@@ -19,7 +19,7 @@ public sealed class Lexer(string source)
                 continue;
             }
 
-            if (char.IsLetter(c))
+            if (char.IsLetter(c) || c == '_')
                 return ReadIdentifierOrKeyword();
 
             if (char.IsDigit(c))
@@ -33,6 +33,8 @@ public sealed class Lexer(string source)
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
                 case '.': Advance(); return new Token(TokenKind.Dot, startLine, startCol);
                 case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
+                case '{': Advance(); return new Token(TokenKind.LeftBrace, startLine, startCol);
+                case '}': Advance(); return new Token(TokenKind.RightBrace, startLine, startCol);
                 default:
                     throw new Exception($"Unexpected character '{c}' at {_line}:{_column}");
             }
@@ -56,6 +58,8 @@ public sealed class Lexer(string source)
             "not"   => TokenKind.Not,
             "and"   => TokenKind.And,
             "or"    => TokenKind.Or,
+            "match" => TokenKind.Match,
+            "_"     => TokenKind.Wildcard,
             _       => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);

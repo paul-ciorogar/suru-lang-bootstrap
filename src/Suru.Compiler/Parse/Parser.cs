@@ -143,6 +143,15 @@ public sealed class Parser
     {
         var token = _tokens.Current();
 
+        if (CanConsume(TokenKind.Match))
+        {
+            var condition = ParseExpression();
+            Consume(TokenKind.LeftBrace);
+            var arms = ParseMatchArms();
+            Consume(TokenKind.RightBrace);
+            return new MatchExpression(condition, arms);
+        }
+
         if (CanConsume(TokenKind.Identifier))
         {
             if (CanConsume(TokenKind.LeftParen))
@@ -164,6 +173,42 @@ public sealed class Parser
             TokenKind.FloatLiteral => new FloatLiteral(double.Parse(token.Text, CultureInfo.InvariantCulture)),
             _ => throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): unexpected token {token.Kind}"),
         };
+    }
+
+    private List<MatchArm> ParseMatchArms()
+    {
+        var arms = new List<MatchArm>();
+        while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+        {
+            var pattern = ParseMatchPattern();
+            Consume(TokenKind.Colon);
+            var body = ParseExpression();
+            arms.Add(new MatchArm(pattern, body));
+            CanConsume(TokenKind.Comma);
+        }
+        return arms;
+    }
+
+    // Returns null for wildcard (_), otherwise a literal expression.
+    private Expression? ParseMatchPattern()
+    {
+        if (CanConsume(TokenKind.Wildcard)) return null;
+        if (CanConsume(TokenKind.True))     return new BoolLiteral(true);
+        if (CanConsume(TokenKind.False))    return new BoolLiteral(false);
+
+        var token = _tokens.Current();
+        if (token.Kind == TokenKind.IntLiteral)
+        {
+            Advance();
+            return new IntLiteral(long.Parse(token.Text));
+        }
+        if (token.Kind == TokenKind.FloatLiteral)
+        {
+            Advance();
+            return new FloatLiteral(double.Parse(token.Text, System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected match pattern, got {token.Kind}");
     }
 
     private List<Expression> ParseArguments()
