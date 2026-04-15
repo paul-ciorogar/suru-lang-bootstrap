@@ -1,4 +1,7 @@
-printLn(true)
-printLn(false)
-printLn(1)
-printLn(1.2)
+fn main(args Array) Int64 {
+    printLn(true)
+    printLn(false)
+    printLn(1)
+    printLn(1.2)
+    return 0
+}

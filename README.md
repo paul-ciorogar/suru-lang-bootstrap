@@ -221,7 +221,7 @@ printLn(s)
 | Method | Description | Example |
 |---|---|---|
 | `len()` | byte length | `s.len()` → `5` |
-| `at(i)` | byte value at index (`Int64`) | `s.at(0)` → `104` |
+| `at(i)` | single-char `String` at index | `s.at(0)` → `"h"` |
 | `equals(other)` | string equality | `s.equals("hello")` → `true` |
 | `append(other)` | concatenate, new string | `s.append(" world")` |
 | `slice(from, to)` | substring copy of `[from, to)` | `s.slice(1, 3)` → `"el"` |
@@ -233,6 +233,7 @@ printLn(s.len())            // 5
 printLn(s.equals("hello"))  // true
 let s2: s.append(" world")
 printLn(s2)                 // hello world
+printLn(s.at(0))            // h
 ```
 
 ### Type conversions
@@ -278,7 +279,7 @@ exit(1)
 
 ### Main function and CLI arguments
 
-Define `fn main(args Array) Int64` to access command-line arguments. `args.at(0)` is the program name; `args.at(1)` is the first argument, and so on. The return value becomes the process exit code.
+Every Suru program defines `fn main(args Array) Int64` as its entry point. `args.at(0)` is the program name; `args.at(1)` is the first user argument, and so on. The return value becomes the process exit code.
 
 ```suru
 fn main(args Array) Int64 {
@@ -288,5 +289,3 @@ fn main(args Array) Int64 {
     return 0
 }
 ```
-
-> **Note:** Without an explicit `fn main`, top-level statements are wrapped in an implicit entry point (no argument access).

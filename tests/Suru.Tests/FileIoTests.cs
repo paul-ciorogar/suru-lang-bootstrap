@@ -1,20 +1,11 @@
-using System.Diagnostics;
-
 namespace Suru.Tests;
 
 [Collection("Integration")]
-public class FileIoTests
+public class FileIoTests(CompiledFixtures fixtures) : IntegrationTestBase
 {
-    private readonly string _readExe;
-    private readonly string _writeExe;
-    private readonly string _exitExe;
-
-    public FileIoTests(CompiledFixtures fixtures)
-    {
-        _readExe  = fixtures.GetExecutable("file_io");
-        _writeExe = fixtures.GetExecutable("file_io_write");
-        _exitExe  = fixtures.GetExecutable("exit_test");
-    }
+    private readonly string _readExe  = fixtures.GetExecutable("file_io");
+    private readonly string _writeExe = fixtures.GetExecutable("file_io_write");
+    private readonly string _exitExe  = fixtures.GetExecutable("exit_test");
 
     [Fact]
     public void ReadFile_EchoesFileContent()
@@ -23,8 +14,7 @@ public class FileIoTests
         try
         {
             File.WriteAllText(tmpPath, "hello from file");
-            var stdout = Run(_readExe, tmpPath);
-            Assert.Equal("hello from file\n", stdout);
+            Assert.Equal("hello from file\n", Run(_readExe, tmpPath));
         }
         finally
         {
@@ -52,36 +42,5 @@ public class FileIoTests
 
     [Fact]
     public void Exit_ReturnsCode()
-    {
-        var exitCode = RunGetExitCode(_exitExe);
-        Assert.Equal(42, exitCode);
-    }
-
-    private static string Run(string exe, params string[] args)
-    {
-        var escaped = string.Join(" ", args.Select(a => $"\"{a}\""));
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = exe,
-            Arguments = escaped,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        })!;
-        var stdout = process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-        return stdout;
-    }
-
-    private static int RunGetExitCode(string exe)
-    {
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = exe,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        })!;
-        process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-        return process.ExitCode;
-    }
+        => Assert.Equal(42, RunGetExitCode(_exitExe));
 }

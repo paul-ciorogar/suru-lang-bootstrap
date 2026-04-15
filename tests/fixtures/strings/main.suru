@@ -1,12 +1,17 @@
-let s: "hello"
-printLn(s.len())
-printLn(s.equals("hello"))
-printLn(s.equals("world"))
-let s2: s.append(" world")
-printLn(s2)
-let s3: s.slice(1, 3)
-printLn(s3)
-let n: Int64.from("42")
-printLn(n)
-let str: n.toString()
-printLn(str)
+fn main(args Array) Int64 {
+    let s: "hello"
+    printLn(s.len())
+    printLn(s.equals("hello"))
+    printLn(s.equals("world"))
+    let s2: s.append(" world")
+    printLn(s2)
+    let s3: s.slice(1, 3)
+    printLn(s3)
+    let n: Int64.from("42")
+    printLn(n)
+    let str: n.toString()
+    printLn(str)
+    let c: s.at(0)
+    printLn(c)
+    return 0
+}

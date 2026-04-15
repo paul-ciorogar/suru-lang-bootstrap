@@ -620,10 +620,26 @@ public sealed class CodeGenerator
             case "at":
             {
                 var (idxVal, _) = EmitValue(method.Args[0]);
-                var slot = _builder.BuildGEP2(LLVMTypeRef.Int8, data, new[] { idxVal }, "char_slot");
-                var ch = _builder.BuildLoad2(LLVMTypeRef.Int8, slot, "char");
-                var extended = _builder.BuildZExt(ch, LLVMTypeRef.Int64, "char_i64");
-                return (extended, SuruType.Int64);
+                var srcSlot = _builder.BuildGEP2(LLVMTypeRef.Int8, data, new[] { idxVal }, "char_slot");
+                var ch = _builder.BuildLoad2(LLVMTypeRef.Int8, srcSlot, "char");
+                // Build a 2-byte buffer: [ch, '\0']
+                var two = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 2, false);
+                var buf = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { two }, "char_buf");
+                var zero64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0, false);
+                var one64  = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+                var buf0 = _builder.BuildGEP2(LLVMTypeRef.Int8, buf, new[] { zero64 }, "char_buf0");
+                _builder.BuildStore(ch, buf0);
+                var nullByte = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, 0, false);
+                var buf1 = _builder.BuildGEP2(LLVMTypeRef.Int8, buf, new[] { one64 }, "char_buf1");
+                _builder.BuildStore(nullByte, buf1);
+                // Build %suru.Seq header: { len=1, data=buf }
+                var hdrSize = SeqHeaderSize();
+                var hdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "char_hdr");
+                var lenSlot  = _builder.BuildStructGEP2(_seqNodeType, hdr, 0, "char_len_slot");
+                _builder.BuildStore(one64, lenSlot);
+                var dataSlot = _builder.BuildStructGEP2(_seqNodeType, hdr, 1, "char_data_slot");
+                _builder.BuildStore(buf, dataSlot);
+                return (hdr, SuruType.String);
             }
 
             case "equals":

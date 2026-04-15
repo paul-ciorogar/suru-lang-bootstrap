@@ -1,10 +1,13 @@
-let x: true
-match x { true: printLn(1), _: printLn(0) }
-let y: match x { true: 1, _: 0 }
-printLn(y)
-let a: 3.equals(3)
-printLn(a)
-let b: 5.lessThan(10)
-printLn(b)
-let c: 5.lessThan(3)
-printLn(c)
+fn main(args Array) Int64 {
+    let x: true
+    match x { true: printLn(1), _: printLn(0) }
+    let y: match x { true: 1, _: 0 }
+    printLn(y)
+    let a: 3.equals(3)
+    printLn(a)
+    let b: 5.lessThan(10)
+    printLn(b)
+    let c: 5.lessThan(3)
+    printLn(c)
+    return 0
+}

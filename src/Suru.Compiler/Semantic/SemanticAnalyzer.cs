@@ -389,7 +389,7 @@ public sealed class SemanticAnalyzer
             when m.Receiver is VariableReferenceExpression rv
               && _arrayElementTypes.TryGetValue(rv.Name, out var elemType) => elemType,
         MethodCallExpression { MethodName: "at" } m
-            when InferType(m.Receiver) == SuruType.String => SuruType.Int64,
+            when InferType(m.Receiver) == SuruType.String => SuruType.String,
         MethodCallExpression { MethodName: "slice" or "append" } m
             when InferType(m.Receiver) == SuruType.String => SuruType.String,
         MethodCallExpression { MethodName: "from" } m
