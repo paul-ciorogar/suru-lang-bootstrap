@@ -24,4 +24,7 @@ public enum TokenKind
     Fn,
     Return,
     Void,
+    LeftBracket,
+    RightBracket,
+    StringLiteral,
 }

@@ -6,4 +6,6 @@ public enum SuruType
     Int64,
     Float64,
     Struct,
+    Array,
+    String,
 }

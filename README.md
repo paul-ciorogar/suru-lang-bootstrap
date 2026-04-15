@@ -172,3 +172,83 @@ let result: identity(person)
 ```
 
 > **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field access is resolved at compile time by index.
+
+### Arrays
+
+Create an array with `[e1, e2, ...]`. All elements must have the same type:
+
+```suru
+let nums: [10, 20, 30]
+```
+
+| Method | Description | Example |
+|---|---|---|
+| `len()` | number of elements | `nums.len()` → `3` |
+| `at(i)` | element at index | `nums.at(0)` → `10` |
+| `set(val, i)` | update element in-place | `nums.set(99, 1)` |
+| `add(v)` | append element (mutates, uses `realloc`) | `nums.add(40)` |
+| `equals(other)` | element-wise equality | `nums.equals(other)` → `Bool` |
+| `slice(from, to)` | new array copy of `[from, to)` | `nums.slice(1, 3)` |
+
+```suru
+let nums: [10, 20, 30]
+printLn(nums.len())      // 3
+nums.add(40)
+printLn(nums.at(3))      // 40
+let part: nums.slice(0, 2)
+printLn(part.len())      // 2
+```
+
+Pass arrays to and from functions using the `Array` type:
+
+```suru
+fn first(arr Array) Int64 {
+  return arr.at(0)
+}
+```
+
+Use `clone(arr)` to deep-copy and `drop(arr)` to free the array and its data.
+
+### Strings
+
+String literals are written with double quotes. Supported escapes: `\n`, `\t`, `\\`, `\"`.
+
+```suru
+let s: "hello\nworld"
+printLn(s)
+```
+
+| Method | Description | Example |
+|---|---|---|
+| `len()` | byte length | `s.len()` → `5` |
+| `at(i)` | byte value at index (`Int64`) | `s.at(0)` → `104` |
+| `equals(other)` | string equality | `s.equals("hello")` → `true` |
+| `append(other)` | concatenate, new string | `s.append(" world")` |
+| `slice(from, to)` | substring copy of `[from, to)` | `s.slice(1, 3)` → `"el"` |
+| `toString()` | identity — returns itself | `s.toString()` |
+
+```suru
+let s: "hello"
+printLn(s.len())            // 5
+printLn(s.equals("hello"))  // true
+let s2: s.append(" world")
+printLn(s2)                 // hello world
+```
+
+### Type conversions
+
+Convert a `String` to a number with the static `from` method:
+
+```suru
+let n: Int64.from("42")
+let f: Float64.from("3.14")
+```
+
+Convert any primitive to a `String` with `toString()`:
+
+```suru
+let s: 42.toString()
+let b: true.toString()
+printLn(s)  // 42
+printLn(b)  // true
+```

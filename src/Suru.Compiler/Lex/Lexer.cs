@@ -35,6 +35,9 @@ public sealed class Lexer(string source)
                 case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
                 case '{': Advance(); return new Token(TokenKind.LeftBrace, startLine, startCol);
                 case '}': Advance(); return new Token(TokenKind.RightBrace, startLine, startCol);
+                case '[': Advance(); return new Token(TokenKind.LeftBracket, startLine, startCol);
+                case ']': Advance(); return new Token(TokenKind.RightBracket, startLine, startCol);
+                case '"': return ReadString();
                 default:
                     throw new Exception($"Unexpected character '{c}' at {_line}:{_column}");
             }
@@ -66,6 +69,39 @@ public sealed class Lexer(string source)
             _        => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);
+    }
+
+    private Token ReadString()
+    {
+        int startLine = _line, startCol = _column;
+        Advance(); // consume opening '"'
+        var sb = new System.Text.StringBuilder();
+        while (_pos < source.Length && source[_pos] != '"')
+        {
+            if (source[_pos] == '\\' && _pos + 1 < source.Length)
+            {
+                Advance(); // consume '\'
+                char escaped = source[_pos];
+                Advance();
+                sb.Append(escaped switch
+                {
+                    'n'  => '\n',
+                    't'  => '\t',
+                    '\\' => '\\',
+                    '"'  => '"',
+                    _    => throw new Exception($"Unknown escape sequence '\\{escaped}' at {_line}:{_column}"),
+                });
+            }
+            else
+            {
+                sb.Append(source[_pos]);
+                Advance();
+            }
+        }
+        if (_pos >= source.Length)
+            throw new Exception($"Unterminated string literal at {startLine}:{startCol}");
+        Advance(); // consume closing '"'
+        return new Token(TokenKind.StringLiteral, sb.ToString(), startLine, startCol);
     }
 
     private Token ReadNumber()

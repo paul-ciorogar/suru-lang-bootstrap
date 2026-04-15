@@ -193,6 +193,26 @@ public sealed class Parser
     {
         var token = _tokens.Current();
 
+        // array literal: [ expr (, expr)* ]
+        if (CanConsume(TokenKind.LeftBracket))
+        {
+            var elements = new List<Expression>();
+            while (IsNot(TokenKind.RightBracket) && IsNot(TokenKind.Eof))
+            {
+                elements.Add(ParseExpression());
+                CanConsume(TokenKind.Comma);
+            }
+            Consume(TokenKind.RightBracket);
+            return new ArrayLiteralExpression(elements);
+        }
+
+        // string literal
+        if (token.Kind == TokenKind.StringLiteral)
+        {
+            Advance();
+            return new StringLiteralExpression(token.Text);
+        }
+
         // struct literal: { field: expr [, field: expr]* }
         if (CanConsume(TokenKind.LeftBrace))
         {

@@ -8,6 +8,7 @@ public sealed class SemanticAnalyzer
     private readonly Module _module;
     private readonly Dictionary<string, SuruType> _symbols = new();
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _structSymbols = new();
+    private readonly Dictionary<string, SuruType> _arrayElementTypes = new();
     private readonly Dictionary<string, (IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)> _functions = new();
     private readonly List<string> _errors = [];
     private SuruType? _currentFunctionReturnType = null;
@@ -64,6 +65,8 @@ public sealed class SemanticAnalyzer
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
         "Struct"  => SuruType.Struct,
+        "Array"   => SuruType.Array,
+        "String"  => SuruType.String,
         _         => null,
     };
 
@@ -75,8 +78,10 @@ public sealed class SemanticAnalyzer
             {
                 var outerSymbols = new Dictionary<string, SuruType>(_symbols);
                 var outerStructSymbols = new Dictionary<string, List<(string, SuruType)>>(_structSymbols);
+                var outerArrayElementTypes = new Dictionary<string, SuruType>(_arrayElementTypes);
                 _symbols.Clear();
                 _structSymbols.Clear();
+                _arrayElementTypes.Clear();
 
                 if (_functions.TryGetValue(fn.Name, out var sig))
                 {
@@ -102,8 +107,10 @@ public sealed class SemanticAnalyzer
 
                 _symbols.Clear();
                 _structSymbols.Clear();
+                _arrayElementTypes.Clear();
                 foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
                 foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
+                foreach (var kv in outerArrayElementTypes) _arrayElementTypes[kv.Key] = kv.Value;
                 _currentFunctionReturnType = null;
                 _currentFunctionIsVoid = false;
                 break;
@@ -139,6 +146,8 @@ public sealed class SemanticAnalyzer
                         _symbols[let.Name] = type.Value;
                         if (type.Value == SuruType.Struct)
                             PropagateStructMeta(let.Name, let.Value);
+                        if (type.Value == SuruType.Array)
+                            PropagateArrayMeta(let.Name, let.Value);
                     }
                 }
                 break;
@@ -165,6 +174,27 @@ public sealed class SemanticAnalyzer
 
             case ExpressionStatement expr:
                 AnalyzeExpression(expr.Expression);
+                break;
+        }
+    }
+
+    private void PropagateArrayMeta(string varName, Expression value)
+    {
+        switch (value)
+        {
+            case ArrayLiteralExpression arr when arr.Elements.Count > 0:
+            {
+                var elemType = InferType(arr.Elements[0]);
+                if (elemType.HasValue) _arrayElementTypes[varName] = elemType.Value;
+                break;
+            }
+            case VariableReferenceExpression v when _arrayElementTypes.TryGetValue(v.Name, out var et):
+                _arrayElementTypes[varName] = et;
+                break;
+            case CallExpression { Name: "clone", Args.Count: 1 } call
+                when call.Args[0] is VariableReferenceExpression src
+                  && _arrayElementTypes.TryGetValue(src.Name, out var srcEt):
+                _arrayElementTypes[varName] = srcEt;
                 break;
         }
     }
@@ -200,8 +230,29 @@ public sealed class SemanticAnalyzer
         switch (expr)
         {
             case VariableReferenceExpression varRef:
-                if (!_symbols.ContainsKey(varRef.Name))
+                // Type names used as static-method receivers (e.g. Int64.from(...)) are not variables.
+                if (varRef.Name is not ("Int64" or "Float64" or "Bool") && !_symbols.ContainsKey(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
+                break;
+
+            case ArrayLiteralExpression arrLit:
+            {
+                foreach (var elem in arrLit.Elements)
+                    AnalyzeExpression(elem);
+                if (arrLit.Elements.Count > 1)
+                {
+                    var firstType = InferType(arrLit.Elements[0]);
+                    foreach (var elem in arrLit.Elements.Skip(1))
+                    {
+                        var et = InferType(elem);
+                        if (firstType.HasValue && et.HasValue && et.Value != firstType.Value)
+                            _errors.Add($"{_module.SourcePath}: array elements must have the same type");
+                    }
+                }
+                break;
+            }
+
+            case StringLiteralExpression:
                 break;
 
             case StructLiteralExpression lit:
@@ -279,12 +330,27 @@ public sealed class SemanticAnalyzer
         IntLiteral                 => SuruType.Int64,
         FloatLiteral               => SuruType.Float64,
         StructLiteralExpression    => SuruType.Struct,
+        ArrayLiteralExpression     => SuruType.Array,
+        StringLiteralExpression    => SuruType.String,
         FieldAccessExpression fa when fa.Receiver is VariableReferenceExpression fv
             && _structSymbols.TryGetValue(fv.Name, out var fields)
             => fields.FirstOrDefault(f => f.Name == fa.FieldName) is var field && field.Name != null
                 ? field.Type : null,
         VariableReferenceExpression v => _symbols.TryGetValue(v.Name, out var t) ? t : null,
         MethodCallExpression { MethodName: "equals" or "lessThan" } => SuruType.Bool,
+        MethodCallExpression { MethodName: "len" }   => SuruType.Int64,
+        MethodCallExpression { MethodName: "toString" } => SuruType.String,
+        MethodCallExpression { MethodName: "at" } m
+            when m.Receiver is VariableReferenceExpression rv
+              && _arrayElementTypes.TryGetValue(rv.Name, out var elemType) => elemType,
+        MethodCallExpression { MethodName: "at" } m
+            when InferType(m.Receiver) == SuruType.String => SuruType.Int64,
+        MethodCallExpression { MethodName: "slice" or "append" } m
+            when InferType(m.Receiver) == SuruType.String => SuruType.String,
+        MethodCallExpression { MethodName: "from" } m
+            when m.Receiver is VariableReferenceExpression { Name: "Int64" }   => SuruType.Int64,
+        MethodCallExpression { MethodName: "from" } m
+            when m.Receiver is VariableReferenceExpression { Name: "Float64" } => SuruType.Float64,
         MethodCallExpression m     => InferType(m.Receiver),
         UnaryExpression            => SuruType.Bool,
         BinaryExpression           => SuruType.Bool,

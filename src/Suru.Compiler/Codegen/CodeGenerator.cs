@@ -13,14 +13,31 @@ public sealed class CodeGenerator
     private readonly LLVMTypeRef _printfType;
     private readonly LLVMTypeRef _ptrType;
     private LLVMTypeRef _fieldNodeType;
+    private LLVMTypeRef _seqNodeType;  // %suru.Seq = { i64, ptr } — shared layout for Array and String headers
     private LLVMValueRef _mallocFn;
     private LLVMTypeRef _mallocFnType;
     private LLVMValueRef _freeFn;
     private LLVMTypeRef _freeFnType;
+    private LLVMValueRef _reallocFn;
+    private LLVMTypeRef _reallocFnType;
+    private LLVMValueRef _memcpyFn;
+    private LLVMTypeRef _memcpyFnType;
+    private LLVMValueRef _strcmpFn;
+    private LLVMTypeRef _strcmpFnType;
+    private LLVMValueRef _strtolFn;
+    private LLVMTypeRef _strtolFnType;
+    private LLVMValueRef _strtodFn;
+    private LLVMTypeRef _strtodFnType;
+    private LLVMValueRef _sprintfFn;
+    private LLVMTypeRef _sprintfFnType;
+    private LLVMValueRef _strlenFn;
+    private LLVMTypeRef _strlenFnType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
     private readonly Dictionary<string, (LLVMValueRef Fn, LLVMTypeRef FnType, SuruType? ReturnType)> _userFunctions = new();
     // Struct field metadata: variable name → ordered list of (fieldName, fieldType)
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _varStructMeta = new();
+    // Array element type metadata: variable name → element SuruType
+    private readonly Dictionary<string, SuruType> _varArrayMeta = new();
 
     private CodeGenerator(LLVMModuleRef llvmModule, LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, LLVMTypeRef ptrType)
     {
@@ -52,6 +69,31 @@ public sealed class CodeGenerator
 
         gen._freeFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [ptrType]);
         gen._freeFn = llvmModule.AddFunction("free", gen._freeFnType);
+
+        gen._reallocFnType = LLVMTypeRef.CreateFunction(ptrType, [ptrType, LLVMTypeRef.Int64]);
+        gen._reallocFn = llvmModule.AddFunction("realloc", gen._reallocFnType);
+
+        gen._memcpyFnType = LLVMTypeRef.CreateFunction(ptrType, [ptrType, ptrType, LLVMTypeRef.Int64]);
+        gen._memcpyFn = llvmModule.AddFunction("memcpy", gen._memcpyFnType);
+
+        gen._strcmpFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType, ptrType]);
+        gen._strcmpFn = llvmModule.AddFunction("strcmp", gen._strcmpFnType);
+
+        gen._strtolFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType, ptrType, LLVMTypeRef.Int32]);
+        gen._strtolFn = llvmModule.AddFunction("strtol", gen._strtolFnType);
+
+        gen._strtodFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Double, [ptrType, ptrType]);
+        gen._strtodFn = llvmModule.AddFunction("strtod", gen._strtodFnType);
+
+        gen._sprintfFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType, ptrType], true);
+        gen._sprintfFn = llvmModule.AddFunction("sprintf", gen._sprintfFnType);
+
+        gen._strlenFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType]);
+        gen._strlenFn = llvmModule.AddFunction("strlen", gen._strlenFnType);
+
+        // %suru.Seq = type { i64, ptr } — shared layout for Array and String headers
+        gen._seqNodeType = context.CreateNamedStruct("suru.Seq");
+        gen._seqNodeType.StructSetBody([LLVMTypeRef.Int64, ptrType], false);
 
         // Pass 1: declare all user-defined functions (enables forward references and recursion).
         foreach (var stmt in module.Statements)
@@ -103,8 +145,10 @@ public sealed class CodeGenerator
 
         var outerVars = new Dictionary<string, (LLVMValueRef Alloca, SuruType Type)>(_vars);
         var outerStructMeta = new Dictionary<string, List<(string Name, SuruType Type)>>(_varStructMeta);
+        var outerArrayMeta = new Dictionary<string, SuruType>(_varArrayMeta);
         _vars.Clear();
         _varStructMeta.Clear();
+        _varArrayMeta.Clear();
 
         for (int i = 0; i < fn.Parameters.Count; i++)
         {
@@ -123,8 +167,10 @@ public sealed class CodeGenerator
 
         _vars.Clear();
         _varStructMeta.Clear();
+        _varArrayMeta.Clear();
         foreach (var kv in outerVars) _vars[kv.Key] = kv.Value;
         foreach (var kv in outerStructMeta) _varStructMeta[kv.Key] = kv.Value;
+        foreach (var kv in outerArrayMeta) _varArrayMeta[kv.Key] = kv.Value;
     }
 
     private static SuruType? ResolveTypeName(string name) => name switch
@@ -133,6 +179,8 @@ public sealed class CodeGenerator
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
         "Struct"  => SuruType.Struct,
+        "Array"   => SuruType.Array,
+        "String"  => SuruType.String,
         _         => null,
     };
 
@@ -160,6 +208,8 @@ public sealed class CodeGenerator
                 _vars[let.Name] = (alloca, letType);
                 if (letType == SuruType.Struct)
                     PropagateStructMeta(let.Name, let.Value);
+                if (letType == SuruType.Array)
+                    PropagateArrayMeta(let.Name, let.Value);
                 break;
 
             case FieldAssignmentStatement fieldAssign:
@@ -218,6 +268,12 @@ public sealed class CodeGenerator
             case StructLiteralExpression structLit:
                 return EmitStructLiteral(structLit);
 
+            case ArrayLiteralExpression arrLit:
+                return EmitArrayLiteral(arrLit);
+
+            case StringLiteralExpression strLit:
+                return EmitStringLiteral(strLit);
+
             case FieldAccessExpression fa:
             {
                 var nodePtr = LoadStructPtr(fa.Receiver);
@@ -268,13 +324,18 @@ public sealed class CodeGenerator
         if (call.Name == "clone" && call.Args.Count == 1 &&
             call.Args[0] is VariableReferenceExpression cloneSrc)
         {
+            if (_varArrayMeta.ContainsKey(cloneSrc.Name))
+                return EmitCloneArray(cloneSrc.Name);
             return EmitClone(cloneSrc.Name);
         }
 
         if (call.Name == "drop" && call.Args.Count == 1 &&
             call.Args[0] is VariableReferenceExpression dropSrc)
         {
-            EmitDrop(dropSrc.Name);
+            if (_varArrayMeta.ContainsKey(dropSrc.Name))
+                EmitDropArray(dropSrc.Name);
+            else
+                EmitDrop(dropSrc.Name);
             return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
         }
 
@@ -292,7 +353,26 @@ public sealed class CodeGenerator
 
     private (LLVMValueRef Value, SuruType Type) EmitMethodCall(MethodCallExpression method)
     {
+        // Static-method calls on type names: Int64.from(str), Float64.from(str)
+        if (method.Receiver is VariableReferenceExpression typeRef &&
+            typeRef.Name is "Int64" or "Float64" or "Bool")
+        {
+            return EmitTypeStaticMethod(typeRef.Name, method.MethodName, method.Args);
+        }
+
         var (receiver, receiverType) = EmitValue(method.Receiver);
+
+        // Array methods
+        if (receiverType == SuruType.Array)
+            return EmitArrayMethod(receiver, method);
+
+        // String methods
+        if (receiverType == SuruType.String)
+            return EmitStringMethod(receiver, method);
+
+        // Primitive toString()
+        if (method.MethodName == "toString" && method.Args.Count == 0)
+            return EmitToString(receiver, receiverType);
 
         if (method.MethodName == "invert" && method.Args.Count == 0)
         {
@@ -325,6 +405,303 @@ public sealed class CodeGenerator
         };
 
         return (value, isBoolResult ? SuruType.Bool : receiverType);
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitArrayMethod(LLVMValueRef headerPtr, MethodCallExpression method)
+    {
+        var (len, data) = LoadSeqHeader(headerPtr);
+        var falseVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false);
+
+        switch (method.MethodName)
+        {
+            case "len":
+                return (len, SuruType.Int64);
+
+            case "at":
+            {
+                var (idxVal, _) = EmitValue(method.Args[0]);
+                var slot = _builder.BuildGEP2(LLVMTypeRef.Int64, data, new[] { idxVal }, "arr_slot");
+                var raw = _builder.BuildLoad2(LLVMTypeRef.Int64, slot, "arr_raw");
+                // Determine element type from receiver variable if available
+                SuruType elemType = SuruType.Int64;
+                if (method.Receiver is VariableReferenceExpression rv &&
+                    _varArrayMeta.TryGetValue(rv.Name, out var et))
+                    elemType = et;
+                return (FromI64(raw, elemType), elemType);
+            }
+
+            case "set":
+            {
+                var (newVal, newValType) = EmitValue(method.Args[0]);
+                var (idxVal, _) = EmitValue(method.Args[1]);
+                var slot = _builder.BuildGEP2(LLVMTypeRef.Int64, data, new[] { idxVal }, "arr_slot");
+                _builder.BuildStore(ToI64(newVal, newValType), slot);
+                return (falseVal, SuruType.Bool);
+            }
+
+            case "add":
+            {
+                var (newElem, newElemType) = EmitValue(method.Args[0]);
+                // realloc data to (len+1)*8
+                var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+                var newLen = _builder.BuildAdd(len, one64, "new_len");
+                var eight = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 8, false);
+                var newSize = _builder.BuildMul(newLen, eight, "new_size");
+                var newData = _builder.BuildCall2(_reallocFnType, _reallocFn, new[] { data, newSize }, "new_data");
+                // Store new element at [len]
+                var lastSlot = _builder.BuildGEP2(LLVMTypeRef.Int64, newData, new[] { len }, "last_slot");
+                _builder.BuildStore(ToI64(newElem, newElemType), lastSlot);
+                // Update header: data ptr and len
+                var dataPtrSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 1, "data_slot");
+                _builder.BuildStore(newData, dataPtrSlot);
+                var lenSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 0, "len_slot");
+                _builder.BuildStore(newLen, lenSlot);
+                return (falseVal, SuruType.Bool);
+            }
+
+            case "equals":
+            {
+                var (otherHdr, _) = EmitValue(method.Args[0]);
+                var (otherLen, otherData) = LoadSeqHeader(otherHdr);
+                // Check lengths equal
+                var lenEq = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, len, otherLen, "len_eq");
+                var fn = _builder.InsertBlock.Parent;
+                var eqBlock = fn.AppendBasicBlock("arr_eq_check");
+                var mergeBlock = fn.AppendBasicBlock("arr_eq_merge");
+                _builder.BuildCondBr(lenEq, eqBlock, mergeBlock);
+                // In eqBlock: compare data via memcmp
+                _builder.PositionAtEnd(eqBlock);
+                var eight = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 8, false);
+                var byteCount = _builder.BuildMul(len, eight, "byte_count");
+                var cmpResult = _builder.BuildCall2(_strcmpFnType, _strcmpFn,
+                    new[] { data, otherData }, "cmp"); // strcmp is wrong for binary data; use memcmp
+                // Actually, we need memcmp. Let's build it using memcpy trick — emit memcmp inline.
+                // Reuse _memcpyFn as memcmp won't work since _memcpyFn is memcpy.
+                // We'll declare memcmp separately. For now, cast: since memcpy & memcmp have different signatures,
+                // use a direct call via builder with memcmp.
+                // Emit: memcmp returns i32; check == 0
+                var memcmpType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [_ptrType, _ptrType, LLVMTypeRef.Int64]);
+                var memcmpFn = _llvmModule.GetNamedFunction("memcmp");
+                if (memcmpFn.Handle == IntPtr.Zero)
+                    memcmpFn = _llvmModule.AddFunction("memcmp", memcmpType);
+                var memcmpResult = _builder.BuildCall2(memcmpType, memcmpFn, new[] { data, otherData, byteCount }, "memcmp");
+                var zero32 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false);
+                var dataEq = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, memcmpResult, zero32, "data_eq");
+                _builder.BuildBr(mergeBlock);
+                // Merge: phi(false from lenNeq, dataEq from eqBlock)
+                _builder.PositionAtEnd(mergeBlock);
+                var phi = _builder.BuildPhi(LLVMTypeRef.Int1, "arr_eq");
+                phi.AddIncoming(
+                    new[] { LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), dataEq },
+                    new[] { fn.GetBasicBlocks()[fn.BasicBlocksCount - 3], eqBlock },
+                    2);
+                return (phi, SuruType.Bool);
+            }
+
+            case "slice":
+            {
+                var (fromVal, _) = EmitValue(method.Args[0]);
+                var (toVal, _)   = EmitValue(method.Args[1]);
+                var newLen = _builder.BuildSub(toVal, fromVal, "slice_len");
+                var eight = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 8, false);
+                var byteCount = _builder.BuildMul(newLen, eight, "slice_bytes");
+                var srcPtr = _builder.BuildGEP2(LLVMTypeRef.Int64, data, new[] { fromVal }, "slice_src");
+                var newData = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { byteCount }, "slice_data");
+                _builder.BuildCall2(_memcpyFnType, _memcpyFn, new[] { newData, srcPtr, byteCount }, "");
+                var hdrSize = SeqHeaderSize();
+                var newHdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "slice_hdr");
+                var lSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 0, "");
+                _builder.BuildStore(newLen, lSlot);
+                var dSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 1, "");
+                _builder.BuildStore(newData, dSlot);
+                // Propagate element type
+                if (method.Receiver is VariableReferenceExpression rv &&
+                    _varArrayMeta.TryGetValue(rv.Name, out var et))
+                    _pendingArrayMeta = et;
+                return (newHdr, SuruType.Array);
+            }
+
+            default:
+                throw new InvalidOperationException($"Unknown array method '{method.MethodName}'");
+        }
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitStringMethod(LLVMValueRef headerPtr, MethodCallExpression method)
+    {
+        var (len, data) = LoadSeqHeader(headerPtr);
+
+        switch (method.MethodName)
+        {
+            case "len":
+                return (len, SuruType.Int64);
+
+            case "at":
+            {
+                var (idxVal, _) = EmitValue(method.Args[0]);
+                var slot = _builder.BuildGEP2(LLVMTypeRef.Int8, data, new[] { idxVal }, "char_slot");
+                var ch = _builder.BuildLoad2(LLVMTypeRef.Int8, slot, "char");
+                var extended = _builder.BuildZExt(ch, LLVMTypeRef.Int64, "char_i64");
+                return (extended, SuruType.Int64);
+            }
+
+            case "equals":
+            {
+                var (otherHdr, _) = EmitValue(method.Args[0]);
+                var (_, otherData) = LoadSeqHeader(otherHdr);
+                var cmp = _builder.BuildCall2(_strcmpFnType, _strcmpFn, new[] { data, otherData }, "strcmp");
+                var zero = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false);
+                var eq = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cmp, zero, "str_eq");
+                return (eq, SuruType.Bool);
+            }
+
+            case "append":
+            {
+                var (otherHdr, _) = EmitValue(method.Args[0]);
+                var (otherLen, otherData) = LoadSeqHeader(otherHdr);
+                var newLen = _builder.BuildAdd(len, otherLen, "app_len");
+                var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+                var allocLen = _builder.BuildAdd(newLen, one64, "alloc_len"); // +1 for null
+                var newBuf = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { allocLen }, "app_buf");
+                _builder.BuildCall2(_memcpyFnType, _memcpyFn, new[] { newBuf, data, len }, "");
+                var midPtr = _builder.BuildGEP2(LLVMTypeRef.Int8, newBuf, new[] { len }, "mid_ptr");
+                _builder.BuildCall2(_memcpyFnType, _memcpyFn, new[] { midPtr, otherData, otherLen }, "");
+                // null-terminate
+                var nullTermSlot = _builder.BuildGEP2(LLVMTypeRef.Int8, newBuf, new[] { newLen }, "null_slot");
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, 0, false), nullTermSlot);
+                // Build header
+                var hdrSize = SeqHeaderSize();
+                var newHdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "app_hdr");
+                var lSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 0, "");
+                _builder.BuildStore(newLen, lSlot);
+                var dSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 1, "");
+                _builder.BuildStore(newBuf, dSlot);
+                return (newHdr, SuruType.String);
+            }
+
+            case "slice":
+            {
+                var (fromVal, _) = EmitValue(method.Args[0]);
+                var (toVal, _)   = EmitValue(method.Args[1]);
+                var newLen = _builder.BuildSub(toVal, fromVal, "sslice_len");
+                var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+                var allocLen = _builder.BuildAdd(newLen, one64, "sslice_alloc");
+                var srcPtr = _builder.BuildGEP2(LLVMTypeRef.Int8, data, new[] { fromVal }, "sslice_src");
+                var newBuf = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { allocLen }, "sslice_buf");
+                _builder.BuildCall2(_memcpyFnType, _memcpyFn, new[] { newBuf, srcPtr, newLen }, "");
+                var nullSlot = _builder.BuildGEP2(LLVMTypeRef.Int8, newBuf, new[] { newLen }, "sslice_null");
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, 0, false), nullSlot);
+                var hdrSize = SeqHeaderSize();
+                var newHdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "sslice_hdr");
+                var lSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 0, "");
+                _builder.BuildStore(newLen, lSlot);
+                var dSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 1, "");
+                _builder.BuildStore(newBuf, dSlot);
+                return (newHdr, SuruType.String);
+            }
+
+            case "toString":
+                return (headerPtr, SuruType.String);
+
+            default:
+                throw new InvalidOperationException($"Unknown string method '{method.MethodName}'");
+        }
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitTypeStaticMethod(
+        string typeName, string methodName, IReadOnlyList<Expression> args)
+    {
+        switch (typeName, methodName)
+        {
+            case ("Int64", "from"):
+            {
+                var (strHdr, _) = EmitValue(args[0]);
+                var (_, data) = LoadSeqHeader(strHdr);
+                var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
+                var base10 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 10, false);
+                var result = _builder.BuildCall2(_strtolFnType, _strtolFn, new[] { data, nullPtr, base10 }, "strtol");
+                return (result, SuruType.Int64);
+            }
+            case ("Float64", "from"):
+            {
+                var (strHdr, _) = EmitValue(args[0]);
+                var (_, data) = LoadSeqHeader(strHdr);
+                var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
+                var result = _builder.BuildCall2(_strtodFnType, _strtodFn, new[] { data, nullPtr }, "strtod");
+                return (result, SuruType.Float64);
+            }
+            default:
+                throw new InvalidOperationException($"Unknown static method '{typeName}.{methodName}'");
+        }
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitToString(LLVMValueRef val, SuruType type)
+    {
+        var bufSize = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 64, false);
+        var buf = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { bufSize }, "tostr_buf");
+
+        switch (type)
+        {
+            case SuruType.Int64:
+            {
+                var fmt = _builder.BuildGlobalStringPtr("%lld", "");
+                _builder.BuildCall2(_sprintfFnType, _sprintfFn, new LLVMValueRef[] { buf, fmt, val }, "");
+                break;
+            }
+            case SuruType.Float64:
+            {
+                var fmt = _builder.BuildGlobalStringPtr("%g", "");
+                _builder.BuildCall2(_sprintfFnType, _sprintfFn, new LLVMValueRef[] { buf, fmt, val }, "");
+                break;
+            }
+            case SuruType.Bool:
+            {
+                var trueStr  = _builder.BuildGlobalStringPtr("true", "");
+                var falseStr = _builder.BuildGlobalStringPtr("false", "");
+                var selected = _builder.BuildSelect(val, trueStr, falseStr, "");
+                var fmtS = _builder.BuildGlobalStringPtr("%s", "");
+                _builder.BuildCall2(_sprintfFnType, _sprintfFn, new LLVMValueRef[] { buf, fmtS, selected }, "");
+                break;
+            }
+            default:
+                throw new InvalidOperationException($"toString not supported for {type}");
+        }
+
+        // strlen(buf) to get actual length
+        var strLen = _builder.BuildCall2(_strlenFnType, _strlenFn, new[] { buf }, "tostr_len");
+        var hdrSize = SeqHeaderSize();
+        var hdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "tostr_hdr");
+        var lSlot = _builder.BuildStructGEP2(_seqNodeType, hdr, 0, "");
+        _builder.BuildStore(strLen, lSlot);
+        var dSlot = _builder.BuildStructGEP2(_seqNodeType, hdr, 1, "");
+        _builder.BuildStore(buf, dSlot);
+        return (hdr, SuruType.String);
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitCloneArray(string srcVarName)
+    {
+        var (srcHdr, _) = EmitValue(new VariableReferenceExpression(srcVarName));
+        var (len, data) = LoadSeqHeader(srcHdr);
+        var eight = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 8, false);
+        var byteCount = _builder.BuildMul(len, eight, "clone_bytes");
+        var newData = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { byteCount }, "clone_data");
+        _builder.BuildCall2(_memcpyFnType, _memcpyFn, new[] { newData, data, byteCount }, "");
+        var hdrSize = SeqHeaderSize();
+        var newHdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "clone_hdr");
+        var lSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 0, "");
+        _builder.BuildStore(len, lSlot);
+        var dSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 1, "");
+        _builder.BuildStore(newData, dSlot);
+        if (_varArrayMeta.TryGetValue(srcVarName, out var et))
+            _pendingArrayMeta = et;
+        return (newHdr, SuruType.Array);
+    }
+
+    private void EmitDropArray(string varName)
+    {
+        var (hdr, _) = EmitValue(new VariableReferenceExpression(varName));
+        var (_, data) = LoadSeqHeader(hdr);
+        _builder.BuildCall2(_freeFnType, _freeFn, new[] { data }, "");
+        _builder.BuildCall2(_freeFnType, _freeFn, new[] { hdr }, "");
     }
 
     // Emit a match used as a statement (arms may have side effects; no value produced).
@@ -487,6 +864,14 @@ public sealed class CodeGenerator
                 _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { fmt, val }, "");
                 break;
             }
+            case SuruType.String:
+            {
+                var fmt = _builder.BuildGlobalStringPtr("%s\n", "");
+                var dataPtr = _builder.BuildStructGEP2(_seqNodeType, val, 1, "str_data_slot");
+                var data = _builder.BuildLoad2(_ptrType, dataPtr, "str_data");
+                _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { fmt, data }, "");
+                break;
+            }
         }
     }
 
@@ -496,6 +881,8 @@ public sealed class CodeGenerator
         SuruType.Int64   => LLVMTypeRef.Int64,
         SuruType.Float64 => LLVMTypeRef.Double,
         SuruType.Struct  => _ptrType,
+        SuruType.Array   => _ptrType,
+        SuruType.String  => _ptrType,
         _ => throw new InvalidOperationException($"No LLVM type for {type}"),
     };
 
@@ -675,7 +1062,108 @@ public sealed class CodeGenerator
         }
     }
 
-    // sizeof(%suru.Field) via GEP-from-null trick: getelementptr(..., null, 1) → ptrtoint
+    // ── Array helpers ─────────────────────────────────────────────────────────
+
+    private SuruType? _pendingArrayMeta;
+
+    private void PropagateArrayMeta(string varName, Expression value)
+    {
+        switch (value)
+        {
+            case ArrayLiteralExpression when _pendingArrayMeta.HasValue:
+                _varArrayMeta[varName] = _pendingArrayMeta.Value;
+                _pendingArrayMeta = null;
+                break;
+            case VariableReferenceExpression v when _varArrayMeta.TryGetValue(v.Name, out var et):
+                _varArrayMeta[varName] = et;
+                break;
+            case CallExpression { Name: "clone" } when _pendingArrayMeta.HasValue:
+                _varArrayMeta[varName] = _pendingArrayMeta.Value;
+                _pendingArrayMeta = null;
+                break;
+        }
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitArrayLiteral(ArrayLiteralExpression lit)
+    {
+        var headerSize = SeqHeaderSize();
+        var headerPtr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { headerSize }, "arr_hdr");
+
+        SuruType elemType = SuruType.Int64; // default for empty array
+        LLVMValueRef dataPtr;
+
+        if (lit.Elements.Count == 0)
+        {
+            dataPtr = LLVMValueRef.CreateConstNull(_ptrType);
+        }
+        else
+        {
+            var (firstVal, firstType) = EmitValue(lit.Elements[0]);
+            elemType = firstType;
+
+            var count = (ulong)lit.Elements.Count;
+            var dataSize = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, count * 8, false);
+            dataPtr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { dataSize }, "arr_data");
+
+            // Store first element
+            var slot0 = _builder.BuildGEP2(LLVMTypeRef.Int64, dataPtr, new[] { LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0, false) }, "");
+            _builder.BuildStore(ToI64(firstVal, firstType), slot0);
+
+            // Store remaining elements
+            for (int i = 1; i < lit.Elements.Count; i++)
+            {
+                var (elemVal, elemValType) = EmitValue(lit.Elements[i]);
+                var idx = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i, false);
+                var slot = _builder.BuildGEP2(LLVMTypeRef.Int64, dataPtr, new[] { idx }, "");
+                _builder.BuildStore(ToI64(elemVal, elemValType), slot);
+            }
+        }
+
+        // Store len
+        var lenSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 0, "arr_len_slot");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)lit.Elements.Count, false), lenSlot);
+        // Store data ptr
+        var dataPtrSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 1, "arr_data_slot");
+        _builder.BuildStore(dataPtr, dataPtrSlot);
+
+        _pendingArrayMeta = elemType;
+        return (headerPtr, SuruType.Array);
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitStringLiteral(StringLiteralExpression lit)
+    {
+        var staticData = _builder.BuildGlobalStringPtr(lit.Value, "str_data");
+        var headerSize = SeqHeaderSize();
+        var headerPtr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { headerSize }, "str_hdr");
+
+        var lenSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 0, "str_len_slot");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)lit.Value.Length, false), lenSlot);
+        var dataPtrSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 1, "str_data_slot");
+        _builder.BuildStore(staticData, dataPtrSlot);
+
+        return (headerPtr, SuruType.String);
+    }
+
+    // Helper: load len and data ptr from a %suru.Seq header
+    private (LLVMValueRef Len, LLVMValueRef Data) LoadSeqHeader(LLVMValueRef headerPtr)
+    {
+        var lenSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 0, "seq_len_slot");
+        var len = _builder.BuildLoad2(LLVMTypeRef.Int64, lenSlot, "seq_len");
+        var dataPtrSlot = _builder.BuildStructGEP2(_seqNodeType, headerPtr, 1, "seq_data_slot");
+        var data = _builder.BuildLoad2(_ptrType, dataPtrSlot, "seq_data");
+        return (len, data);
+    }
+
+    // sizeof(%suru.Seq) via GEP-from-null trick
+    private LLVMValueRef SeqHeaderSize()
+    {
+        var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
+        var one = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+        var gep = _builder.BuildGEP2(_seqNodeType, nullPtr, new[] { one }, "");
+        return _builder.BuildPtrToInt(gep, LLVMTypeRef.Int64, "seq_size");
+    }
+
+    // ── sizeof(%suru.Field) via GEP-from-null trick: getelementptr(..., null, 1) → ptrtoint
     private LLVMValueRef FieldNodeSize()
     {
         var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
