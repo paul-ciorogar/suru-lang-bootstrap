@@ -1,0 +1,11 @@
+fn fibonacci(n Int64) Int64 {
+  return match n.lessThan(2) {
+    true: n,
+    _: fibonacci(n.take(1)).add(fibonacci(n.take(2)))
+  }
+}
+
+printLn(fibonacci(0))
+printLn(fibonacci(1))
+printLn(fibonacci(5))
+printLn(fibonacci(10))

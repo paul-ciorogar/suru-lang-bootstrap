@@ -21,4 +21,7 @@ public enum TokenKind
     LeftBrace,
     RightBrace,
     Wildcard,
+    Fn,
+    Return,
+    Void,
 }

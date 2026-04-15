@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added Functions
+- Lex: `fn`, `return`, `void` keywords
+- AST: `FunctionDeclaration` (with `FunctionParameter`) and `ReturnStatement` nodes
+- Parse: `fn name(param Type, ...) ReturnType { body }` top-level function declarations; `return expr` and bare `return` statements
+- Semantic: two-pass analysis — first pass registers all function signatures to support recursion and forward references; second pass type-checks bodies; function-local variable scope; call-site arity and argument type validation; non-void functions require at least one `return`
+- Codegen: three-pass `Generate()` — declare all LLVM function signatures (pass 1), emit function bodies (pass 2), emit `main` (pass 3); parameters materialized via `alloca`/`store`; user-defined functions dispatched from `EmitValue` via `BuildCall2`
+- Test fixture `tests/fixtures/fibonacci/main.suru`; `FunctionTests` integration test
+- **Milestone:** recursive `fibonacci(n Int64) Int64` compiles and runs correctly
+
 ### Added Control Flow
 - Lex: `match` keyword; `{`, `}` tokens; `_` wildcard token
 - AST: `MatchExpression` and `MatchArm` nodes; wildcard arm represented as `Pattern = null`

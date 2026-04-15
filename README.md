@@ -64,3 +64,65 @@ printLn(true and false)   // false
 printLn(true or false)    // true
 printLn(not true)         // false
 ```
+
+### Comparison methods
+
+| Method | Description | Example |
+|---|---|---|
+| `equals(n)` | equality | `3.equals(3)` → `true` |
+| `lessThan(n)` | less-than | `5.lessThan(10)` → `true` |
+
+Works on `Int64`, `Float64`, and `Bool`. Always returns `Bool`.
+
+### Control flow — match
+
+`match` is an expression that tests a `Bool` condition against a list of arms. Each arm is `pattern: body`. The wildcard `_` catches any unmatched case.
+
+Statement form (arms produce side effects):
+
+```suru
+let x: true
+match x { true: printLn(1), _: printLn(0) }
+```
+
+Expression form (arms produce a value):
+
+```suru
+let y: match x { true: 1, _: 0 }
+printLn(y)
+```
+
+Arms can be separated by `,` or newlines. The condition must be `Bool`.
+
+### Functions
+
+Declare with `fn`. Parameters are `name Type` pairs. The return type follows the parameter list:
+
+```suru
+fn add(a Int64, b Int64) Int64 {
+  return a.add(b)
+}
+
+printLn(add(3, 4))
+```
+
+Use `void` for functions that return no value:
+
+```suru
+fn printDouble(n Int64) void {
+  printLn(n.add(n))
+}
+```
+
+Recursion is supported:
+
+```suru
+fn fibonacci(n Int64) Int64 {
+  return match n.lessThan(2) {
+    true: n,
+    _: fibonacci(n.take(1)).add(fibonacci(n.take(2)))
+  }
+}
+
+printLn(fibonacci(10))
+```

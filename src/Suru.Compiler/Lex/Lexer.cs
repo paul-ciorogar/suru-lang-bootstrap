@@ -58,9 +58,12 @@ public sealed class Lexer(string source)
             "not"   => TokenKind.Not,
             "and"   => TokenKind.And,
             "or"    => TokenKind.Or,
-            "match" => TokenKind.Match,
-            "_"     => TokenKind.Wildcard,
-            _       => TokenKind.Identifier,
+            "match"  => TokenKind.Match,
+            "_"      => TokenKind.Wildcard,
+            "fn"     => TokenKind.Fn,
+            "return" => TokenKind.Return,
+            "void"   => TokenKind.Void,
+            _        => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);
     }

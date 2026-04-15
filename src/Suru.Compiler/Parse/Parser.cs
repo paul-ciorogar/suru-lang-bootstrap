@@ -35,6 +35,12 @@ public sealed class Parser
 
     private Statement ParseStatement()
     {
+        if (CanConsume(TokenKind.Fn))
+            return ParseFunctionDeclaration();
+
+        if (CanConsume(TokenKind.Return))
+            return ParseReturnStatement();
+
         // let <name> [<TypeAnnotation>] : <expr>
         if (CanConsume(TokenKind.Let))
         {
@@ -67,6 +73,38 @@ public sealed class Parser
         }
 
         return new ExpressionStatement(ParseExpression());
+    }
+
+    private FunctionDeclaration ParseFunctionDeclaration()
+    {
+        var nameToken = Consume(TokenKind.Identifier);
+        Consume(TokenKind.LeftParen);
+        var parameters = new List<FunctionParameter>();
+        while (IsNot(TokenKind.RightParen) && IsNot(TokenKind.Eof))
+        {
+            var paramName = Consume(TokenKind.Identifier);
+            var paramType = Consume(TokenKind.Identifier);
+            parameters.Add(new FunctionParameter(paramName.Text, paramType.Text));
+            CanConsume(TokenKind.Comma);
+        }
+        Consume(TokenKind.RightParen);
+
+        string returnTypeName = CanConsume(TokenKind.Void) ? "void" : Consume(TokenKind.Identifier).Text;
+
+        Consume(TokenKind.LeftBrace);
+        var body = new List<Statement>();
+        while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+            body.Add(ParseStatement());
+        Consume(TokenKind.RightBrace);
+
+        return new FunctionDeclaration(nameToken.Text, parameters, returnTypeName, body);
+    }
+
+    private ReturnStatement ParseReturnStatement()
+    {
+        if (Is(TokenKind.RightBrace) || Is(TokenKind.Eof))
+            return new ReturnStatement(null);
+        return new ReturnStatement(ParseExpression());
     }
 
     // Parse the rest of an expression when the leading identifier has already been consumed.

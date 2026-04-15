@@ -7,13 +7,16 @@ namespace Suru.Compiler.Codegen;
 
 public sealed class CodeGenerator
 {
+    private readonly LLVMModuleRef _llvmModule;
     private readonly LLVMBuilderRef _builder;
     private readonly LLVMValueRef _printfFn;
     private readonly LLVMTypeRef _printfType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
+    private readonly Dictionary<string, (LLVMValueRef Fn, LLVMTypeRef FnType, SuruType? ReturnType)> _userFunctions = new();
 
-    private CodeGenerator(LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType)
+    private CodeGenerator(LLVMModuleRef llvmModule, LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType)
     {
+        _llvmModule = llvmModule;
         _builder = builder;
         _printfFn = printfFn;
         _printfType = printfType;
@@ -28,23 +31,86 @@ public sealed class CodeGenerator
         var printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType], true);
         var printfFn = llvmModule.AddFunction("printf", printfType);
 
+        var builder = LLVMBuilderRef.Create(context);
+        var gen = new CodeGenerator(llvmModule, builder, printfFn, printfType);
+
+        // Pass 1: declare all user-defined functions (enables forward references and recursion).
+        foreach (var stmt in module.Statements)
+            if (stmt is FunctionDeclaration fn) gen.DeclareFunction(fn);
+
+        // Pass 2: emit bodies of user-defined functions.
+        foreach (var stmt in module.Statements)
+            if (stmt is FunctionDeclaration fn) gen.EmitFunctionBody(fn);
+
+        // Pass 3: emit main() for top-level statements.
         var mainType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, []);
         var mainFn = llvmModule.AddFunction("main", mainType);
         mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
-        var builder = LLVMBuilderRef.Create(context);
         var entry = mainFn.AppendBasicBlock("entry");
         builder.PositionAtEnd(entry);
 
-        var gen = new CodeGenerator(builder, printfFn, printfType);
         foreach (var stmt in module.Statements)
-            gen.EmitStmt(stmt);
+            if (stmt is not FunctionDeclaration) gen.EmitStmt(stmt);
 
         builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
         builder.Dispose();
 
         return llvmModule;
     }
+
+    private void DeclareFunction(FunctionDeclaration fn)
+    {
+        var paramLlvmTypes = fn.Parameters
+            .Select(p => LlvmTypeFor(ResolveTypeName(p.TypeName)!.Value))
+            .ToArray();
+
+        SuruType? returnSuruType = fn.ReturnTypeName == "void" ? null : ResolveTypeName(fn.ReturnTypeName);
+        var llvmReturnType = returnSuruType.HasValue ? LlvmTypeFor(returnSuruType.Value) : LLVMTypeRef.Void;
+
+        var fnType = LLVMTypeRef.CreateFunction(llvmReturnType, paramLlvmTypes);
+        var llvmFn = _llvmModule.AddFunction(fn.Name, fnType);
+        llvmFn.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        _userFunctions[fn.Name] = (llvmFn, fnType, returnSuruType);
+    }
+
+    private void EmitFunctionBody(FunctionDeclaration fn)
+    {
+        var (llvmFn, _, _) = _userFunctions[fn.Name];
+
+        var entry = llvmFn.AppendBasicBlock("entry");
+        _builder.PositionAtEnd(entry);
+
+        var outerVars = new Dictionary<string, (LLVMValueRef Alloca, SuruType Type)>(_vars);
+        _vars.Clear();
+
+        for (int i = 0; i < fn.Parameters.Count; i++)
+        {
+            var p = fn.Parameters[i];
+            var paramType = ResolveTypeName(p.TypeName)!.Value;
+            var alloca = _builder.BuildAlloca(LlvmTypeFor(paramType), p.Name);
+            _builder.BuildStore(llvmFn.GetParam((uint)i), alloca);
+            _vars[p.Name] = (alloca, paramType);
+        }
+
+        foreach (var stmt in fn.Body)
+            EmitStmt(stmt);
+
+        if (_builder.InsertBlock.Terminator.Handle == IntPtr.Zero && fn.ReturnTypeName == "void")
+            _builder.BuildRetVoid();
+
+        _vars.Clear();
+        foreach (var kv in outerVars) _vars[kv.Key] = kv.Value;
+    }
+
+    private static SuruType? ResolveTypeName(string name) => name switch
+    {
+        "Bool"    => SuruType.Bool,
+        "Int64"   => SuruType.Int64,
+        "Float64" => SuruType.Float64,
+        _         => null,
+    };
 
     private void EmitStmt(Statement stmt)
     {
@@ -73,6 +139,20 @@ public sealed class CodeGenerator
             case AssignmentStatement assign:
                 var (newVal, _) = EmitValue(assign.Value);
                 _builder.BuildStore(newVal, _vars[assign.Name].Alloca);
+                break;
+
+            case ReturnStatement ret:
+                if (ret.Value is null)
+                    _builder.BuildRetVoid();
+                else
+                {
+                    var (retVal, _) = EmitValue(ret.Value);
+                    _builder.BuildRet(retVal);
+                }
+                break;
+
+            case FunctionDeclaration:
+                // Handled in the two-pass approach in Generate().
                 break;
         }
     }
@@ -121,9 +201,26 @@ public sealed class CodeGenerator
             case MatchExpression match:
                 return EmitMatchAsExpression(match);
 
+            case CallExpression call:
+                return EmitCallExpression(call);
+
             default:
                 throw new InvalidOperationException($"Unsupported expression type {expr.GetType().Name}");
         }
+    }
+
+    private (LLVMValueRef Value, SuruType Type) EmitCallExpression(CallExpression call)
+    {
+        if (_userFunctions.TryGetValue(call.Name, out var fnEntry))
+        {
+            var argVals = call.Args.Select(a => EmitValue(a).Value).ToArray();
+            var callResult = _builder.BuildCall2(fnEntry.FnType, fnEntry.Fn, argVals, "");
+            if (fnEntry.ReturnType.HasValue)
+                return (callResult, fnEntry.ReturnType.Value);
+            return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+        }
+
+        throw new InvalidOperationException($"Unknown function '{call.Name}'");
     }
 
     private (LLVMValueRef Value, SuruType Type) EmitMethodCall(MethodCallExpression method)
