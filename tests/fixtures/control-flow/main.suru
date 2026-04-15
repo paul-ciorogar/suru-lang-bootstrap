@@ -9,5 +9,11 @@ fn main(args Array) Int64 {
     printLn(b)
     let c: 5.lessThan(3)
     printLn(c)
+    let day: "Monday"
+    match day { "Monday": printLn(1), "Friday": printLn(2), _: printLn(0) }
+    let n: 0.take(1)
+    match n { -1: printLn(1), 0: printLn(2), 1: printLn(3), _: printLn(0) }
+    let cmp: 2.compare(5)
+    printLn(cmp)
     return 0
 }

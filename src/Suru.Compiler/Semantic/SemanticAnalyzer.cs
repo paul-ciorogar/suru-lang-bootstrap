@@ -361,8 +361,8 @@ public sealed class SemanticAnalyzer
             case MatchExpression match:
                 AnalyzeExpression(match.Condition);
                 var condType = InferType(match.Condition);
-                if (condType.HasValue && condType.Value != SuruType.Bool)
-                    _errors.Add($"{_module.SourcePath}: match condition must be Bool, got {condType.Value}");
+                if (condType.HasValue && condType.Value is not (SuruType.Bool or SuruType.Int64 or SuruType.Float64 or SuruType.String))
+                    _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType.Value}");
                 foreach (var arm in match.Arms)
                     AnalyzeExpression(arm.Body);
                 break;
@@ -382,6 +382,7 @@ public sealed class SemanticAnalyzer
             => fields.FirstOrDefault(f => f.Name == fa.FieldName) is var field && field.Name != null
                 ? field.Type : null,
         VariableReferenceExpression v => _symbols.TryGetValue(v.Name, out var t) ? t : null,
+        MethodCallExpression { MethodName: "compare" } => SuruType.Int64,
         MethodCallExpression { MethodName: "equals" or "lessThan" } => SuruType.Bool,
         MethodCallExpression { MethodName: "len" }   => SuruType.Int64,
         MethodCallExpression { MethodName: "toString" } => SuruType.String,

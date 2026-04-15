@@ -7,5 +7,5 @@ public class ControlFlowTests(CompiledFixtures fixtures) : IntegrationTestBase
 
     [Fact]
     public void ControlFlow_PrintsExpectedOutput()
-        => Assert.Equal("1\n1\ntrue\ntrue\nfalse\n", Run(_exe));
+        => Assert.Equal("1\n1\ntrue\ntrue\nfalse\n1\n1\n-1\n", Run(_exe));
 }

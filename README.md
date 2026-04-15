@@ -71,12 +71,13 @@ printLn(not true)         // false
 |---|---|---|
 | `equals(n)` | equality | `3.equals(3)` → `true` |
 | `lessThan(n)` | less-than | `5.lessThan(10)` → `true` |
+| `compare(n)` | three-way comparison | `2.compare(5)` → `-1` |
 
-Works on `Int64`, `Float64`, and `Bool`. Always returns `Bool`.
+`equals` and `lessThan` work on `Int64`, `Float64`, and `Bool`; always return `Bool`. `compare` works on `Int64` and `Float64`; returns `Int64` (`-1` = less, `0` = equal, `1` = greater).
 
 ### Control flow — match
 
-`match` is an expression that tests a `Bool` condition against a list of arms. Each arm is `pattern: body`. The wildcard `_` catches any unmatched case.
+`match` is an expression that tests a condition against a list of arms. Each arm is `pattern: body`. The wildcard `_` catches any unmatched case.
 
 Statement form (arms produce side effects):
 
@@ -92,7 +93,21 @@ let y: match x { true: 1, _: 0 }
 printLn(y)
 ```
 
-Arms can be separated by `,` or newlines. The condition must be `Bool`.
+Match on integers (negative literals supported):
+
+```suru
+let n: 0.take(1)
+match n { -1: printLn("negative"), 0: printLn("zero"), 1: printLn("positive"), _: printLn("other") }
+```
+
+Match on strings:
+
+```suru
+let day: "Monday"
+match day { "Monday": printLn("start"), "Friday": printLn("end"), _: printLn("middle") }
+```
+
+Arms are separated by `,` or newlines. The condition must be `Bool`, `Int64`, `Float64`, or `String`.
 
 ### Functions
 

@@ -38,6 +38,7 @@ public sealed class Lexer(string source)
                 case '[': Advance(); return new Token(TokenKind.LeftBracket, startLine, startCol);
                 case ']': Advance(); return new Token(TokenKind.RightBracket, startLine, startCol);
                 case '"': return ReadString();
+                case '-': Advance(); return new Token(TokenKind.Minus, startLine, startCol);
                 default:
                     throw new Exception($"Unexpected character '{c}' at {_line}:{_column}");
             }

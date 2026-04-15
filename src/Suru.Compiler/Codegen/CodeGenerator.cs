@@ -464,6 +464,26 @@ public sealed class CodeGenerator
             return (result, receiverType);
         }
 
+        if (method.MethodName == "compare")
+        {
+            var (argVal, _) = EmitValue(method.Args[0]);
+            LLVMValueRef gt, lt;
+            if (receiverType == SuruType.Float64)
+            {
+                gt = _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGT, receiver, argVal, "cmp_gt");
+                lt = _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, receiver, argVal, "cmp_lt");
+            }
+            else
+            {
+                gt = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, receiver, argVal, "cmp_gt");
+                lt = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, receiver, argVal, "cmp_lt");
+            }
+            var gtExt = _builder.BuildZExt(gt, LLVMTypeRef.Int64, "cmp_gt_ext");
+            var ltExt = _builder.BuildZExt(lt, LLVMTypeRef.Int64, "cmp_lt_ext");
+            var result = _builder.BuildSub(gtExt, ltExt, "cmp_result");
+            return (result, SuruType.Int64);
+        }
+
         var (arg, _) = EmitValue(method.Args[0]);
 
         var isBoolResult = method.MethodName is "equals" or "lessThan";
@@ -907,13 +927,26 @@ public sealed class CodeGenerator
 
         for (int i = 0; i < patternArms.Count; i++)
         {
-            var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-
-            LLVMValueRef cmp = condType switch
+            LLVMValueRef cmp;
+            if (condType == SuruType.String)
             {
-                SuruType.Float64 => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, condVal, patternVal, ""),
-                _                => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,     condVal, patternVal, ""),
-            };
+                var (patternHdr, _) = EmitValue(patternArms[i].Pattern!);
+                var (_, condData)    = LoadSeqHeader(condVal);
+                var (_, patternData) = LoadSeqHeader(patternHdr);
+                var strcmpResult = _builder.BuildCall2(_strcmpFnType, _strcmpFn,
+                    new[] { condData, patternData }, "match_strcmp");
+                var zero = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false);
+                cmp = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, strcmpResult, zero, "match_str_eq");
+            }
+            else
+            {
+                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                cmp = condType switch
+                {
+                    SuruType.Float64 => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, condVal, patternVal, ""),
+                    _                => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,     condVal, patternVal, ""),
+                };
+            }
 
             LLVMBasicBlockRef elseBlock;
             if (i + 1 < patternArms.Count)

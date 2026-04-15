@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Extended Match & Added `compare`
+- Match conditions now accept `Int64`, `Float64`, and `String` in addition to `Bool`
+- Match patterns now support string literals (e.g. `"Monday":`) and negative numeric literals (e.g. `-1:`)
+- Lexer: added `Minus` (`-`) token; parser: `ParseMatchPattern` handles `TokenKind.Minus` followed by int/float literal
+- Codegen: `EmitMatchTestChain` uses `strcmp` for `String` conditions (same approach as `String.equals`)
+- New built-in method `compare(n)` on `Int64` and `Float64` — returns `-1`, `0`, or `1` for less-than, equal, greater-than; implemented branchlessly as `(a > b) - (a < b)` via ZExt + Sub
+
 ### Refactored
 - All fixtures now use explicit `fn main(args Array) Int64` — the standard entry point for every Suru program
 - `String.at(i)` now returns a single-character `String` (a heap-allocated `%suru.Seq` with `len=1`) instead of the raw byte value as `Int64`

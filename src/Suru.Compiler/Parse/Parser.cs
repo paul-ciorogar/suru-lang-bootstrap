@@ -294,6 +294,29 @@ public sealed class Parser
             return new FloatLiteral(double.Parse(token.Text, System.Globalization.CultureInfo.InvariantCulture));
         }
 
+        if (token.Kind == TokenKind.StringLiteral)
+        {
+            Advance();
+            return new StringLiteralExpression(token.Text);
+        }
+
+        if (token.Kind == TokenKind.Minus)
+        {
+            Advance();
+            var num = _tokens.Current();
+            if (num.Kind == TokenKind.IntLiteral)
+            {
+                Advance();
+                return new IntLiteral(-long.Parse(num.Text));
+            }
+            if (num.Kind == TokenKind.FloatLiteral)
+            {
+                Advance();
+                return new FloatLiteral(-double.Parse(num.Text, CultureInfo.InvariantCulture));
+            }
+            throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
+        }
+
         throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected match pattern, got {token.Kind}");
     }
 

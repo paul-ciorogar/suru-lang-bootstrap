@@ -27,4 +27,5 @@ public enum TokenKind
     LeftBracket,
     RightBracket,
     StringLiteral,
+    Minus,
 }
