@@ -68,8 +68,14 @@ public sealed class Parser
                 return new AssignmentStatement(nameToken.Text, ParseExpression());
             }
 
-            // Not an assignment — finish parsing the expression that starts with this identifier
-            return new ExpressionStatement(FinishExprFromIdent(nameToken));
+            // Not a simple assignment — finish parsing the expression that starts with this identifier
+            var expr = FinishExprFromIdent(nameToken);
+
+            // <receiver>.<field> : <expr>  (field assignment)
+            if (expr is FieldAccessExpression fa && CanConsume(TokenKind.Colon))
+                return new FieldAssignmentStatement(fa.Receiver, fa.FieldName, ParseExpression());
+
+            return new ExpressionStatement(expr);
         }
 
         return new ExpressionStatement(ParseExpression());
@@ -163,16 +169,22 @@ public sealed class Parser
         return ParsePostfixChain(ParsePrimary());
     }
 
-    // postfix chain: ('.' Identifier '(' args ')')*
+    // postfix chain: ('.' Identifier ['(' args ')'])*
     private Expression ParsePostfixChain(Expression expr)
     {
         while (CanConsume(TokenKind.Dot))
         {
-            var methodName = Consume(TokenKind.Identifier);
-            Consume(TokenKind.LeftParen);
-            var args = ParseArguments();
-            Consume(TokenKind.RightParen);
-            expr = new MethodCallExpression(expr, methodName.Text, args);
+            var memberName = Consume(TokenKind.Identifier);
+            if (CanConsume(TokenKind.LeftParen))
+            {
+                var args = ParseArguments();
+                Consume(TokenKind.RightParen);
+                expr = new MethodCallExpression(expr, memberName.Text, args);
+            }
+            else
+            {
+                expr = new FieldAccessExpression(expr, memberName.Text);
+            }
         }
         return expr;
     }
@@ -180,6 +192,22 @@ public sealed class Parser
     private Expression ParsePrimary()
     {
         var token = _tokens.Current();
+
+        // struct literal: { field: expr [, field: expr]* }
+        if (CanConsume(TokenKind.LeftBrace))
+        {
+            var fields = new List<(string Name, Expression Value)>();
+            while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+            {
+                var fieldName = Consume(TokenKind.Identifier);
+                Consume(TokenKind.Colon);
+                var fieldValue = ParseExpression();
+                fields.Add((fieldName.Text, fieldValue));
+                CanConsume(TokenKind.Comma);
+            }
+            Consume(TokenKind.RightBrace);
+            return new StructLiteralExpression(fields);
+        }
 
         if (CanConsume(TokenKind.Match))
         {

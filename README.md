@@ -126,3 +126,49 @@ fn fibonacci(n Int64) Int64 {
 
 printLn(fibonacci(10))
 ```
+
+### Structs
+
+Create a struct with a `{ field: value, ... }` literal. Fields are separated by `,` or newlines. Type is inferred from the fields:
+
+```suru
+let person: { tall: true, height: 2283 }
+```
+
+Read a field with `.field` (no parentheses):
+
+```suru
+printLn(person.tall)    // true
+printLn(person.height)  // 2283
+```
+
+Write a field with `receiver.field: value`:
+
+```suru
+person.tall: false
+printLn(person.tall)  // false
+```
+
+Deep-copy a struct with `clone`:
+
+```suru
+let copy: clone(person)
+```
+
+Free a struct's memory with `drop`:
+
+```suru
+drop(person)
+```
+
+Pass structs to and from functions using the `Struct` type:
+
+```suru
+fn identity(d Struct) Struct {
+  return d
+}
+
+let result: identity(person)
+```
+
+> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field access is resolved at compile time by index.

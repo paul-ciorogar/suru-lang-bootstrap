@@ -11,15 +11,24 @@ public sealed class CodeGenerator
     private readonly LLVMBuilderRef _builder;
     private readonly LLVMValueRef _printfFn;
     private readonly LLVMTypeRef _printfType;
+    private readonly LLVMTypeRef _ptrType;
+    private LLVMTypeRef _fieldNodeType;
+    private LLVMValueRef _mallocFn;
+    private LLVMTypeRef _mallocFnType;
+    private LLVMValueRef _freeFn;
+    private LLVMTypeRef _freeFnType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
     private readonly Dictionary<string, (LLVMValueRef Fn, LLVMTypeRef FnType, SuruType? ReturnType)> _userFunctions = new();
+    // Struct field metadata: variable name → ordered list of (fieldName, fieldType)
+    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _varStructMeta = new();
 
-    private CodeGenerator(LLVMModuleRef llvmModule, LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType)
+    private CodeGenerator(LLVMModuleRef llvmModule, LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, LLVMTypeRef ptrType)
     {
         _llvmModule = llvmModule;
         _builder = builder;
         _printfFn = printfFn;
         _printfType = printfType;
+        _ptrType = ptrType;
     }
 
     public static LLVMModuleRef Generate(Module module)
@@ -32,7 +41,17 @@ public sealed class CodeGenerator
         var printfFn = llvmModule.AddFunction("printf", printfType);
 
         var builder = LLVMBuilderRef.Create(context);
-        var gen = new CodeGenerator(llvmModule, builder, printfFn, printfType);
+        var gen = new CodeGenerator(llvmModule, builder, printfFn, printfType, ptrType);
+
+        // %suru.Field = type { ptr, i32, i64, ptr }
+        gen._fieldNodeType = context.CreateNamedStruct("suru.Field");
+        gen._fieldNodeType.StructSetBody([ptrType, LLVMTypeRef.Int32, LLVMTypeRef.Int64, ptrType], false);
+
+        gen._mallocFnType = LLVMTypeRef.CreateFunction(ptrType, [LLVMTypeRef.Int64]);
+        gen._mallocFn = llvmModule.AddFunction("malloc", gen._mallocFnType);
+
+        gen._freeFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [ptrType]);
+        gen._freeFn = llvmModule.AddFunction("free", gen._freeFnType);
 
         // Pass 1: declare all user-defined functions (enables forward references and recursion).
         foreach (var stmt in module.Statements)
@@ -83,7 +102,9 @@ public sealed class CodeGenerator
         _builder.PositionAtEnd(entry);
 
         var outerVars = new Dictionary<string, (LLVMValueRef Alloca, SuruType Type)>(_vars);
+        var outerStructMeta = new Dictionary<string, List<(string Name, SuruType Type)>>(_varStructMeta);
         _vars.Clear();
+        _varStructMeta.Clear();
 
         for (int i = 0; i < fn.Parameters.Count; i++)
         {
@@ -101,7 +122,9 @@ public sealed class CodeGenerator
             _builder.BuildRetVoid();
 
         _vars.Clear();
+        _varStructMeta.Clear();
         foreach (var kv in outerVars) _vars[kv.Key] = kv.Value;
+        foreach (var kv in outerStructMeta) _varStructMeta[kv.Key] = kv.Value;
     }
 
     private static SuruType? ResolveTypeName(string name) => name switch
@@ -109,6 +132,7 @@ public sealed class CodeGenerator
         "Bool"    => SuruType.Bool,
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
+        "Struct"  => SuruType.Struct,
         _         => null,
     };
 
@@ -134,7 +158,22 @@ public sealed class CodeGenerator
                 var alloca = _builder.BuildAlloca(LlvmTypeFor(letType), let.Name);
                 _builder.BuildStore(letVal, alloca);
                 _vars[let.Name] = (alloca, letType);
+                if (letType == SuruType.Struct)
+                    PropagateStructMeta(let.Name, let.Value);
                 break;
+
+            case FieldAssignmentStatement fieldAssign:
+            {
+                var receiverPtr = LoadStructPtr(fieldAssign.Receiver);
+                var fieldIdx = GetFieldIndex(fieldAssign.Receiver, fieldAssign.FieldName);
+                var fieldType = GetFieldType(fieldAssign.Receiver, fieldAssign.FieldName);
+                var fieldNode = NavigateToNode(receiverPtr, fieldIdx);
+                var valSlot = _builder.BuildStructGEP2(_fieldNodeType, fieldNode, 2, "val_slot");
+                var (assignedVal, _) = EmitValue(fieldAssign.Value);
+                var rawVal = ToI64(assignedVal, fieldType);
+                _builder.BuildStore(rawVal, valSlot);
+                break;
+            }
 
             case AssignmentStatement assign:
                 var (newVal, _) = EmitValue(assign.Value);
@@ -176,6 +215,21 @@ public sealed class CodeGenerator
                 return (_builder.BuildLoad2(LlvmTypeFor(varType), alloca, varRef.Name), varType);
             }
 
+            case StructLiteralExpression structLit:
+                return EmitStructLiteral(structLit);
+
+            case FieldAccessExpression fa:
+            {
+                var nodePtr = LoadStructPtr(fa.Receiver);
+                var fieldIndex = GetFieldIndex(fa.Receiver, fa.FieldName);
+                var fieldType = GetFieldType(fa.Receiver, fa.FieldName);
+                var targetNode = NavigateToNode(nodePtr, fieldIndex);
+                var valSlot = _builder.BuildStructGEP2(_fieldNodeType, targetNode, 2, "val_slot");
+                var rawVal = _builder.BuildLoad2(LLVMTypeRef.Int64, valSlot, "raw_val");
+                var typedVal = FromI64(rawVal, fieldType);
+                return (typedVal, fieldType);
+            }
+
             case MethodCallExpression method:
                 return EmitMethodCall(method);
 
@@ -211,6 +265,19 @@ public sealed class CodeGenerator
 
     private (LLVMValueRef Value, SuruType Type) EmitCallExpression(CallExpression call)
     {
+        if (call.Name == "clone" && call.Args.Count == 1 &&
+            call.Args[0] is VariableReferenceExpression cloneSrc)
+        {
+            return EmitClone(cloneSrc.Name);
+        }
+
+        if (call.Name == "drop" && call.Args.Count == 1 &&
+            call.Args[0] is VariableReferenceExpression dropSrc)
+        {
+            EmitDrop(dropSrc.Name);
+            return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+        }
+
         if (_userFunctions.TryGetValue(call.Name, out var fnEntry))
         {
             var argVals = call.Args.Select(a => EmitValue(a).Value).ToArray();
@@ -423,11 +490,197 @@ public sealed class CodeGenerator
         }
     }
 
-    private static LLVMTypeRef LlvmTypeFor(SuruType type) => type switch
+    private LLVMTypeRef LlvmTypeFor(SuruType type) => type switch
     {
         SuruType.Bool    => LLVMTypeRef.Int1,
         SuruType.Int64   => LLVMTypeRef.Int64,
         SuruType.Float64 => LLVMTypeRef.Double,
+        SuruType.Struct  => _ptrType,
         _ => throw new InvalidOperationException($"No LLVM type for {type}"),
     };
+
+    // ── Struct helpers ────────────────────────────────────────────────────────
+
+    private void PropagateStructMeta(string varName, Expression value)
+    {
+        switch (value)
+        {
+            case StructLiteralExpression when _pendingStructMeta != null:
+                _varStructMeta[varName] = _pendingStructMeta;
+                _pendingStructMeta = null;
+                break;
+            case VariableReferenceExpression v when _varStructMeta.TryGetValue(v.Name, out var meta):
+                _varStructMeta[varName] = new List<(string, SuruType)>(meta);
+                break;
+            case CallExpression { Name: "clone" } when _pendingStructMeta != null:
+                _varStructMeta[varName] = _pendingStructMeta;
+                _pendingStructMeta = null;
+                break;
+        }
+    }
+
+    private List<(string Name, SuruType Type)>? _pendingStructMeta;
+
+    private (LLVMValueRef Value, SuruType Type) EmitStructLiteral(StructLiteralExpression lit)
+    {
+        LLVMValueRef prevNodePtr = LLVMValueRef.CreateConstNull(_ptrType);
+        var fieldMeta = new List<(string Name, SuruType Type)>();
+
+        // Build nodes in reverse so each node's 'next' points to the already-built tail.
+        for (int i = lit.Fields.Count - 1; i >= 0; i--)
+        {
+            var (fieldName, fieldExpr) = lit.Fields[i];
+            var (fieldVal, fieldType) = EmitValue(fieldExpr);
+
+            var size = FieldNodeSize();
+            var nodePtr = _builder.BuildCall2(_mallocFnType, _mallocFn, new LLVMValueRef[] { size }, $"field_{fieldName}");
+
+            // [0] name ptr
+            var namePtr = _builder.BuildGlobalStringPtr(fieldName, $"fname_{fieldName}");
+            var nameSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 0, "name_slot");
+            _builder.BuildStore(namePtr, nameSlot);
+
+            // [1] tag
+            int tag = fieldType switch { SuruType.Bool => 0, SuruType.Int64 => 1, SuruType.Float64 => 2, _ => 3 };
+            var tagSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 1, "tag_slot");
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)tag, false), tagSlot);
+
+            // [2] value as i64
+            var valSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 2, "val_slot");
+            _builder.BuildStore(ToI64(fieldVal, fieldType), valSlot);
+
+            // [3] next
+            var nextSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 3, "next_slot");
+            _builder.BuildStore(prevNodePtr, nextSlot);
+
+            prevNodePtr = nodePtr;
+            fieldMeta.Insert(0, (fieldName, fieldType));
+        }
+
+        _pendingStructMeta = fieldMeta;
+        return (prevNodePtr, SuruType.Struct);
+    }
+
+    private LLVMValueRef LoadStructPtr(Expression receiver)
+    {
+        var (ptr, _) = EmitValue(receiver);
+        return ptr;
+    }
+
+    private int GetFieldIndex(Expression receiver, string fieldName)
+    {
+        if (receiver is VariableReferenceExpression v && _varStructMeta.TryGetValue(v.Name, out var meta))
+            return meta.FindIndex(f => f.Name == fieldName);
+        throw new InvalidOperationException($"No struct metadata for field '{fieldName}'");
+    }
+
+    private SuruType GetFieldType(Expression receiver, string fieldName)
+    {
+        if (receiver is VariableReferenceExpression v && _varStructMeta.TryGetValue(v.Name, out var meta))
+            return meta.First(f => f.Name == fieldName).Type;
+        throw new InvalidOperationException($"No struct metadata for field '{fieldName}'");
+    }
+
+    private LLVMValueRef NavigateToNode(LLVMValueRef headPtr, int fieldIndex)
+    {
+        var nodePtr = headPtr;
+        for (int i = 0; i < fieldIndex; i++)
+        {
+            var nextSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 3, "next_slot");
+            nodePtr = _builder.BuildLoad2(_ptrType, nextSlot, "next");
+        }
+        return nodePtr;
+    }
+
+    private LLVMValueRef ToI64(LLVMValueRef val, SuruType type) => type switch
+    {
+        SuruType.Bool    => _builder.BuildZExt(val, LLVMTypeRef.Int64, ""),
+        SuruType.Int64   => val,
+        SuruType.Float64 => _builder.BuildBitCast(val, LLVMTypeRef.Int64, ""),
+        _                => val,
+    };
+
+    private LLVMValueRef FromI64(LLVMValueRef raw, SuruType type) => type switch
+    {
+        SuruType.Bool    => _builder.BuildTrunc(raw, LLVMTypeRef.Int1, ""),
+        SuruType.Int64   => raw,
+        SuruType.Float64 => _builder.BuildBitCast(raw, LLVMTypeRef.Double, ""),
+        _                => raw,
+    };
+
+    private (LLVMValueRef Value, SuruType Type) EmitClone(string srcVarName)
+    {
+        if (!_varStructMeta.TryGetValue(srcVarName, out var fields))
+            throw new InvalidOperationException($"No struct metadata for '{srcVarName}'");
+
+        var (srcHeadPtr, _) = EmitValue(new VariableReferenceExpression(srcVarName));
+
+        LLVMValueRef prevNewNode = LLVMValueRef.CreateConstNull(_ptrType);
+        LLVMValueRef? newHead = null;
+
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var oldNode = NavigateToNode(srcHeadPtr, i);
+
+            var size = FieldNodeSize();
+            var newNode = _builder.BuildCall2(_mallocFnType, _mallocFn, new LLVMValueRef[] { size }, $"clone_{fields[i].Name}");
+
+            // Copy all slots
+            CopyFieldNode(oldNode, newNode);
+
+            // Set next to null (will be wired below)
+            var newNextSlot = _builder.BuildStructGEP2(_fieldNodeType, newNode, 3, "");
+            _builder.BuildStore(LLVMValueRef.CreateConstNull(_ptrType), newNextSlot);
+
+            if (i == 0)
+            {
+                newHead = newNode;
+            }
+            else
+            {
+                var prevNextSlot = _builder.BuildStructGEP2(_fieldNodeType, prevNewNode, 3, "");
+                _builder.BuildStore(newNode, prevNextSlot);
+            }
+
+            prevNewNode = newNode;
+        }
+
+        _pendingStructMeta = new List<(string, SuruType)>(fields);
+        return (newHead!.Value, SuruType.Struct);
+    }
+
+    private void CopyFieldNode(LLVMValueRef src, LLVMValueRef dst)
+    {
+        for (uint slot = 0; slot <= 2; slot++)
+        {
+            var srcSlot = _builder.BuildStructGEP2(_fieldNodeType, src, slot, "");
+            var dstSlot = _builder.BuildStructGEP2(_fieldNodeType, dst, slot, "");
+            LLVMTypeRef slotType = slot switch { 0 => _ptrType, 1 => LLVMTypeRef.Int32, _ => LLVMTypeRef.Int64 };
+            var val = _builder.BuildLoad2(slotType, srcSlot, "");
+            _builder.BuildStore(val, dstSlot);
+        }
+    }
+
+    private void EmitDrop(string varName)
+    {
+        if (!_varStructMeta.TryGetValue(varName, out var fields))
+            throw new InvalidOperationException($"No struct metadata for '{varName}'");
+
+        var (headPtr, _) = EmitValue(new VariableReferenceExpression(varName));
+
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var nodePtr = NavigateToNode(headPtr, i);
+            _builder.BuildCall2(_freeFnType, _freeFn, new LLVMValueRef[] { nodePtr }, "");
+        }
+    }
+
+    // sizeof(%suru.Field) via GEP-from-null trick: getelementptr(..., null, 1) → ptrtoint
+    private LLVMValueRef FieldNodeSize()
+    {
+        var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
+        var one = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+        var gep = _builder.BuildGEP2(_fieldNodeType, nullPtr, new LLVMValueRef[] { one }, "");
+        return _builder.BuildPtrToInt(gep, LLVMTypeRef.Int64, "field_size");
+    }
 }

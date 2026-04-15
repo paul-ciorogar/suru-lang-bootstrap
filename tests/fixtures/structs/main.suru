@@ -1,0 +1,12 @@
+fn identity(d Struct) Struct {
+  return d
+}
+
+let data: { tall: true, height: 2283 }
+printLn(data.tall)
+printLn(data.height)
+data.tall: false
+printLn(data.tall)
+let copy: clone(data)
+printLn(copy.tall)
+drop(data)
