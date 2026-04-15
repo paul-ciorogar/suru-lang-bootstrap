@@ -90,6 +90,11 @@ public sealed class SemanticAnalyzer
                         if (i < sig.ParamTypes.Count)
                             _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
                     }
+                    // fn main(args Array) Int64: args elements are Strings (CLI argv)
+                    if (fn.Name == "main")
+                        for (int i = 0; i < fn.Parameters.Count; i++)
+                            if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Array)
+                                _arrayElementTypes[fn.Parameters[i].Name] = SuruType.String;
                 }
 
                 _currentFunctionReturnType = sig.ReturnType;
@@ -281,6 +286,46 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(builtIn.Args[0]);
                 break;
 
+            case CallExpression { Name: "exit" } exitCall:
+                if (exitCall.Args.Count != 1)
+                    _errors.Add($"{_module.SourcePath}: 'exit' expects exactly 1 argument");
+                else
+                {
+                    AnalyzeExpression(exitCall.Args[0]);
+                    var exitArgType = InferType(exitCall.Args[0]);
+                    if (exitArgType.HasValue && exitArgType.Value != SuruType.Int64)
+                        _errors.Add($"{_module.SourcePath}: 'exit' expects Int64, got {exitArgType.Value}");
+                }
+                break;
+
+            case CallExpression { Name: "readFile" } readFileCall:
+                if (readFileCall.Args.Count != 1)
+                    _errors.Add($"{_module.SourcePath}: 'readFile' expects exactly 1 argument");
+                else
+                {
+                    AnalyzeExpression(readFileCall.Args[0]);
+                    var rfArgType = InferType(readFileCall.Args[0]);
+                    if (rfArgType.HasValue && rfArgType.Value != SuruType.String)
+                        _errors.Add($"{_module.SourcePath}: 'readFile' expects String, got {rfArgType.Value}");
+                }
+                break;
+
+            case CallExpression { Name: "writeFile" } writeFileCall:
+                if (writeFileCall.Args.Count != 2)
+                    _errors.Add($"{_module.SourcePath}: 'writeFile' expects exactly 2 arguments");
+                else
+                {
+                    AnalyzeExpression(writeFileCall.Args[0]);
+                    AnalyzeExpression(writeFileCall.Args[1]);
+                    var wfArg0Type = InferType(writeFileCall.Args[0]);
+                    var wfArg1Type = InferType(writeFileCall.Args[1]);
+                    if (wfArg0Type.HasValue && wfArg0Type.Value != SuruType.String)
+                        _errors.Add($"{_module.SourcePath}: 'writeFile' argument 1 expects String, got {wfArg0Type.Value}");
+                    if (wfArg1Type.HasValue && wfArg1Type.Value != SuruType.String)
+                        _errors.Add($"{_module.SourcePath}: 'writeFile' argument 2 expects String, got {wfArg1Type.Value}");
+                }
+                break;
+
             case CallExpression call:
                 if (call.Name != "printLn" && _functions.TryGetValue(call.Name, out var callSig))
                 {
@@ -355,8 +400,11 @@ public sealed class SemanticAnalyzer
         UnaryExpression            => SuruType.Bool,
         BinaryExpression           => SuruType.Bool,
         MatchExpression m          => m.Arms.Count > 0 ? InferType(m.Arms[0].Body) : null,
-        CallExpression { Name: "clone" }  => SuruType.Struct,
-        CallExpression { Name: "drop" }   => null,
+        CallExpression { Name: "clone" }    => SuruType.Struct,
+        CallExpression { Name: "drop" }    => null,
+        CallExpression { Name: "exit" }    => null,
+        CallExpression { Name: "readFile" } => SuruType.String,
+        CallExpression { Name: "writeFile" } => null,
         CallExpression call when _functions.TryGetValue(call.Name, out var fnSig) => fnSig.ReturnType,
         _                          => null,
     };

@@ -252,3 +252,41 @@ let b: true.toString()
 printLn(s)  // 42
 printLn(b)  // true
 ```
+
+### File I/O
+
+Read an entire file as a `String`:
+
+```suru
+let content: readFile("input.txt")
+printLn(content)
+```
+
+Write a `String` to a file (overwrites if the file exists):
+
+```suru
+writeFile("output.txt", content)
+```
+
+### Exit
+
+Terminate the process with a specific exit code:
+
+```suru
+exit(1)
+```
+
+### Main function and CLI arguments
+
+Define `fn main(args Array) Int64` to access command-line arguments. `args.at(0)` is the program name; `args.at(1)` is the first argument, and so on. The return value becomes the process exit code.
+
+```suru
+fn main(args Array) Int64 {
+    let path: args.at(1)
+    let content: readFile(path)
+    printLn(content)
+    return 0
+}
+```
+
+> **Note:** Without an explicit `fn main`, top-level statements are wrapped in an implicit entry point (no argument access).

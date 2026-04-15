@@ -1,0 +1,4 @@
+fn main(args Array) Int64 {
+    exit(42)
+    return 0
+}

@@ -1,0 +1,7 @@
+fn main(args Array) Int64 {
+    let inPath: args.at(1)
+    let outPath: args.at(2)
+    let content: readFile(inPath)
+    writeFile(outPath, content)
+    return 0
+}

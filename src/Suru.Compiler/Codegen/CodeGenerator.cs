@@ -32,6 +32,22 @@ public sealed class CodeGenerator
     private LLVMTypeRef _sprintfFnType;
     private LLVMValueRef _strlenFn;
     private LLVMTypeRef _strlenFnType;
+    private LLVMValueRef _fopenFn;
+    private LLVMTypeRef _fopenFnType;
+    private LLVMValueRef _fcloseFn;
+    private LLVMTypeRef _fcloseFnType;
+    private LLVMValueRef _fseekFn;
+    private LLVMTypeRef _fseekFnType;
+    private LLVMValueRef _ftellFn;
+    private LLVMTypeRef _ftellFnType;
+    private LLVMValueRef _rewindFn;
+    private LLVMTypeRef _rewindFnType;
+    private LLVMValueRef _freadFn;
+    private LLVMTypeRef _freadFnType;
+    private LLVMValueRef _fwriteFn;
+    private LLVMTypeRef _fwriteFnType;
+    private LLVMValueRef _exitFn;
+    private LLVMTypeRef _exitFnType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
     private readonly Dictionary<string, (LLVMValueRef Fn, LLVMTypeRef FnType, SuruType? ReturnType)> _userFunctions = new();
     // Struct field metadata: variable name → ordered list of (fieldName, fieldType)
@@ -91,6 +107,38 @@ public sealed class CodeGenerator
         gen._strlenFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType]);
         gen._strlenFn = llvmModule.AddFunction("strlen", gen._strlenFnType);
 
+        // fopen(path, mode) -> ptr
+        gen._fopenFnType = LLVMTypeRef.CreateFunction(ptrType, [ptrType, ptrType]);
+        gen._fopenFn = llvmModule.AddFunction("fopen", gen._fopenFnType);
+
+        // fclose(file) -> i32
+        gen._fcloseFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType]);
+        gen._fcloseFn = llvmModule.AddFunction("fclose", gen._fcloseFnType);
+
+        // fseek(file, offset, whence) -> i32
+        gen._fseekFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType, LLVMTypeRef.Int64, LLVMTypeRef.Int32]);
+        gen._fseekFn = llvmModule.AddFunction("fseek", gen._fseekFnType);
+
+        // ftell(file) -> i64
+        gen._ftellFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType]);
+        gen._ftellFn = llvmModule.AddFunction("ftell", gen._ftellFnType);
+
+        // rewind(file) -> void
+        gen._rewindFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [ptrType]);
+        gen._rewindFn = llvmModule.AddFunction("rewind", gen._rewindFnType);
+
+        // fread(buf, size, nmemb, file) -> i64
+        gen._freadFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType, LLVMTypeRef.Int64, LLVMTypeRef.Int64, ptrType]);
+        gen._freadFn = llvmModule.AddFunction("fread", gen._freadFnType);
+
+        // fwrite(buf, size, nmemb, file) -> i64
+        gen._fwriteFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType, LLVMTypeRef.Int64, LLVMTypeRef.Int64, ptrType]);
+        gen._fwriteFn = llvmModule.AddFunction("fwrite", gen._fwriteFnType);
+
+        // exit(code) -> void
+        gen._exitFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [LLVMTypeRef.Int32]);
+        gen._exitFn = llvmModule.AddFunction("exit", gen._exitFnType);
+
         // %suru.Seq = type { i64, ptr } — shared layout for Array and String headers
         gen._seqNodeType = context.CreateNamedStruct("suru.Seq");
         gen._seqNodeType.StructSetBody([LLVMTypeRef.Int64, ptrType], false);
@@ -103,18 +151,26 @@ public sealed class CodeGenerator
         foreach (var stmt in module.Statements)
             if (stmt is FunctionDeclaration fn) gen.EmitFunctionBody(fn);
 
-        // Pass 3: emit main() for top-level statements.
-        var mainType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, []);
-        var mainFn = llvmModule.AddFunction("main", mainType);
-        mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
+        // Pass 3: emit main(). If the user defined fn main, wrap it; otherwise emit implicit main.
+        var hasExplicitMain = module.Statements.OfType<FunctionDeclaration>().Any(f => f.Name == "main");
+        if (hasExplicitMain)
+        {
+            gen.EmitMainWrapper();
+        }
+        else
+        {
+            var mainType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, []);
+            var mainFn = llvmModule.AddFunction("main", mainType);
+            mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
-        var entry = mainFn.AppendBasicBlock("entry");
-        builder.PositionAtEnd(entry);
+            var entry = mainFn.AppendBasicBlock("entry");
+            builder.PositionAtEnd(entry);
 
-        foreach (var stmt in module.Statements)
-            if (stmt is not FunctionDeclaration) gen.EmitStmt(stmt);
+            foreach (var stmt in module.Statements)
+                if (stmt is not FunctionDeclaration) gen.EmitStmt(stmt);
 
-        builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
+            builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
+        }
         builder.Dispose();
 
         return llvmModule;
@@ -129,8 +185,11 @@ public sealed class CodeGenerator
         SuruType? returnSuruType = fn.ReturnTypeName == "void" ? null : ResolveTypeName(fn.ReturnTypeName);
         var llvmReturnType = returnSuruType.HasValue ? LlvmTypeFor(returnSuruType.Value) : LLVMTypeRef.Void;
 
+        // Rename user-defined 'main' to 'suru_main' to avoid collision with C main wrapper
+        var llvmName = fn.Name == "main" ? "suru_main" : fn.Name;
+
         var fnType = LLVMTypeRef.CreateFunction(llvmReturnType, paramLlvmTypes);
-        var llvmFn = _llvmModule.AddFunction(fn.Name, fnType);
+        var llvmFn = _llvmModule.AddFunction(llvmName, fnType);
         llvmFn.Linkage = LLVMLinkage.LLVMInternalLinkage;
 
         _userFunctions[fn.Name] = (llvmFn, fnType, returnSuruType);
@@ -158,6 +217,12 @@ public sealed class CodeGenerator
             _builder.BuildStore(llvmFn.GetParam((uint)i), alloca);
             _vars[p.Name] = (alloca, paramType);
         }
+
+        // fn main(args Array): args is an Array of String (CLI argv)
+        if (fn.Name == "main")
+            foreach (var p in fn.Parameters)
+                if (ResolveTypeName(p.TypeName) == SuruType.Array)
+                    _varArrayMeta[p.Name] = SuruType.String;
 
         foreach (var stmt in fn.Body)
             EmitStmt(stmt);
@@ -336,6 +401,23 @@ public sealed class CodeGenerator
                 EmitDropArray(dropSrc.Name);
             else
                 EmitDrop(dropSrc.Name);
+            return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+        }
+
+        if (call.Name == "exit" && call.Args.Count == 1)
+        {
+            var (codeVal, _) = EmitValue(call.Args[0]);
+            var code32 = _builder.BuildTrunc(codeVal, LLVMTypeRef.Int32, "exit_code");
+            _builder.BuildCall2(_exitFnType, _exitFn, new[] { code32 }, "");
+            return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+        }
+
+        if (call.Name == "readFile" && call.Args.Count == 1)
+            return EmitReadFile(call.Args[0]);
+
+        if (call.Name == "writeFile" && call.Args.Count == 2)
+        {
+            EmitWriteFile(call.Args[0], call.Args[1]);
             return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
         }
 
@@ -984,7 +1066,7 @@ public sealed class CodeGenerator
         SuruType.Bool    => _builder.BuildZExt(val, LLVMTypeRef.Int64, ""),
         SuruType.Int64   => val,
         SuruType.Float64 => _builder.BuildBitCast(val, LLVMTypeRef.Int64, ""),
-        _                => val,
+        _                => _builder.BuildPtrToInt(val, LLVMTypeRef.Int64, ""),  // Struct, Array, String: store ptr as i64
     };
 
     private LLVMValueRef FromI64(LLVMValueRef raw, SuruType type) => type switch
@@ -992,7 +1074,7 @@ public sealed class CodeGenerator
         SuruType.Bool    => _builder.BuildTrunc(raw, LLVMTypeRef.Int1, ""),
         SuruType.Int64   => raw,
         SuruType.Float64 => _builder.BuildBitCast(raw, LLVMTypeRef.Double, ""),
-        _                => raw,
+        _                => _builder.BuildIntToPtr(raw, _ptrType, ""),  // Struct, Array, String: restore ptr
     };
 
     private (LLVMValueRef Value, SuruType Type) EmitClone(string srcVarName)
@@ -1170,5 +1252,139 @@ public sealed class CodeGenerator
         var one = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
         var gep = _builder.BuildGEP2(_fieldNodeType, nullPtr, new LLVMValueRef[] { one }, "");
         return _builder.BuildPtrToInt(gep, LLVMTypeRef.Int64, "field_size");
+    }
+
+    // ── Built-in I/O ──────────────────────────────────────────────────────────
+
+    private (LLVMValueRef Value, SuruType Type) EmitReadFile(Expression pathArg)
+    {
+        var (pathHdr, _) = EmitValue(pathArg);
+        var (_, pathData) = LoadSeqHeader(pathHdr);
+
+        var modeR = _builder.BuildGlobalStringPtr("r", "mode_r");
+        var file = _builder.BuildCall2(_fopenFnType, _fopenFn, new[] { pathData, modeR }, "rf_file");
+
+        // fseek(file, 0, SEEK_END=2)
+        var zero64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0, false);
+        var seekEnd = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 2, false);
+        _builder.BuildCall2(_fseekFnType, _fseekFn, new[] { file, zero64, seekEnd }, "");
+
+        // size = ftell(file)
+        var size = _builder.BuildCall2(_ftellFnType, _ftellFn, new[] { file }, "rf_size");
+
+        // rewind(file)
+        _builder.BuildCall2(_rewindFnType, _rewindFn, new[] { file }, "");
+
+        // buf = malloc(size + 1)
+        var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+        var bufSize = _builder.BuildAdd(size, one64, "rf_bufsize");
+        var buf = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { bufSize }, "rf_buf");
+
+        // fread(buf, 1, size, file)
+        _builder.BuildCall2(_freadFnType, _freadFn, new[] { buf, one64, size, file }, "");
+
+        // buf[size] = '\0'
+        var nullByte = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, 0, false);
+        var nullSlot = _builder.BuildGEP2(LLVMTypeRef.Int8, buf, new[] { size }, "rf_null_slot");
+        _builder.BuildStore(nullByte, nullSlot);
+
+        // fclose(file)
+        _builder.BuildCall2(_fcloseFnType, _fcloseFn, new[] { file }, "");
+
+        // Build %suru.Seq header: { len=size, data=buf }
+        var hdrSize = SeqHeaderSize();
+        var hdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { hdrSize }, "rf_hdr");
+        var lenSlot = _builder.BuildStructGEP2(_seqNodeType, hdr, 0, "rf_len_slot");
+        _builder.BuildStore(size, lenSlot);
+        var dataSlot = _builder.BuildStructGEP2(_seqNodeType, hdr, 1, "rf_data_slot");
+        _builder.BuildStore(buf, dataSlot);
+
+        return (hdr, SuruType.String);
+    }
+
+    private void EmitWriteFile(Expression pathArg, Expression contentArg)
+    {
+        var (pathHdr, _) = EmitValue(pathArg);
+        var (_, pathData) = LoadSeqHeader(pathHdr);
+        var (contentHdr, _) = EmitValue(contentArg);
+        var (contentLen, contentData) = LoadSeqHeader(contentHdr);
+
+        var modeW = _builder.BuildGlobalStringPtr("w", "mode_w");
+        var file = _builder.BuildCall2(_fopenFnType, _fopenFn, new[] { pathData, modeW }, "wf_file");
+
+        var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+        _builder.BuildCall2(_fwriteFnType, _fwriteFn, new[] { contentData, one64, contentLen, file }, "");
+
+        _builder.BuildCall2(_fcloseFnType, _fcloseFn, new[] { file }, "");
+    }
+
+    // Emit C int main(int argc, char** argv) that builds a Suru Array<String> and calls suru_main.
+    private void EmitMainWrapper()
+    {
+        var mainType = LLVMTypeRef.CreateFunction(
+            LLVMTypeRef.Int32,
+            new[] { LLVMTypeRef.Int32, _ptrType });
+        var mainFn = _llvmModule.AddFunction("main", mainType);
+        mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
+
+        var entryBlock  = mainFn.AppendBasicBlock("entry");
+        var loopCond    = mainFn.AppendBasicBlock("loop_cond");
+        var loopBody    = mainFn.AppendBasicBlock("loop_body");
+        var loopExit    = mainFn.AppendBasicBlock("loop_exit");
+
+        _builder.PositionAtEnd(entryBlock);
+
+        var argc   = mainFn.GetParam(0);  // i32
+        var argv   = mainFn.GetParam(1);  // ptr (char**)
+        var argc64 = _builder.BuildZExt(argc, LLVMTypeRef.Int64, "argc64");
+
+        // data = malloc(argc64 * 8)
+        var eight = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 8, false);
+        var dataBytes = _builder.BuildMul(argc64, eight, "data_bytes");
+        var data = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { dataBytes }, "argv_data");
+
+        _builder.BuildBr(loopCond);
+
+        // Loop condition: i < argc64
+        _builder.PositionAtEnd(loopCond);
+        var i = _builder.BuildPhi(LLVMTypeRef.Int64, "i");
+        var zero64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0, false);
+        i.AddIncoming(new[] { zero64 }, new[] { entryBlock }, 1);
+        var cond = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, i, argc64, "loop_cond");
+        _builder.BuildCondBr(cond, loopBody, loopExit);
+
+        // Loop body: build a suru String header for argv[i]
+        _builder.PositionAtEnd(loopBody);
+        var argvSlot = _builder.BuildGEP2(_ptrType, argv, new[] { i }, "argv_slot");
+        var cstr = _builder.BuildLoad2(_ptrType, argvSlot, "cstr");
+        var slen = _builder.BuildCall2(_strlenFnType, _strlenFn, new[] { cstr }, "slen");
+        var shdrSize = SeqHeaderSize();
+        var shdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { shdrSize }, "shdr");
+        var slenSlot = _builder.BuildStructGEP2(_seqNodeType, shdr, 0, "slen_slot");
+        _builder.BuildStore(slen, slenSlot);
+        var sdataSlot = _builder.BuildStructGEP2(_seqNodeType, shdr, 1, "sdata_slot");
+        _builder.BuildStore(cstr, sdataSlot);
+        // Store header pointer (as i64) into data[i]
+        var shdrInt = _builder.BuildPtrToInt(shdr, LLVMTypeRef.Int64, "shdr_int");
+        var dataSlot = _builder.BuildGEP2(LLVMTypeRef.Int64, data, new[] { i }, "data_slot");
+        _builder.BuildStore(shdrInt, dataSlot);
+        var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
+        var iNext = _builder.BuildAdd(i, one64, "i_next");
+        i.AddIncoming(new[] { iNext }, new[] { loopBody }, 1);
+        _builder.BuildBr(loopCond);
+
+        // After loop: build the Array<String> header and call suru_main
+        _builder.PositionAtEnd(loopExit);
+        var argsHdrSize = SeqHeaderSize();
+        var argsHdr = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { argsHdrSize }, "args_hdr");
+        var argsLenSlot = _builder.BuildStructGEP2(_seqNodeType, argsHdr, 0, "args_len_slot");
+        _builder.BuildStore(argc64, argsLenSlot);
+        var argsDataSlot = _builder.BuildStructGEP2(_seqNodeType, argsHdr, 1, "args_data_slot");
+        _builder.BuildStore(data, argsDataSlot);
+
+        var (suruMainFn, suruMainFnType, _) = _userFunctions["main"];
+        var result = _builder.BuildCall2(suruMainFnType, suruMainFn, new[] { argsHdr }, "result");
+        var result32 = _builder.BuildTrunc(result, LLVMTypeRef.Int32, "result32");
+        _builder.BuildRet(result32);
     }
 }

@@ -1,0 +1,6 @@
+fn main(args Array) Int64 {
+    let path: args.at(1)
+    let content: readFile(path)
+    printLn(content)
+    return 0
+}
