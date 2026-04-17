@@ -10,21 +10,17 @@ public sealed class SemanticAnalyzer
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _structSymbols = new();
     private readonly Dictionary<string, SuruType> _arrayElementTypes = new();
     private readonly Dictionary<string, (IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)> _functions = new();
+    private readonly HashSet<string> _constants = new();
     private readonly List<string> _errors = [];
     private SuruType? _currentFunctionReturnType = null;
     private bool _currentFunctionIsVoid = false;
     private string? _currentFunctionName = null;
-    // Struct field metadata for functions that return Struct (captured from return statements).
+    private bool _insideFunction = false;
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
-    // Array element types for function array parameters: function name → param index → element type.
     private readonly Dictionary<string, Dictionary<int, SuruType>> _functionArrayParamMeta = new();
-    // Element type of the Array returned by a function: function name → element type.
     private readonly Dictionary<string, SuruType> _functionReturnArrayMeta = new();
-    // Struct field shapes of array elements: array variable name → field list.
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _arrayStructElementTypes = new();
-    // Struct field shapes of elements in arrays returned by functions: function name → field list.
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnArrayStructSymbols = new();
-    // Struct field shapes of array parameters: function name → param index → field list.
     private readonly Dictionary<string, Dictionary<int, List<(string Name, SuruType Type)>>> _functionArrayStructParamMeta = new();
 
     private SemanticAnalyzer(Module module)
@@ -105,7 +101,6 @@ public sealed class SemanticAnalyzer
                         if (i < sig.ParamTypes.Count)
                             _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
                     }
-                    // fn main(args Array) Int64: args elements are Strings (CLI argv)
                     if (fn.Name == "main")
                         for (int i = 0; i < fn.Parameters.Count; i++)
                             if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Array)
@@ -115,6 +110,7 @@ public sealed class SemanticAnalyzer
                 _currentFunctionReturnType = sig.ReturnType;
                 _currentFunctionIsVoid = fn.ReturnTypeName == "void";
                 _currentFunctionName = fn.Name;
+                _insideFunction = true;
 
                 bool hasReturn = false;
                 foreach (var bodyStmt in fn.Body)
@@ -126,7 +122,6 @@ public sealed class SemanticAnalyzer
                 if (!_currentFunctionIsVoid && !hasReturn)
                     _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
-                // Capture array parameter element types and struct shapes discovered during body analysis.
                 if (_functions.TryGetValue(fn.Name, out var fnSigCap))
                 {
                     for (int pi = 0; pi < fn.Parameters.Count; pi++)
@@ -160,6 +155,7 @@ public sealed class SemanticAnalyzer
                 _currentFunctionReturnType = null;
                 _currentFunctionIsVoid = false;
                 _currentFunctionName = null;
+                _insideFunction = false;
                 break;
             }
 
@@ -178,7 +174,6 @@ public sealed class SemanticAnalyzer
                         if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
                             _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
                     }
-                    // Capture return array element type and struct shape for functions returning Array.
                     if (_currentFunctionName != null &&
                         ret.Value is VariableReferenceExpression retArr &&
                         _arrayElementTypes.TryGetValue(retArr.Name, out var retArrEt))
@@ -187,7 +182,6 @@ public sealed class SemanticAnalyzer
                         if (_arrayStructElementTypes.TryGetValue(retArr.Name, out var retArrStructMeta))
                             _functionReturnArrayStructSymbols[_currentFunctionName] = retArrStructMeta;
                     }
-                    // Capture struct metadata for functions returning Struct.
                     if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
                     {
                         var fields = new List<(string Name, SuruType Type)>();
@@ -217,25 +211,24 @@ public sealed class SemanticAnalyzer
                         if (type.Value == SuruType.Array)
                             PropagateArrayMeta(let.Name, let.Value);
                     }
+                    if (!_insideFunction)
+                        _constants.Add(let.Name);
                 }
                 break;
 
             case FieldAssignmentStatement fieldAssign:
             {
                 AnalyzeExpression(fieldAssign.Value);
-                if (fieldAssign.Receiver is VariableReferenceExpression rv)
-                {
-                    if (!_symbols.ContainsKey(rv.Name))
-                        _errors.Add($"{_module.SourcePath}: undefined variable '{rv.Name}'");
-                    else if (_structSymbols.TryGetValue(rv.Name, out var structFields) &&
-                             !structFields.Any(f => f.Name == fieldAssign.FieldName))
-                        _errors.Add($"{_module.SourcePath}: struct '{rv.Name}' has no field '{fieldAssign.FieldName}'");
-                }
+                if (fieldAssign.Receiver is VariableReferenceExpression rv &&
+                    !_symbols.ContainsKey(rv.Name))
+                    _errors.Add($"{_module.SourcePath}: undefined variable '{rv.Name}'");
                 break;
             }
 
             case AssignmentStatement assign:
-                if (!_symbols.ContainsKey(assign.Name))
+                if (_constants.Contains(assign.Name))
+                    _errors.Add($"{_module.SourcePath}: cannot reassign constant '{assign.Name}'");
+                else if (!_symbols.ContainsKey(assign.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{assign.Name}'");
                 AnalyzeExpression(assign.Value);
                 break;
@@ -323,27 +316,14 @@ public sealed class SemanticAnalyzer
         switch (expr)
         {
             case VariableReferenceExpression varRef:
-                // Type names used as static-method receivers (e.g. Int64.from(...)) are not variables.
                 if (varRef.Name is not ("Int64" or "Float64" or "Bool") && !_symbols.ContainsKey(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
                 break;
 
             case ArrayLiteralExpression arrLit:
-            {
                 foreach (var elem in arrLit.Elements)
                     AnalyzeExpression(elem);
-                if (arrLit.Elements.Count > 1)
-                {
-                    var firstType = InferType(arrLit.Elements[0]);
-                    foreach (var elem in arrLit.Elements.Skip(1))
-                    {
-                        var et = InferType(elem);
-                        if (firstType.HasValue && et.HasValue && et.Value != firstType.Value)
-                            _errors.Add($"{_module.SourcePath}: array elements must have the same type");
-                    }
-                }
                 break;
-            }
 
             case StringLiteralExpression:
                 break;
@@ -356,10 +336,6 @@ public sealed class SemanticAnalyzer
             case FieldAccessExpression fa:
                 AnalyzeExpression(fa.Receiver);
                 fa.ResolvedType = InferType(fa);
-                if (fa.Receiver is VariableReferenceExpression fv &&
-                    _structSymbols.TryGetValue(fv.Name, out var structFields) &&
-                    !structFields.Any(f => f.Name == fa.FieldName))
-                    _errors.Add($"{_module.SourcePath}: struct '{fv.Name}' has no field '{fa.FieldName}'");
                 break;
 
             case MethodCallExpression { MethodName: "add" } addCall
@@ -375,7 +351,6 @@ public sealed class SemanticAnalyzer
                     if (addElemType.HasValue)
                     {
                         _arrayElementTypes[addRv.Name] = addElemType.Value;
-                        // Capture struct field shape when adding struct elements.
                         if (addElemType.Value == SuruType.Struct &&
                             !_arrayStructElementTypes.ContainsKey(addRv.Name))
                         {
@@ -441,7 +416,6 @@ public sealed class SemanticAnalyzer
                 break;
 
             case CallExpression call:
-                // Propagate array element types from known function parameter metadata.
                 if (_functionArrayParamMeta.TryGetValue(call.Name, out var callParamMeta))
                 {
                     foreach (var (paramIdx, elemType) in callParamMeta)
@@ -454,7 +428,6 @@ public sealed class SemanticAnalyzer
                         }
                     }
                 }
-                // Propagate array element struct shapes from known function parameter metadata.
                 if (_functionArrayStructParamMeta.TryGetValue(call.Name, out var callArrStructMeta))
                 {
                     foreach (var (paramIdx, structMeta) in callArrStructMeta)
@@ -474,12 +447,7 @@ public sealed class SemanticAnalyzer
                     else
                     {
                         for (int i = 0; i < call.Args.Count; i++)
-                        {
                             AnalyzeExpression(call.Args[i]);
-                            var argType = InferType(call.Args[i]);
-                            if (argType.HasValue && argType.Value != callSig.ParamTypes[i])
-                                _errors.Add($"{_module.SourcePath}: argument {i + 1} of '{call.Name}' has type {argType.Value}, expected {callSig.ParamTypes[i]}");
-                        }
                     }
                 }
                 else

@@ -52,21 +52,12 @@ public sealed class Parser
         if (CanConsume(TokenKind.Return))
             return ParseReturnStatement();
 
-        // let <name> [<TypeAnnotation>] : <expr>
+        // let <name> : <expr>
         if (CanConsume(TokenKind.Let))
         {
             var nameToken = Consume(TokenKind.Identifier);
-
-            string? typeAnnotation = null;
-
-            if (Is(TokenKind.Identifier))
-            {
-                typeAnnotation = Consume().Text;
-            }
-
             Consume(TokenKind.Colon);
-
-            return new LetStatement(nameToken.Text, typeAnnotation, ParseExpression());
+            return new LetStatement(nameToken.Text, ParseExpression());
         }
 
         // <name> : <expr>  (assignment — must consume identifier first, then check for colon)

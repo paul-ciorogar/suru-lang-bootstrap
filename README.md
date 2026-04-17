@@ -26,16 +26,21 @@ let ratio: 1.5
 let flag: true
 ```
 
-Optional type annotation between name and colon:
-
-```suru
-let count Int64: 0
-```
-
 Reassign with `name: value` (no `let`):
 
 ```suru
 flag: false
+```
+
+A `let` declared at module level (outside any function) is a **constant** — reassignment is a compile error:
+
+```suru
+let MAX_SIZE: 1024
+
+fn main(args Array) Int64 {
+    MAX_SIZE: 2048  // error: cannot reassign constant 'MAX_SIZE'
+    return 0
+}
 ```
 
 ### Arithmetic
@@ -186,7 +191,7 @@ fn identity(d Struct) Struct {
 let result: identity(person)
 ```
 
-> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field access is resolved at compile time by index.
+> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field values carry a runtime tag (0=Bool, 1=Int64, 2=Float64, 3=pointer) used when the compile-time type is unknown.
 
 ### Arrays
 
