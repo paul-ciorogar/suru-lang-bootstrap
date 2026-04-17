@@ -28,4 +28,5 @@ public enum TokenKind
     RightBracket,
     StringLiteral,
     Minus,
+    While,
 }

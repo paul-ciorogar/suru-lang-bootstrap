@@ -5,9 +5,9 @@ fn main(args Array) Int64 {
     printLn(y)
     let a: 3.equals(3)
     printLn(a)
-    let b: 5.lessThan(10)
+    let b: 5.lt(10)
     printLn(b)
-    let c: 5.lessThan(3)
+    let c: 5.lt(3)
     printLn(c)
     let day: "Monday"
     match day { "Monday": printLn(1), "Friday": printLn(2), _: printLn(0) }

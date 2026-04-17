@@ -49,11 +49,17 @@ public sealed class CodeGenerator
     private LLVMValueRef _exitFn;
     private LLVMTypeRef _exitFnType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
+    private int _whileCounter;
+    // Array element types for function array parameters: function name → param index → element type.
+    private readonly Dictionary<string, Dictionary<int, SuruType>> _functionArrayParamMeta = new();
+    // Element type of the Array returned by a function: function name → element type.
+    private readonly Dictionary<string, SuruType> _functionReturnArrayMeta = new();
     private readonly Dictionary<string, (LLVMValueRef Fn, LLVMTypeRef FnType, SuruType? ReturnType)> _userFunctions = new();
-    // Struct field metadata: variable name → ordered list of (fieldName, fieldType)
-    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _varStructMeta = new();
     // Array element type metadata: variable name → element SuruType
     private readonly Dictionary<string, SuruType> _varArrayMeta = new();
+    // suru_find_field(ptr head, ptr name) -> ptr: runtime linked-list field search
+    private LLVMValueRef _findFieldFn;
+    private LLVMTypeRef _findFieldFnType;
 
     private CodeGenerator(LLVMModuleRef llvmModule, LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, LLVMTypeRef ptrType)
     {
@@ -143,6 +149,9 @@ public sealed class CodeGenerator
         gen._seqNodeType = context.CreateNamedStruct("suru.Seq");
         gen._seqNodeType.StructSetBody([LLVMTypeRef.Int64, ptrType], false);
 
+        // Emit runtime helper: suru_find_field(ptr head, ptr name) -> ptr
+        gen.EmitFindFieldHelper();
+
         // Pass 1: declare all user-defined functions (enables forward references and recursion).
         foreach (var stmt in module.Statements)
             if (stmt is FunctionDeclaration fn) gen.DeclareFunction(fn);
@@ -202,11 +211,9 @@ public sealed class CodeGenerator
         var entry = llvmFn.AppendBasicBlock("entry");
         _builder.PositionAtEnd(entry);
 
-        var outerVars = new Dictionary<string, (LLVMValueRef Alloca, SuruType Type)>(_vars);
-        var outerStructMeta = new Dictionary<string, List<(string Name, SuruType Type)>>(_varStructMeta);
+        var outerVars      = new Dictionary<string, (LLVMValueRef Alloca, SuruType Type)>(_vars);
         var outerArrayMeta = new Dictionary<string, SuruType>(_varArrayMeta);
         _vars.Clear();
-        _varStructMeta.Clear();
         _varArrayMeta.Clear();
 
         for (int i = 0; i < fn.Parameters.Count; i++)
@@ -230,11 +237,28 @@ public sealed class CodeGenerator
         if (_builder.InsertBlock.Terminator.Handle == IntPtr.Zero && fn.ReturnTypeName == "void")
             _builder.BuildRetVoid();
 
+        // Capture array parameter element types discovered during body analysis.
+        for (int pi = 0; pi < fn.Parameters.Count; pi++)
+        {
+            var pType = ResolveTypeName(fn.Parameters[pi].TypeName);
+            if (pType == SuruType.Array && _varArrayMeta.TryGetValue(fn.Parameters[pi].Name, out var pEt))
+            {
+                if (!_functionArrayParamMeta.ContainsKey(fn.Name))
+                    _functionArrayParamMeta[fn.Name] = new Dictionary<int, SuruType>();
+                _functionArrayParamMeta[fn.Name][pi] = pEt;
+            }
+        }
+
+        // Capture return array element type.
+        if (_pendingArrayMeta.HasValue)
+        {
+            _functionReturnArrayMeta[fn.Name] = _pendingArrayMeta.Value;
+            _pendingArrayMeta = null;
+        }
+
         _vars.Clear();
-        _varStructMeta.Clear();
         _varArrayMeta.Clear();
-        foreach (var kv in outerVars) _vars[kv.Key] = kv.Value;
-        foreach (var kv in outerStructMeta) _varStructMeta[kv.Key] = kv.Value;
+        foreach (var kv in outerVars)      _vars[kv.Key]      = kv.Value;
         foreach (var kv in outerArrayMeta) _varArrayMeta[kv.Key] = kv.Value;
     }
 
@@ -271,22 +295,17 @@ public sealed class CodeGenerator
                 var alloca = _builder.BuildAlloca(LlvmTypeFor(letType), let.Name);
                 _builder.BuildStore(letVal, alloca);
                 _vars[let.Name] = (alloca, letType);
-                if (letType == SuruType.Struct)
-                    PropagateStructMeta(let.Name, let.Value);
                 if (letType == SuruType.Array)
                     PropagateArrayMeta(let.Name, let.Value);
                 break;
 
             case FieldAssignmentStatement fieldAssign:
             {
-                var receiverPtr = LoadStructPtr(fieldAssign.Receiver);
-                var fieldIdx = GetFieldIndex(fieldAssign.Receiver, fieldAssign.FieldName);
-                var fieldType = GetFieldType(fieldAssign.Receiver, fieldAssign.FieldName);
-                var fieldNode = NavigateToNode(receiverPtr, fieldIdx);
-                var valSlot = _builder.BuildStructGEP2(_fieldNodeType, fieldNode, 2, "val_slot");
-                var (assignedVal, _) = EmitValue(fieldAssign.Value);
-                var rawVal = ToI64(assignedVal, fieldType);
-                _builder.BuildStore(rawVal, valSlot);
+                var headPtr = LoadStructPtr(fieldAssign.Receiver);
+                var (assignedVal, assignedType) = EmitValue(fieldAssign.Value);
+                var targetNode = FindFieldNode(headPtr, fieldAssign.FieldName);
+                var valSlot = _builder.BuildStructGEP2(_fieldNodeType, targetNode, 2, "val_slot");
+                _builder.BuildStore(ToI64(assignedVal, assignedType), valSlot);
                 break;
             }
 
@@ -304,6 +323,30 @@ public sealed class CodeGenerator
                     _builder.BuildRet(retVal);
                 }
                 break;
+
+            case WhileStatement whileStmt:
+            {
+                var whileFn = _builder.InsertBlock.Parent;
+                int n = _whileCounter++;
+                var condBlock  = whileFn.AppendBasicBlock($"while_cond_{n}");
+                var bodyBlock  = whileFn.AppendBasicBlock($"while_body_{n}");
+                var afterBlock = whileFn.AppendBasicBlock($"while_after_{n}");
+
+                _builder.BuildBr(condBlock);
+
+                _builder.PositionAtEnd(condBlock);
+                var (condVal, _) = EmitValue(whileStmt.Condition);
+                _builder.BuildCondBr(condVal, bodyBlock, afterBlock);
+
+                _builder.PositionAtEnd(bodyBlock);
+                foreach (var bodyStmt in whileStmt.Body)
+                    EmitStmt(bodyStmt);
+                if (_builder.InsertBlock.Terminator.Handle == IntPtr.Zero)
+                    _builder.BuildBr(condBlock);
+
+                _builder.PositionAtEnd(afterBlock);
+                break;
+            }
 
             case FunctionDeclaration:
                 // Handled in the two-pass approach in Generate().
@@ -341,14 +384,50 @@ public sealed class CodeGenerator
 
             case FieldAccessExpression fa:
             {
-                var nodePtr = LoadStructPtr(fa.Receiver);
-                var fieldIndex = GetFieldIndex(fa.Receiver, fa.FieldName);
-                var fieldType = GetFieldType(fa.Receiver, fa.FieldName);
-                var targetNode = NavigateToNode(nodePtr, fieldIndex);
-                var valSlot = _builder.BuildStructGEP2(_fieldNodeType, targetNode, 2, "val_slot");
-                var rawVal = _builder.BuildLoad2(LLVMTypeRef.Int64, valSlot, "raw_val");
-                var typedVal = FromI64(rawVal, fieldType);
-                return (typedVal, fieldType);
+                var headPtr    = LoadStructPtr(fa.Receiver);
+                var targetNode = FindFieldNode(headPtr, fa.FieldName);
+                var valSlot    = _builder.BuildStructGEP2(_fieldNodeType, targetNode, 2, "val_slot");
+                var rawVal     = _builder.BuildLoad2(LLVMTypeRef.Int64, valSlot, "raw_val");
+
+                if (fa.ResolvedType is { } fieldType)
+                {
+                    var typedVal = FromI64(rawVal, fieldType);
+                    return (typedVal, fieldType);
+                }
+
+                // ResolvedType not known at compile time — read the tag from the node at runtime.
+                // Node layout: { ptr name [0], i32 tag [1], i64 val [2], ptr next [3] }
+                // Tag: 0=Bool, 1=Int64, 2=Float64, 3=pointer (String/Array/Struct)
+                var tagSlot = _builder.BuildStructGEP2(_fieldNodeType, targetNode, 1, "tag_slot");
+                var tag     = _builder.BuildLoad2(LLVMTypeRef.Int32, tagSlot, "tag");
+
+                // Branch: tag > 2 means pointer type, otherwise scalar (treat as Int64)
+                var isPtr   = _builder.BuildICmp(LLVMIntPredicate.LLVMIntUGT, tag,
+                                  LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 2), "is_ptr");
+
+                var fn       = _builder.InsertBlock.Parent;
+                var ptrBB    = fn.AppendBasicBlock("fa_ptr");
+                var scalarBB = fn.AppendBasicBlock("fa_scalar");
+                var mergeBB  = fn.AppendBasicBlock("fa_merge");
+
+                _builder.BuildCondBr(isPtr, ptrBB, scalarBB);
+
+                _builder.PositionAtEnd(ptrBB);
+                var asPtr = _builder.BuildIntToPtr(rawVal, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "fa_as_ptr");
+                _builder.BuildBr(mergeBB);
+
+                _builder.PositionAtEnd(scalarBB);
+                // rawVal is already i64 — leave it as is; the phi will unify via inttoptr
+                var asI64Ptr = _builder.BuildIntToPtr(rawVal, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "fa_scalar_ptr");
+                _builder.BuildBr(mergeBB);
+
+                _builder.PositionAtEnd(mergeBB);
+                var ptrTy  = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                var phi    = _builder.BuildPhi(ptrTy, "fa_val");
+                phi.AddIncoming([asPtr, asI64Ptr], [ptrBB, scalarBB], 2);
+                // Return as opaque ptr with SuruType.Struct — callers using this value
+                // for further field access or as a Struct argument will work correctly.
+                return (phi, SuruType.Struct);
             }
 
             case MethodCallExpression method:
@@ -391,7 +470,8 @@ public sealed class CodeGenerator
         {
             if (_varArrayMeta.ContainsKey(cloneSrc.Name))
                 return EmitCloneArray(cloneSrc.Name);
-            return EmitClone(cloneSrc.Name);
+            var (cloneHeadPtr, _) = EmitValue(call.Args[0]);
+            return EmitCloneStruct(cloneHeadPtr);
         }
 
         if (call.Name == "drop" && call.Args.Count == 1 &&
@@ -400,7 +480,10 @@ public sealed class CodeGenerator
             if (_varArrayMeta.ContainsKey(dropSrc.Name))
                 EmitDropArray(dropSrc.Name);
             else
-                EmitDrop(dropSrc.Name);
+            {
+                var (dropHeadPtr, _) = EmitValue(call.Args[0]);
+                EmitDropStruct(dropHeadPtr);
+            }
             return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
         }
 
@@ -423,6 +506,19 @@ public sealed class CodeGenerator
 
         if (_userFunctions.TryGetValue(call.Name, out var fnEntry))
         {
+            // Propagate array element types from function parameter metadata.
+            if (_functionArrayParamMeta.TryGetValue(call.Name, out var callParamMeta))
+            {
+                foreach (var (paramIdx, elemType) in callParamMeta)
+                {
+                    if (paramIdx < call.Args.Count &&
+                        call.Args[paramIdx] is VariableReferenceExpression argRef &&
+                        !_varArrayMeta.ContainsKey(argRef.Name))
+                    {
+                        _varArrayMeta[argRef.Name] = elemType;
+                    }
+                }
+            }
             var argVals = call.Args.Select(a => EmitValue(a).Value).ToArray();
             var callResult = _builder.BuildCall2(fnEntry.FnType, fnEntry.Fn, argVals, "");
             if (fnEntry.ReturnType.HasValue)
@@ -486,7 +582,7 @@ public sealed class CodeGenerator
 
         var (arg, _) = EmitValue(method.Args[0]);
 
-        var isBoolResult = method.MethodName is "equals" or "lessThan";
+        var isBoolResult = method.MethodName is "equals" or "lt" or "gt" or "lte" or "gte";
 
         var value = (method.MethodName, receiverType) switch
         {
@@ -498,11 +594,17 @@ public sealed class CodeGenerator
             ("multiply", SuruType.Float64) => _builder.BuildFMul(receiver, arg, ""),
             ("split",    SuruType.Int64)   => _builder.BuildSDiv(receiver, arg, ""),
             ("split",    SuruType.Float64) => _builder.BuildFDiv(receiver, arg, ""),
-            ("equals",   SuruType.Bool)    => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, receiver, arg, ""),
-            ("equals",   SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, receiver, arg, ""),
+            ("equals",   SuruType.Bool)    => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,  receiver, arg, ""),
+            ("equals",   SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,  receiver, arg, ""),
             ("equals",   SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, receiver, arg, ""),
-            ("lessThan", SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, receiver, arg, ""),
-            ("lessThan", SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, receiver, arg, ""),
+            ("lt",       SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, receiver, arg, ""),
+            ("lt",       SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, receiver, arg, ""),
+            ("gt",       SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, receiver, arg, ""),
+            ("gt",       SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGT, receiver, arg, ""),
+            ("lte",      SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, receiver, arg, ""),
+            ("lte",      SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLE, receiver, arg, ""),
+            ("gte",      SuruType.Int64)   => _builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, receiver, arg, ""),
+            ("gte",      SuruType.Float64) => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGE, receiver, arg, ""),
             _ => throw new InvalidOperationException($"Unknown method '{method.MethodName}' on {receiverType}"),
         };
 
@@ -544,6 +646,10 @@ public sealed class CodeGenerator
             case "add":
             {
                 var (newElem, newElemType) = EmitValue(method.Args[0]);
+                // Infer element type for arrays that were declared empty ([]).
+                if (method.Receiver is VariableReferenceExpression addRv &&
+                    !_varArrayMeta.ContainsKey(addRv.Name))
+                    _varArrayMeta[addRv.Name] = newElemType;
                 // realloc data to (len+1)*8
                 var one64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 1, false);
                 var newLen = _builder.BuildAdd(len, one64, "new_len");
@@ -715,6 +821,15 @@ public sealed class CodeGenerator
                 var dSlot = _builder.BuildStructGEP2(_seqNodeType, newHdr, 1, "");
                 _builder.BuildStore(newBuf, dSlot);
                 return (newHdr, SuruType.String);
+            }
+
+            case "ord":
+            {
+                var zero64 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0, false);
+                var firstSlot = _builder.BuildGEP2(LLVMTypeRef.Int8, data, new[] { zero64 }, "ord_slot");
+                var byte0 = _builder.BuildLoad2(LLVMTypeRef.Int8, firstSlot, "ord_byte");
+                var ord = _builder.BuildZExt(byte0, LLVMTypeRef.Int64, "ord");
+                return (ord, SuruType.Int64);
             }
 
             case "toString":
@@ -1019,30 +1134,55 @@ public sealed class CodeGenerator
 
     // ── Struct helpers ────────────────────────────────────────────────────────
 
-    private void PropagateStructMeta(string varName, Expression value)
+    // Emit the suru_find_field helper once.  It traverses the linked list at
+    // runtime comparing the stored name pointer via strcmp and returns the node.
+    private void EmitFindFieldHelper()
     {
-        switch (value)
-        {
-            case StructLiteralExpression when _pendingStructMeta != null:
-                _varStructMeta[varName] = _pendingStructMeta;
-                _pendingStructMeta = null;
-                break;
-            case VariableReferenceExpression v when _varStructMeta.TryGetValue(v.Name, out var meta):
-                _varStructMeta[varName] = new List<(string, SuruType)>(meta);
-                break;
-            case CallExpression { Name: "clone" } when _pendingStructMeta != null:
-                _varStructMeta[varName] = _pendingStructMeta;
-                _pendingStructMeta = null;
-                break;
-        }
+        _findFieldFnType = LLVMTypeRef.CreateFunction(_ptrType, [_ptrType, _ptrType]);
+        _findFieldFn = _llvmModule.AddFunction("suru_find_field", _findFieldFnType);
+        _findFieldFn.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        var entryBB    = _findFieldFn.AppendBasicBlock("entry");
+        var loopBB     = _findFieldFn.AppendBasicBlock("loop");
+        var continueBB = _findFieldFn.AppendBasicBlock("continue");
+        var doneBB     = _findFieldFn.AppendBasicBlock("done");
+
+        var head = _findFieldFn.GetParam(0);
+        var name = _findFieldFn.GetParam(1);
+
+        _builder.PositionAtEnd(entryBB);
+        _builder.BuildBr(loopBB);
+
+        _builder.PositionAtEnd(loopBB);
+        var node = _builder.BuildPhi(_ptrType, "node");
+        node.AddIncoming(new[] { head }, new[] { entryBB }, 1);
+        var nameSlot   = _builder.BuildStructGEP2(_fieldNodeType, node, 0, "name_slot");
+        var storedName = _builder.BuildLoad2(_ptrType, nameSlot, "stored_name");
+        var cmp = _builder.BuildCall2(_strcmpFnType, _strcmpFn, new[] { storedName, name }, "ff_cmp");
+        var zero32 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false);
+        var found = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cmp, zero32, "found");
+        _builder.BuildCondBr(found, doneBB, continueBB);
+
+        _builder.PositionAtEnd(continueBB);
+        var nextSlot = _builder.BuildStructGEP2(_fieldNodeType, node, 3, "next_slot");
+        var next = _builder.BuildLoad2(_ptrType, nextSlot, "next");
+        node.AddIncoming(new[] { next }, new[] { continueBB }, 1);
+        _builder.BuildBr(loopBB);
+
+        _builder.PositionAtEnd(doneBB);
+        _builder.BuildRet(node);
     }
 
-    private List<(string Name, SuruType Type)>? _pendingStructMeta;
+    // Emit a runtime call to suru_find_field for the named field.
+    private LLVMValueRef FindFieldNode(LLVMValueRef headPtr, string fieldName)
+    {
+        var namePtr = _builder.BuildGlobalStringPtr(fieldName, $"fldname_{fieldName}");
+        return _builder.BuildCall2(_findFieldFnType, _findFieldFn, new[] { headPtr, namePtr }, "fld_node");
+    }
 
     private (LLVMValueRef Value, SuruType Type) EmitStructLiteral(StructLiteralExpression lit)
     {
         LLVMValueRef prevNodePtr = LLVMValueRef.CreateConstNull(_ptrType);
-        var fieldMeta = new List<(string Name, SuruType Type)>();
 
         // Build nodes in reverse so each node's 'next' points to the already-built tail.
         for (int i = lit.Fields.Count - 1; i >= 0; i--)
@@ -1072,10 +1212,8 @@ public sealed class CodeGenerator
             _builder.BuildStore(prevNodePtr, nextSlot);
 
             prevNodePtr = nodePtr;
-            fieldMeta.Insert(0, (fieldName, fieldType));
         }
 
-        _pendingStructMeta = fieldMeta;
         return (prevNodePtr, SuruType.Struct);
     }
 
@@ -1083,31 +1221,6 @@ public sealed class CodeGenerator
     {
         var (ptr, _) = EmitValue(receiver);
         return ptr;
-    }
-
-    private int GetFieldIndex(Expression receiver, string fieldName)
-    {
-        if (receiver is VariableReferenceExpression v && _varStructMeta.TryGetValue(v.Name, out var meta))
-            return meta.FindIndex(f => f.Name == fieldName);
-        throw new InvalidOperationException($"No struct metadata for field '{fieldName}'");
-    }
-
-    private SuruType GetFieldType(Expression receiver, string fieldName)
-    {
-        if (receiver is VariableReferenceExpression v && _varStructMeta.TryGetValue(v.Name, out var meta))
-            return meta.First(f => f.Name == fieldName).Type;
-        throw new InvalidOperationException($"No struct metadata for field '{fieldName}'");
-    }
-
-    private LLVMValueRef NavigateToNode(LLVMValueRef headPtr, int fieldIndex)
-    {
-        var nodePtr = headPtr;
-        for (int i = 0; i < fieldIndex; i++)
-        {
-            var nextSlot = _builder.BuildStructGEP2(_fieldNodeType, nodePtr, 3, "next_slot");
-            nodePtr = _builder.BuildLoad2(_ptrType, nextSlot, "next");
-        }
-        return nodePtr;
     }
 
     private LLVMValueRef ToI64(LLVMValueRef val, SuruType type) => type switch
@@ -1126,71 +1239,97 @@ public sealed class CodeGenerator
         _                => _builder.BuildIntToPtr(raw, _ptrType, ""),  // Struct, Array, String: restore ptr
     };
 
-    private (LLVMValueRef Value, SuruType Type) EmitClone(string srcVarName)
+    // Clone a struct by traversing its linked list at runtime.
+    private (LLVMValueRef Value, SuruType Type) EmitCloneStruct(LLVMValueRef headPtr)
     {
-        if (!_varStructMeta.TryGetValue(srcVarName, out var fields))
-            throw new InvalidOperationException($"No struct metadata for '{srcVarName}'");
+        var fn = _builder.InsertBlock.Parent;
+        var srcAlloca     = _builder.BuildAlloca(_ptrType, "csrc");
+        var prevAlloca    = _builder.BuildAlloca(_ptrType, "cprev");
+        var newHeadAlloca = _builder.BuildAlloca(_ptrType, "chead");
+        var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
+        _builder.BuildStore(headPtr, srcAlloca);
+        _builder.BuildStore(nullPtr, prevAlloca);
+        _builder.BuildStore(nullPtr, newHeadAlloca);
 
-        var (srcHeadPtr, _) = EmitValue(new VariableReferenceExpression(srcVarName));
+        var condBB  = fn.AppendBasicBlock("clone_cond");
+        var bodyBB  = fn.AppendBasicBlock("clone_body");
+        var wireBB  = fn.AppendBasicBlock("clone_wire");
+        var headBB  = fn.AppendBasicBlock("clone_sethead");
+        var afterBB = fn.AppendBasicBlock("clone_after");
+        var doneBB  = fn.AppendBasicBlock("clone_done");
 
-        LLVMValueRef prevNewNode = LLVMValueRef.CreateConstNull(_ptrType);
-        LLVMValueRef? newHead = null;
+        _builder.BuildBr(condBB);
 
-        for (int i = 0; i < fields.Count; i++)
-        {
-            var oldNode = NavigateToNode(srcHeadPtr, i);
+        _builder.PositionAtEnd(condBB);
+        var src = _builder.BuildLoad2(_ptrType, srcAlloca, "csrc_v");
+        var isNull = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, src, nullPtr, "cnull");
+        _builder.BuildCondBr(isNull, doneBB, bodyBB);
 
-            var size = FieldNodeSize();
-            var newNode = _builder.BuildCall2(_mallocFnType, _mallocFn, new LLVMValueRef[] { size }, $"clone_{fields[i].Name}");
-
-            // Copy all slots
-            CopyFieldNode(oldNode, newNode);
-
-            // Set next to null (will be wired below)
-            var newNextSlot = _builder.BuildStructGEP2(_fieldNodeType, newNode, 3, "");
-            _builder.BuildStore(LLVMValueRef.CreateConstNull(_ptrType), newNextSlot);
-
-            if (i == 0)
-            {
-                newHead = newNode;
-            }
-            else
-            {
-                var prevNextSlot = _builder.BuildStructGEP2(_fieldNodeType, prevNewNode, 3, "");
-                _builder.BuildStore(newNode, prevNextSlot);
-            }
-
-            prevNewNode = newNode;
-        }
-
-        _pendingStructMeta = new List<(string, SuruType)>(fields);
-        return (newHead!.Value, SuruType.Struct);
-    }
-
-    private void CopyFieldNode(LLVMValueRef src, LLVMValueRef dst)
-    {
+        _builder.PositionAtEnd(bodyBB);
+        var size = FieldNodeSize();
+        var newNode = _builder.BuildCall2(_mallocFnType, _mallocFn, new[] { size }, "cnode");
+        // Copy slots 0-2 (name, tag, val)
         for (uint slot = 0; slot <= 2; slot++)
         {
             var srcSlot = _builder.BuildStructGEP2(_fieldNodeType, src, slot, "");
-            var dstSlot = _builder.BuildStructGEP2(_fieldNodeType, dst, slot, "");
+            var dstSlot = _builder.BuildStructGEP2(_fieldNodeType, newNode, slot, "");
             LLVMTypeRef slotType = slot switch { 0 => _ptrType, 1 => LLVMTypeRef.Int32, _ => LLVMTypeRef.Int64 };
-            var val = _builder.BuildLoad2(slotType, srcSlot, "");
-            _builder.BuildStore(val, dstSlot);
+            _builder.BuildStore(_builder.BuildLoad2(slotType, srcSlot, ""), dstSlot);
         }
+        var newNextSlot = _builder.BuildStructGEP2(_fieldNodeType, newNode, 3, "cnext");
+        _builder.BuildStore(nullPtr, newNextSlot);
+        var prev = _builder.BuildLoad2(_ptrType, prevAlloca, "cprev_v");
+        var isFirst = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, prev, nullPtr, "cfirst");
+        _builder.BuildCondBr(isFirst, headBB, wireBB);
+
+        _builder.PositionAtEnd(headBB);
+        _builder.BuildStore(newNode, newHeadAlloca);
+        _builder.BuildBr(afterBB);
+
+        _builder.PositionAtEnd(wireBB);
+        var prevNextSlot = _builder.BuildStructGEP2(_fieldNodeType, prev, 3, "cprev_next");
+        _builder.BuildStore(newNode, prevNextSlot);
+        _builder.BuildBr(afterBB);
+
+        _builder.PositionAtEnd(afterBB);
+        _builder.BuildStore(newNode, prevAlloca);
+        var srcNextSlot = _builder.BuildStructGEP2(_fieldNodeType, src, 3, "csrcnext");
+        var srcNext = _builder.BuildLoad2(_ptrType, srcNextSlot, "csrcnext_v");
+        _builder.BuildStore(srcNext, srcAlloca);
+        _builder.BuildBr(condBB);
+
+        _builder.PositionAtEnd(doneBB);
+        var newHead = _builder.BuildLoad2(_ptrType, newHeadAlloca, "clone_result");
+        return (newHead, SuruType.Struct);
     }
 
-    private void EmitDrop(string varName)
+    // Free all nodes of a struct linked list at runtime.
+    private void EmitDropStruct(LLVMValueRef headPtr)
     {
-        if (!_varStructMeta.TryGetValue(varName, out var fields))
-            throw new InvalidOperationException($"No struct metadata for '{varName}'");
+        var fn = _builder.InsertBlock.Parent;
+        var srcAlloca = _builder.BuildAlloca(_ptrType, "dsrc");
+        _builder.BuildStore(headPtr, srcAlloca);
 
-        var (headPtr, _) = EmitValue(new VariableReferenceExpression(varName));
+        var condBB = fn.AppendBasicBlock("drop_cond");
+        var bodyBB = fn.AppendBasicBlock("drop_body");
+        var doneBB = fn.AppendBasicBlock("drop_done");
+        var nullPtr = LLVMValueRef.CreateConstNull(_ptrType);
 
-        for (int i = 0; i < fields.Count; i++)
-        {
-            var nodePtr = NavigateToNode(headPtr, i);
-            _builder.BuildCall2(_freeFnType, _freeFn, new LLVMValueRef[] { nodePtr }, "");
-        }
+        _builder.BuildBr(condBB);
+
+        _builder.PositionAtEnd(condBB);
+        var src = _builder.BuildLoad2(_ptrType, srcAlloca, "dsrc_v");
+        var isNull = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, src, nullPtr, "dnull");
+        _builder.BuildCondBr(isNull, doneBB, bodyBB);
+
+        _builder.PositionAtEnd(bodyBB);
+        var nextSlot = _builder.BuildStructGEP2(_fieldNodeType, src, 3, "dnext");
+        var next = _builder.BuildLoad2(_ptrType, nextSlot, "dnext_v");
+        _builder.BuildStore(next, srcAlloca);
+        _builder.BuildCall2(_freeFnType, _freeFn, new[] { src }, "");
+        _builder.BuildBr(condBB);
+
+        _builder.PositionAtEnd(doneBB);
     }
 
     // ── Array helpers ─────────────────────────────────────────────────────────
@@ -1211,6 +1350,9 @@ public sealed class CodeGenerator
             case CallExpression { Name: "clone" } when _pendingArrayMeta.HasValue:
                 _varArrayMeta[varName] = _pendingArrayMeta.Value;
                 _pendingArrayMeta = null;
+                break;
+            case CallExpression call when _functionReturnArrayMeta.TryGetValue(call.Name, out var retEt):
+                _varArrayMeta[varName] = retEt;
                 break;
         }
     }

@@ -1,0 +1,17 @@
+fn main(args Array) Int64 {
+    printLn(3.lt(5))
+    printLn(5.lt(3))
+    printLn(5.gt(3))
+    printLn(3.gt(5))
+    printLn(5.lte(5))
+    printLn(4.lte(5))
+    printLn(6.lte(5))
+    printLn(5.gte(5))
+    printLn(6.gte(5))
+    printLn(4.gte(5))
+    let a: "A"
+    printLn(a.ord())
+    let z: "0"
+    printLn(z.ord())
+    return 0
+}

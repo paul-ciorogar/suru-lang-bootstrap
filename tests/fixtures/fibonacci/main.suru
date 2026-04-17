@@ -1,5 +1,5 @@
 fn fibonacci(n Int64) Int64 {
-    return match n.lessThan(2) {
+    return match n.lt(2) {
         true: n,
         _: fibonacci(n.take(1)).add(fibonacci(n.take(2)))
     }

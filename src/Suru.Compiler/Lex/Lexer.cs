@@ -67,6 +67,7 @@ public sealed class Lexer(string source)
             "fn"     => TokenKind.Fn,
             "return" => TokenKind.Return,
             "void"   => TokenKind.Void,
+            "while"  => TokenKind.While,
             _        => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);

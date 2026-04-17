@@ -13,6 +13,19 @@ public sealed class SemanticAnalyzer
     private readonly List<string> _errors = [];
     private SuruType? _currentFunctionReturnType = null;
     private bool _currentFunctionIsVoid = false;
+    private string? _currentFunctionName = null;
+    // Struct field metadata for functions that return Struct (captured from return statements).
+    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
+    // Array element types for function array parameters: function name → param index → element type.
+    private readonly Dictionary<string, Dictionary<int, SuruType>> _functionArrayParamMeta = new();
+    // Element type of the Array returned by a function: function name → element type.
+    private readonly Dictionary<string, SuruType> _functionReturnArrayMeta = new();
+    // Struct field shapes of array elements: array variable name → field list.
+    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _arrayStructElementTypes = new();
+    // Struct field shapes of elements in arrays returned by functions: function name → field list.
+    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnArrayStructSymbols = new();
+    // Struct field shapes of array parameters: function name → param index → field list.
+    private readonly Dictionary<string, Dictionary<int, List<(string Name, SuruType Type)>>> _functionArrayStructParamMeta = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -79,9 +92,11 @@ public sealed class SemanticAnalyzer
                 var outerSymbols = new Dictionary<string, SuruType>(_symbols);
                 var outerStructSymbols = new Dictionary<string, List<(string, SuruType)>>(_structSymbols);
                 var outerArrayElementTypes = new Dictionary<string, SuruType>(_arrayElementTypes);
+                var outerArrayStructElementTypes = new Dictionary<string, List<(string, SuruType)>>(_arrayStructElementTypes);
                 _symbols.Clear();
                 _structSymbols.Clear();
                 _arrayElementTypes.Clear();
+                _arrayStructElementTypes.Clear();
 
                 if (_functions.TryGetValue(fn.Name, out var sig))
                 {
@@ -99,6 +114,7 @@ public sealed class SemanticAnalyzer
 
                 _currentFunctionReturnType = sig.ReturnType;
                 _currentFunctionIsVoid = fn.ReturnTypeName == "void";
+                _currentFunctionName = fn.Name;
 
                 bool hasReturn = false;
                 foreach (var bodyStmt in fn.Body)
@@ -110,14 +126,40 @@ public sealed class SemanticAnalyzer
                 if (!_currentFunctionIsVoid && !hasReturn)
                     _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
+                // Capture array parameter element types and struct shapes discovered during body analysis.
+                if (_functions.TryGetValue(fn.Name, out var fnSigCap))
+                {
+                    for (int pi = 0; pi < fn.Parameters.Count; pi++)
+                    {
+                        if (pi < fnSigCap.ParamTypes.Count && fnSigCap.ParamTypes[pi] == SuruType.Array)
+                        {
+                            if (_arrayElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pEt))
+                            {
+                                if (!_functionArrayParamMeta.ContainsKey(fn.Name))
+                                    _functionArrayParamMeta[fn.Name] = new Dictionary<int, SuruType>();
+                                _functionArrayParamMeta[fn.Name][pi] = pEt;
+                            }
+                            if (_arrayStructElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pStructMeta))
+                            {
+                                if (!_functionArrayStructParamMeta.ContainsKey(fn.Name))
+                                    _functionArrayStructParamMeta[fn.Name] = new Dictionary<int, List<(string, SuruType)>>();
+                                _functionArrayStructParamMeta[fn.Name][pi] = pStructMeta;
+                            }
+                        }
+                    }
+                }
+
                 _symbols.Clear();
                 _structSymbols.Clear();
                 _arrayElementTypes.Clear();
+                _arrayStructElementTypes.Clear();
                 foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
                 foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
                 foreach (var kv in outerArrayElementTypes) _arrayElementTypes[kv.Key] = kv.Value;
+                foreach (var kv in outerArrayStructElementTypes) _arrayStructElementTypes[kv.Key] = kv.Value;
                 _currentFunctionReturnType = null;
                 _currentFunctionIsVoid = false;
+                _currentFunctionName = null;
                 break;
             }
 
@@ -135,6 +177,27 @@ public sealed class SemanticAnalyzer
                         var retType = InferType(ret.Value);
                         if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
                             _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
+                    }
+                    // Capture return array element type and struct shape for functions returning Array.
+                    if (_currentFunctionName != null &&
+                        ret.Value is VariableReferenceExpression retArr &&
+                        _arrayElementTypes.TryGetValue(retArr.Name, out var retArrEt))
+                    {
+                        _functionReturnArrayMeta[_currentFunctionName] = retArrEt;
+                        if (_arrayStructElementTypes.TryGetValue(retArr.Name, out var retArrStructMeta))
+                            _functionReturnArrayStructSymbols[_currentFunctionName] = retArrStructMeta;
+                    }
+                    // Capture struct metadata for functions returning Struct.
+                    if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
+                    {
+                        var fields = new List<(string Name, SuruType Type)>();
+                        foreach (var (name, expr) in retLit.Fields)
+                        {
+                            var t = InferType(expr);
+                            if (t.HasValue) fields.Add((name, t.Value));
+                        }
+                        if (fields.Count > 0)
+                            _functionReturnStructSymbols[_currentFunctionName] = fields;
                     }
                 }
                 break;
@@ -177,6 +240,15 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(assign.Value);
                 break;
 
+            case WhileStatement whileStmt:
+                AnalyzeExpression(whileStmt.Condition);
+                var condType = InferType(whileStmt.Condition);
+                if (condType.HasValue && condType.Value != SuruType.Bool)
+                    _errors.Add($"{_module.SourcePath}: while condition must be Bool, got {condType.Value}");
+                foreach (var bodyStmt in whileStmt.Body)
+                    AnalyzeStatement(bodyStmt);
+                break;
+
             case ExpressionStatement expr:
                 AnalyzeExpression(expr.Expression);
                 break;
@@ -200,6 +272,11 @@ public sealed class SemanticAnalyzer
                 when call.Args[0] is VariableReferenceExpression src
                   && _arrayElementTypes.TryGetValue(src.Name, out var srcEt):
                 _arrayElementTypes[varName] = srcEt;
+                break;
+            case CallExpression call when _functionReturnArrayMeta.TryGetValue(call.Name, out var retEt):
+                _arrayElementTypes[varName] = retEt;
+                if (_functionReturnArrayStructSymbols.TryGetValue(call.Name, out var retArrStructMeta))
+                    _arrayStructElementTypes[varName] = retArrStructMeta;
                 break;
         }
     }
@@ -226,6 +303,17 @@ public sealed class SemanticAnalyzer
                 when call.Args[0] is VariableReferenceExpression src
                   && _structSymbols.TryGetValue(src.Name, out var srcMeta):
                 _structSymbols[varName] = new List<(string, SuruType)>(srcMeta);
+                break;
+            case CallExpression call when _functionReturnStructSymbols.TryGetValue(call.Name, out var fnMeta):
+                _structSymbols[varName] = new List<(string, SuruType)>(fnMeta);
+                break;
+            case MatchExpression match when match.Arms.Count > 0:
+                PropagateStructMeta(varName, match.Arms[0].Body);
+                break;
+            case MethodCallExpression { MethodName: "at" } atCall
+                when atCall.Receiver is VariableReferenceExpression atRv
+                  && _arrayStructElementTypes.TryGetValue(atRv.Name, out var atStructMeta):
+                _structSymbols[varName] = new List<(string, SuruType)>(atStructMeta);
                 break;
         }
     }
@@ -267,10 +355,36 @@ public sealed class SemanticAnalyzer
 
             case FieldAccessExpression fa:
                 AnalyzeExpression(fa.Receiver);
+                fa.ResolvedType = InferType(fa);
                 if (fa.Receiver is VariableReferenceExpression fv &&
                     _structSymbols.TryGetValue(fv.Name, out var structFields) &&
                     !structFields.Any(f => f.Name == fa.FieldName))
                     _errors.Add($"{_module.SourcePath}: struct '{fv.Name}' has no field '{fa.FieldName}'");
+                break;
+
+            case MethodCallExpression { MethodName: "add" } addCall
+                when addCall.Receiver is VariableReferenceExpression addRv
+                  && _symbols.TryGetValue(addRv.Name, out var addArrType)
+                  && addArrType == SuruType.Array
+                  && addCall.Args.Count == 1:
+                AnalyzeExpression(addCall.Receiver);
+                AnalyzeExpression(addCall.Args[0]);
+                if (!_arrayElementTypes.ContainsKey(addRv.Name))
+                {
+                    var addElemType = InferType(addCall.Args[0]);
+                    if (addElemType.HasValue)
+                    {
+                        _arrayElementTypes[addRv.Name] = addElemType.Value;
+                        // Capture struct field shape when adding struct elements.
+                        if (addElemType.Value == SuruType.Struct &&
+                            !_arrayStructElementTypes.ContainsKey(addRv.Name))
+                        {
+                            if (addCall.Args[0] is CallExpression addFnCall &&
+                                _functionReturnStructSymbols.TryGetValue(addFnCall.Name, out var addStructMeta))
+                                _arrayStructElementTypes[addRv.Name] = addStructMeta;
+                        }
+                    }
+                }
                 break;
 
             case MethodCallExpression method:
@@ -327,6 +441,32 @@ public sealed class SemanticAnalyzer
                 break;
 
             case CallExpression call:
+                // Propagate array element types from known function parameter metadata.
+                if (_functionArrayParamMeta.TryGetValue(call.Name, out var callParamMeta))
+                {
+                    foreach (var (paramIdx, elemType) in callParamMeta)
+                    {
+                        if (paramIdx < call.Args.Count &&
+                            call.Args[paramIdx] is VariableReferenceExpression argRef &&
+                            !_arrayElementTypes.ContainsKey(argRef.Name))
+                        {
+                            _arrayElementTypes[argRef.Name] = elemType;
+                        }
+                    }
+                }
+                // Propagate array element struct shapes from known function parameter metadata.
+                if (_functionArrayStructParamMeta.TryGetValue(call.Name, out var callArrStructMeta))
+                {
+                    foreach (var (paramIdx, structMeta) in callArrStructMeta)
+                    {
+                        if (paramIdx < call.Args.Count &&
+                            call.Args[paramIdx] is VariableReferenceExpression argRef2 &&
+                            !_arrayStructElementTypes.ContainsKey(argRef2.Name))
+                        {
+                            _arrayStructElementTypes[argRef2.Name] = structMeta;
+                        }
+                    }
+                }
                 if (call.Name != "printLn" && _functions.TryGetValue(call.Name, out var callSig))
                 {
                     if (call.Args.Count != callSig.ParamTypes.Count)
@@ -383,8 +523,8 @@ public sealed class SemanticAnalyzer
                 ? field.Type : null,
         VariableReferenceExpression v => _symbols.TryGetValue(v.Name, out var t) ? t : null,
         MethodCallExpression { MethodName: "compare" } => SuruType.Int64,
-        MethodCallExpression { MethodName: "equals" or "lessThan" } => SuruType.Bool,
-        MethodCallExpression { MethodName: "len" }   => SuruType.Int64,
+        MethodCallExpression { MethodName: "equals" or "lt" or "gt" or "lte" or "gte" } => SuruType.Bool,
+        MethodCallExpression { MethodName: "len" or "ord" } => SuruType.Int64,
         MethodCallExpression { MethodName: "toString" } => SuruType.String,
         MethodCallExpression { MethodName: "at" } m
             when m.Receiver is VariableReferenceExpression rv

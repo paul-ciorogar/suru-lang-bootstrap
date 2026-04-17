@@ -38,6 +38,17 @@ public sealed class Parser
         if (CanConsume(TokenKind.Fn))
             return ParseFunctionDeclaration();
 
+        if (CanConsume(TokenKind.While))
+        {
+            var condition = ParseExpression();
+            Consume(TokenKind.LeftBrace);
+            var body = new List<Statement>();
+            while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+                body.Add(ParseStatement());
+            Consume(TokenKind.RightBrace);
+            return new WhileStatement(condition, body);
+        }
+
         if (CanConsume(TokenKind.Return))
             return ParseReturnStatement();
 
