@@ -882,7 +882,7 @@ public sealed class CodeGenerator
             }
             case SuruType.Float64:
             {
-                var fmt = _builder.BuildGlobalStringPtr("%g", "");
+                var fmt = _builder.BuildGlobalStringPtr("%.15g", "");
                 _builder.BuildCall2(_sprintfFnType, _sprintfFn, new LLVMValueRef[] { buf, fmt, val }, "");
                 break;
             }
@@ -1106,7 +1106,7 @@ public sealed class CodeGenerator
             }
             case SuruType.Float64:
             {
-                var fmt = _builder.BuildGlobalStringPtr("%g\n", "");
+                var fmt = _builder.BuildGlobalStringPtr("%.15g\n", "");
                 _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { fmt, val }, "");
                 break;
             }

@@ -251,6 +251,23 @@ public sealed class Parser
             return new VariableReferenceExpression(token.Text);
         }
 
+        if (token.Kind == TokenKind.Minus)
+        {
+            Advance();
+            var num = _tokens.Current();
+            if (num.Kind == TokenKind.IntLiteral)
+            {
+                Advance();
+                return new IntLiteral(-long.Parse(num.Text));
+            }
+            if (num.Kind == TokenKind.FloatLiteral)
+            {
+                Advance();
+                return new FloatLiteral(-double.Parse(num.Text, CultureInfo.InvariantCulture));
+            }
+            throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
+        }
+
         Advance();
 
         return token.Kind switch

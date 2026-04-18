@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 11 Improvements
+
+- **Negative literal syntax** — `let x: -5` and `let y: -2.5` now parse as expressions. `ParsePrimary` handles `Minus + IntLiteral/FloatLiteral`, mirroring the existing `ParseMatchPattern` logic. Previously negative literals were only supported in `match` pattern positions.
+- **Float64 toString precision** — `printLn` and `.toString()` on `Float64` now use `%.15g` (15 significant figures) instead of `%g` (6). Simple literals like `1.2`, `0.1`, and `3.14` still print concisely; values with more than 6 significant figures are now faithfully represented.
+
 ### Stage 8 Prep 2 — Language Convenience
 
 - **Removed optional type annotation from `let`** — `let x Int64: expr` is no longer valid syntax; the grammar is now simply `let name: expr`. Types are inferred from the RHS and checked at runtime for struct/array values.
