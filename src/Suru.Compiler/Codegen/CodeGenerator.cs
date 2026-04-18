@@ -49,6 +49,7 @@ public sealed class CodeGenerator
     private LLVMValueRef _exitFn;
     private LLVMTypeRef _exitFnType;
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
+    private readonly Dictionary<string, (LLVMValueRef Global, SuruType Type)> _globalVars = new();
     private int _whileCounter;
     // Array element types for function array parameters: function name → param index → element type.
     private readonly Dictionary<string, Dictionary<int, SuruType>> _functionArrayParamMeta = new();
@@ -152,6 +153,10 @@ public sealed class CodeGenerator
         // Emit runtime helper: suru_find_field(ptr head, ptr name) -> ptr
         gen.EmitFindFieldHelper();
 
+        // Pass 0: emit module-level constants as LLVM globals.
+        foreach (var stmt in module.Statements)
+            if (stmt is LetStatement letConst) gen.EmitGlobalConstant(letConst);
+
         // Pass 1: declare all user-defined functions (enables forward references and recursion).
         foreach (var stmt in module.Statements)
             if (stmt is FunctionDeclaration fn) gen.DeclareFunction(fn);
@@ -183,6 +188,34 @@ public sealed class CodeGenerator
         builder.Dispose();
 
         return llvmModule;
+    }
+
+    private void EmitGlobalConstant(LetStatement let)
+    {
+        LLVMValueRef initVal;
+        SuruType suruType;
+        switch (let.Value)
+        {
+            case IntLiteral i:
+                initVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i.Value, true);
+                suruType = SuruType.Int64;
+                break;
+            case FloatLiteral f:
+                initVal = LLVMValueRef.CreateConstReal(LLVMTypeRef.Double, f.Value);
+                suruType = SuruType.Float64;
+                break;
+            case BoolLiteral b:
+                initVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, b.Value ? 1UL : 0UL, false);
+                suruType = SuruType.Bool;
+                break;
+            default:
+                return;
+        }
+        var global = _llvmModule.AddGlobal(LlvmTypeFor(suruType), let.Name);
+        global.Initializer = initVal;
+        global.IsGlobalConstant = true;
+        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        _globalVars[let.Name] = (global, suruType);
     }
 
     private void DeclareFunction(FunctionDeclaration fn)
@@ -369,8 +402,10 @@ public sealed class CodeGenerator
 
             case VariableReferenceExpression varRef:
             {
-                var (alloca, varType) = _vars[varRef.Name];
-                return (_builder.BuildLoad2(LlvmTypeFor(varType), alloca, varRef.Name), varType);
+                if (_vars.TryGetValue(varRef.Name, out var local))
+                    return (_builder.BuildLoad2(LlvmTypeFor(local.Type), local.Alloca, varRef.Name), local.Type);
+                var (global, globalType) = _globalVars[varRef.Name];
+                return (_builder.BuildLoad2(LlvmTypeFor(globalType), global, varRef.Name), globalType);
             }
 
             case StructLiteralExpression structLit:

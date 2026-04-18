@@ -93,6 +93,9 @@ public sealed class SemanticAnalyzer
                 _structSymbols.Clear();
                 _arrayElementTypes.Clear();
                 _arrayStructElementTypes.Clear();
+                foreach (var kv in outerSymbols)
+                    if (_constants.Contains(kv.Key))
+                        _symbols[kv.Key] = kv.Value;
 
                 if (_functions.TryGetValue(fn.Name, out var sig))
                 {

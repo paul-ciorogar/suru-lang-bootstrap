@@ -75,8 +75,8 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase
     {
         var output = Run(_exe, FixturePath("suru-lexer"));
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        // First token of the lexer source is 'fn'
-        Assert.Equal("22 fn 1:1", lines[0]);
+        // First token of the lexer source is 'let' (constants precede all functions)
+        Assert.Equal("16 let 1:1", lines[0]);
         // Last token is EOF
         Assert.StartsWith("0 ", lines[^1]);
         // Should be a substantial number of tokens
