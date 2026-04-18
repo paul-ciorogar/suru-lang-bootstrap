@@ -31,4 +31,20 @@ public abstract class IntegrationTestBase
         process.WaitForExit();
         return process.ExitCode;
     }
+
+    protected static (string Stdout, string Stderr) RunGetStreams(string exe, params string[] args)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = exe,
+            Arguments = string.Join(" ", args.Select(a => $"\"{a}\"")),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        })!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return (stdout, stderr);
+    }
 }

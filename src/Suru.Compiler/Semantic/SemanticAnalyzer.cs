@@ -236,6 +236,8 @@ public sealed class SemanticAnalyzer
         {
             AnalyzeStatement(bodyStmt);
             if (bodyStmt is ReturnStatement) hasReturn = true;
+            if (bodyStmt is ExpressionStatement { Expression: CallExpression { Name: "exit" } })
+                hasReturn = true;
         }
 
         if (!_currentFunctionIsVoid && !hasReturn)
@@ -493,7 +495,7 @@ public sealed class SemanticAnalyzer
                         }
                     }
                 }
-                if (call.Name != "printLn" && _functions.TryGetValue(call.Name, out var callSig))
+                if (call.Name != "printLn" && call.Name != "printError" && _functions.TryGetValue(call.Name, out var callSig))
                 {
                     if (call.Args.Count != callSig.ParamTypes.Count)
                         _errors.Add($"{_module.SourcePath}: function '{call.Name}' called with {call.Args.Count} argument(s), expected {callSig.ParamTypes.Count}");

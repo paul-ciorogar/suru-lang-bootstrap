@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Suru-lexer fixture uses named constants** — All magic integer token-kind values in `tests/fixtures/suru-lexer/main.suru` replaced with 27 named module-level constants (`TOK_EOF` through `TOK_WHILE`).
 - **Negative literal syntax** — `let x: -5` and `let y: -2.5` now parse as expressions. `ParsePrimary` handles `Minus + IntLiteral/FloatLiteral`, mirroring the existing `ParseMatchPattern` logic. Previously negative literals were only supported in `match` pattern positions.
 - **Float64 toString precision** — `printLn` and `.toString()` on `Float64` now use `%.15g` (15 significant figures) instead of `%g` (6). Simple literals like `1.2`, `0.1`, and `3.14` still print concisely; values with more than 6 significant figures are now faithfully represented.
+- **`printError` built-in** — `printError(val)` writes to stderr. Accepts Bool, Int64, Float64, and String, mirroring `printLn`. Implemented via `fprintf(stderr, ...)` with `@stderr` as an LLVM external global.
+- **`exit` is now a terminal statement** — a non-void function whose last reachable statement is `exit(code)` no longer requires an explicit `return`. Semantic analysis counts `exit(...)` as satisfying the return requirement; codegen emits `unreachable` after the call so LLVM sees a properly terminated basic block.
 
 ### Stage 8 Prep 2 — Language Convenience
 

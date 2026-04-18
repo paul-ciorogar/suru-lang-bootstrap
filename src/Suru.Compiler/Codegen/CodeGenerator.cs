@@ -48,6 +48,9 @@ public sealed class CodeGenerator
     private LLVMTypeRef _fwriteFnType;
     private LLVMValueRef _exitFn;
     private LLVMTypeRef _exitFnType;
+    private LLVMValueRef _fprintfFn;
+    private LLVMTypeRef _fprintfFnType;
+    private LLVMValueRef _stderrGlobal;
     private Module _module = new();
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
     private readonly Dictionary<string, (LLVMValueRef Global, SuruType Type)> _globalVars = new();
@@ -144,9 +147,17 @@ public sealed class CodeGenerator
         gen._fwriteFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, [ptrType, LLVMTypeRef.Int64, LLVMTypeRef.Int64, ptrType]);
         gen._fwriteFn = llvmModule.AddFunction("fwrite", gen._fwriteFnType);
 
-        // exit(code) -> void
+        // exit(code) -> void  [noreturn]
         gen._exitFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [LLVMTypeRef.Int32]);
         gen._exitFn = llvmModule.AddFunction("exit", gen._exitFnType);
+
+        // fprintf(file, fmt, ...) -> i32
+        gen._fprintfFnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType, ptrType], true);
+        gen._fprintfFn = llvmModule.AddFunction("fprintf", gen._fprintfFnType);
+
+        // @stderr = external global ptr  (FILE*)
+        gen._stderrGlobal = llvmModule.AddGlobal(ptrType, "stderr");
+        gen._stderrGlobal.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
         // %suru.Seq = type { i64, ptr } — shared layout for Array and String headers
         gen._seqNodeType = context.CreateNamedStruct("suru.Seq");
@@ -270,8 +281,13 @@ public sealed class CodeGenerator
         foreach (var stmt in fn.Body)
             EmitStmt(stmt);
 
-        if (_builder.InsertBlock.Terminator.Handle == IntPtr.Zero && fn.ReturnTypeName == "void")
-            _builder.BuildRetVoid();
+        if (_builder.InsertBlock.Terminator.Handle == IntPtr.Zero)
+        {
+            if (fn.ReturnTypeName == "void")
+                _builder.BuildRetVoid();
+            else
+                _builder.BuildUnreachable();
+        }
 
         // Capture array parameter element types discovered during body analysis.
         for (int pi = 0; pi < fn.Parameters.Count; pi++)
@@ -316,6 +332,11 @@ public sealed class CodeGenerator
             case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args.Count: 1 } call }:
                 var (val, type) = EmitValue(call.Args[0]);
                 EmitPrintLn(val, type);
+                break;
+
+            case ExpressionStatement { Expression: CallExpression { Name: "printError", Args.Count: 1 } peCall }:
+                var (peVal, peType) = EmitValue(peCall.Args[0]);
+                EmitPrintError(peVal, peType);
                 break;
 
             case ExpressionStatement { Expression: MatchExpression matchStmt }:
@@ -530,6 +551,16 @@ public sealed class CodeGenerator
             var (codeVal, _) = EmitValue(call.Args[0]);
             var code32 = _builder.BuildTrunc(codeVal, LLVMTypeRef.Int32, "exit_code");
             _builder.BuildCall2(_exitFnType, _exitFn, new[] { code32 }, "");
+            _builder.BuildUnreachable();
+            var deadBlock = _builder.InsertBlock.Parent.AppendBasicBlock("dead");
+            _builder.PositionAtEnd(deadBlock);
+            return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
+        }
+
+        if (call.Name == "printError" && call.Args.Count == 1)
+        {
+            var (peVal, peType) = EmitValue(call.Args[0]);
+            EmitPrintError(peVal, peType);
             return (LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, 0, false), SuruType.Bool);
         }
 
@@ -1021,6 +1052,11 @@ public sealed class CodeGenerator
             var (v, t) = EmitValue(call.Args[0]);
             EmitPrintLn(v, t);
         }
+        else if (body is CallExpression { Name: "printError", Args.Count: 1 } peCall)
+        {
+            var (v, t) = EmitValue(peCall.Args[0]);
+            EmitPrintError(v, t);
+        }
         else
         {
             EmitValue(body);
@@ -1170,6 +1206,43 @@ public sealed class CodeGenerator
                 var dataPtr = _builder.BuildStructGEP2(_seqNodeType, val, 1, "str_data_slot");
                 var data = _builder.BuildLoad2(_ptrType, dataPtr, "str_data");
                 _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { fmt, data }, "");
+                break;
+            }
+        }
+    }
+
+    private void EmitPrintError(LLVMValueRef val, SuruType type)
+    {
+        var fp = _builder.BuildLoad2(_ptrType, _stderrGlobal, "stderr_fp");
+        switch (type)
+        {
+            case SuruType.Bool:
+            {
+                var fmt      = _builder.BuildGlobalStringPtr("%s\n", "");
+                var trueStr  = _builder.BuildGlobalStringPtr("true", "");
+                var falseStr = _builder.BuildGlobalStringPtr("false", "");
+                var selected = _builder.BuildSelect(val, trueStr, falseStr, "");
+                _builder.BuildCall2(_fprintfFnType, _fprintfFn, new LLVMValueRef[] { fp, fmt, selected }, "");
+                break;
+            }
+            case SuruType.Int64:
+            {
+                var fmt = _builder.BuildGlobalStringPtr("%lld\n", "");
+                _builder.BuildCall2(_fprintfFnType, _fprintfFn, new LLVMValueRef[] { fp, fmt, val }, "");
+                break;
+            }
+            case SuruType.Float64:
+            {
+                var fmt = _builder.BuildGlobalStringPtr("%.15g\n", "");
+                _builder.BuildCall2(_fprintfFnType, _fprintfFn, new LLVMValueRef[] { fp, fmt, val }, "");
+                break;
+            }
+            case SuruType.String:
+            {
+                var fmt     = _builder.BuildGlobalStringPtr("%s\n", "");
+                var dataPtr = _builder.BuildStructGEP2(_seqNodeType, val, 1, "str_data_slot");
+                var data    = _builder.BuildLoad2(_ptrType, dataPtr, "str_data");
+                _builder.BuildCall2(_fprintfFnType, _fprintfFn, new LLVMValueRef[] { fp, fmt, data }, "");
                 break;
             }
         }

@@ -294,10 +294,21 @@ writeFile("output.txt", content)
 
 ### Exit
 
-Terminate the process with a specific exit code:
+Terminate the process with a specific exit code. `exit` is a terminal statement — a non-void function does not need an explicit `return` after it:
 
 ```suru
-exit(1)
+fn main(args Array) Int64 {
+    exit(1)
+}
+```
+
+### printError
+
+Write to stderr. Accepts the same types as `printLn` (Bool, Int64, Float64, String):
+
+```suru
+printError("error: file not found")
+printError(42)
 ```
 
 ### Include directive
