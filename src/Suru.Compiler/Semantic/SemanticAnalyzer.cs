@@ -84,165 +84,27 @@ public sealed class SemanticAnalyzer
         switch (stmt)
         {
             case FunctionDeclaration fn:
-            {
-                var outerSymbols = new Dictionary<string, SuruType>(_symbols);
-                var outerStructSymbols = new Dictionary<string, List<(string, SuruType)>>(_structSymbols);
-                var outerArrayElementTypes = new Dictionary<string, SuruType>(_arrayElementTypes);
-                var outerArrayStructElementTypes = new Dictionary<string, List<(string, SuruType)>>(_arrayStructElementTypes);
-                _symbols.Clear();
-                _structSymbols.Clear();
-                _arrayElementTypes.Clear();
-                _arrayStructElementTypes.Clear();
-                foreach (var kv in outerSymbols)
-                    if (_constants.Contains(kv.Key))
-                        _symbols[kv.Key] = kv.Value;
-
-                if (_functions.TryGetValue(fn.Name, out var sig))
-                {
-                    for (int i = 0; i < fn.Parameters.Count; i++)
-                    {
-                        if (i < sig.ParamTypes.Count)
-                            _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
-                    }
-                    if (fn.Name == "main")
-                        for (int i = 0; i < fn.Parameters.Count; i++)
-                            if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Array)
-                                _arrayElementTypes[fn.Parameters[i].Name] = SuruType.String;
-                }
-
-                _currentFunctionReturnType = sig.ReturnType;
-                _currentFunctionIsVoid = fn.ReturnTypeName == "void";
-                _currentFunctionName = fn.Name;
-                _insideFunction = true;
-
-                bool hasReturn = false;
-                foreach (var bodyStmt in fn.Body)
-                {
-                    AnalyzeStatement(bodyStmt);
-                    if (bodyStmt is ReturnStatement) hasReturn = true;
-                }
-
-                if (!_currentFunctionIsVoid && !hasReturn)
-                    _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
-
-                if (_functions.TryGetValue(fn.Name, out var fnSigCap))
-                {
-                    for (int pi = 0; pi < fn.Parameters.Count; pi++)
-                    {
-                        if (pi < fnSigCap.ParamTypes.Count && fnSigCap.ParamTypes[pi] == SuruType.Array)
-                        {
-                            if (_arrayElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pEt))
-                            {
-                                if (!_functionArrayParamMeta.ContainsKey(fn.Name))
-                                    _functionArrayParamMeta[fn.Name] = new Dictionary<int, SuruType>();
-                                _functionArrayParamMeta[fn.Name][pi] = pEt;
-                            }
-                            if (_arrayStructElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pStructMeta))
-                            {
-                                if (!_functionArrayStructParamMeta.ContainsKey(fn.Name))
-                                    _functionArrayStructParamMeta[fn.Name] = new Dictionary<int, List<(string, SuruType)>>();
-                                _functionArrayStructParamMeta[fn.Name][pi] = pStructMeta;
-                            }
-                        }
-                    }
-                }
-
-                _symbols.Clear();
-                _structSymbols.Clear();
-                _arrayElementTypes.Clear();
-                _arrayStructElementTypes.Clear();
-                foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
-                foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
-                foreach (var kv in outerArrayElementTypes) _arrayElementTypes[kv.Key] = kv.Value;
-                foreach (var kv in outerArrayStructElementTypes) _arrayStructElementTypes[kv.Key] = kv.Value;
-                _currentFunctionReturnType = null;
-                _currentFunctionIsVoid = false;
-                _currentFunctionName = null;
-                _insideFunction = false;
+                AnalyzeFunctionDeclaration(fn);
                 break;
-            }
 
             case ReturnStatement ret:
-                if (ret.Value is null)
-                {
-                    if (!_currentFunctionIsVoid)
-                        _errors.Add($"{_module.SourcePath}: bare 'return' in non-void function");
-                }
-                else
-                {
-                    AnalyzeExpression(ret.Value);
-                    if (_currentFunctionReturnType.HasValue)
-                    {
-                        var retType = InferType(ret.Value);
-                        if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
-                            _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
-                    }
-                    if (_currentFunctionName != null &&
-                        ret.Value is VariableReferenceExpression retArr &&
-                        _arrayElementTypes.TryGetValue(retArr.Name, out var retArrEt))
-                    {
-                        _functionReturnArrayMeta[_currentFunctionName] = retArrEt;
-                        if (_arrayStructElementTypes.TryGetValue(retArr.Name, out var retArrStructMeta))
-                            _functionReturnArrayStructSymbols[_currentFunctionName] = retArrStructMeta;
-                    }
-                    if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
-                    {
-                        var fields = new List<(string Name, SuruType Type)>();
-                        foreach (var (name, expr) in retLit.Fields)
-                        {
-                            var t = InferType(expr);
-                            if (t.HasValue) fields.Add((name, t.Value));
-                        }
-                        if (fields.Count > 0)
-                            _functionReturnStructSymbols[_currentFunctionName] = fields;
-                    }
-                }
+                AnalyzeReturnStatement(ret);
                 break;
 
             case LetStatement let:
-                if (_symbols.ContainsKey(let.Name))
-                    _errors.Add($"{_module.SourcePath}: variable '{let.Name}' is already declared");
-                else
-                {
-                    AnalyzeExpression(let.Value);
-                    var type = InferType(let.Value);
-                    if (type.HasValue)
-                    {
-                        _symbols[let.Name] = type.Value;
-                        if (type.Value == SuruType.Struct)
-                            PropagateStructMeta(let.Name, let.Value);
-                        if (type.Value == SuruType.Array)
-                            PropagateArrayMeta(let.Name, let.Value);
-                    }
-                    if (!_insideFunction)
-                        _constants.Add(let.Name);
-                }
+                AnalyzeLetStatement(let);
                 break;
 
             case FieldAssignmentStatement fieldAssign:
-            {
-                AnalyzeExpression(fieldAssign.Value);
-                if (fieldAssign.Receiver is VariableReferenceExpression rv &&
-                    !_symbols.ContainsKey(rv.Name))
-                    _errors.Add($"{_module.SourcePath}: undefined variable '{rv.Name}'");
+                AnalyzeFieldAssignmentStatement(fieldAssign);
                 break;
-            }
 
             case AssignmentStatement assign:
-                if (_constants.Contains(assign.Name))
-                    _errors.Add($"{_module.SourcePath}: cannot reassign constant '{assign.Name}'");
-                else if (!_symbols.ContainsKey(assign.Name))
-                    _errors.Add($"{_module.SourcePath}: undefined variable '{assign.Name}'");
-                AnalyzeExpression(assign.Value);
+                AnalyzeAssignmentStatement(assign);
                 break;
 
             case WhileStatement whileStmt:
-                AnalyzeExpression(whileStmt.Condition);
-                var condType = InferType(whileStmt.Condition);
-                if (condType.HasValue && condType.Value != SuruType.Bool)
-                    _errors.Add($"{_module.SourcePath}: while condition must be Bool, got {condType.Value}");
-                foreach (var bodyStmt in whileStmt.Body)
-                    AnalyzeStatement(bodyStmt);
+                AnalyzeWhileStatement(whileStmt);
                 break;
 
             case ExpressionStatement expr:
@@ -251,16 +113,180 @@ public sealed class SemanticAnalyzer
         }
     }
 
+    private void AnalyzeWhileStatement(WhileStatement whileStmt)
+    {
+        AnalyzeExpression(whileStmt.Condition);
+        var condType = InferType(whileStmt.Condition);
+        if (condType.HasValue && condType.Value != SuruType.Bool)
+            _errors.Add($"{_module.SourcePath}: while condition must be Bool, got {condType.Value}");
+        foreach (var bodyStmt in whileStmt.Body)
+            AnalyzeStatement(bodyStmt);
+    }
+
+    private void AnalyzeAssignmentStatement(AssignmentStatement assign)
+    {
+        if (_constants.Contains(assign.Name))
+            _errors.Add($"{_module.SourcePath}: cannot reassign constant '{assign.Name}'");
+        else if (!_symbols.ContainsKey(assign.Name))
+            _errors.Add($"{_module.SourcePath}: undefined variable '{assign.Name}'");
+        AnalyzeExpression(assign.Value);
+    }
+
+    private void AnalyzeFieldAssignmentStatement(FieldAssignmentStatement fieldAssign)
+    {
+        AnalyzeExpression(fieldAssign.Value);
+        if (fieldAssign.Receiver is VariableReferenceExpression rv &&
+            !_symbols.ContainsKey(rv.Name))
+            _errors.Add($"{_module.SourcePath}: undefined variable '{rv.Name}'");
+    }
+
+    private void AnalyzeLetStatement(LetStatement let)
+    {
+        if (_symbols.ContainsKey(let.Name))
+            _errors.Add($"{_module.SourcePath}: variable '{let.Name}' is already declared");
+        else
+        {
+            AnalyzeExpression(let.Value);
+            var type = InferType(let.Value);
+            if (type.HasValue)
+            {
+                _symbols[let.Name] = type.Value;
+                if (type.Value == SuruType.Struct)
+                    PropagateStructMeta(let.Name, let.Value);
+                if (type.Value == SuruType.Array)
+                    PropagateArrayMeta(let.Name, let.Value);
+            }
+            if (!_insideFunction)
+                _constants.Add(let.Name);
+        }
+    }
+
+    private void AnalyzeReturnStatement(ReturnStatement ret)
+    {
+        if (ret.Value is null)
+        {
+            if (!_currentFunctionIsVoid)
+                _errors.Add($"{_module.SourcePath}: bare 'return' in non-void function");
+        }
+        else
+        {
+            AnalyzeExpression(ret.Value);
+            if (_currentFunctionReturnType.HasValue)
+            {
+                var retType = InferType(ret.Value);
+                if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
+                    _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
+            }
+            if (_currentFunctionName != null &&
+                ret.Value is VariableReferenceExpression retArr &&
+                _arrayElementTypes.TryGetValue(retArr.Name, out var retArrEt))
+            {
+                _functionReturnArrayMeta[_currentFunctionName] = retArrEt;
+                if (_arrayStructElementTypes.TryGetValue(retArr.Name, out var retArrStructMeta))
+                    _functionReturnArrayStructSymbols[_currentFunctionName] = retArrStructMeta;
+            }
+            if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
+            {
+                var fields = new List<(string Name, SuruType Type)>();
+                foreach (var (name, expr) in retLit.Fields)
+                {
+                    var t = InferType(expr);
+                    if (t.HasValue) fields.Add((name, t.Value));
+                }
+                if (fields.Count > 0)
+                    _functionReturnStructSymbols[_currentFunctionName] = fields;
+            }
+        }
+    }
+
+    private void AnalyzeFunctionDeclaration(FunctionDeclaration fn)
+    {
+        var outerSymbols = new Dictionary<string, SuruType>(_symbols);
+        var outerStructSymbols = new Dictionary<string, List<(string, SuruType)>>(_structSymbols);
+        var outerArrayElementTypes = new Dictionary<string, SuruType>(_arrayElementTypes);
+        var outerArrayStructElementTypes = new Dictionary<string, List<(string, SuruType)>>(_arrayStructElementTypes);
+        _symbols.Clear();
+        _structSymbols.Clear();
+        _arrayElementTypes.Clear();
+        _arrayStructElementTypes.Clear();
+        foreach (var kv in outerSymbols)
+            if (_constants.Contains(kv.Key))
+                _symbols[kv.Key] = kv.Value;
+
+        if (_functions.TryGetValue(fn.Name, out var sig))
+        {
+            for (int i = 0; i < fn.Parameters.Count; i++)
+            {
+                if (i < sig.ParamTypes.Count)
+                    _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
+            }
+            if (fn.Name == "main")
+                for (int i = 0; i < fn.Parameters.Count; i++)
+                    if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Array)
+                        _arrayElementTypes[fn.Parameters[i].Name] = SuruType.String;
+        }
+
+        _currentFunctionReturnType = sig.ReturnType;
+        _currentFunctionIsVoid = fn.ReturnTypeName == "void";
+        _currentFunctionName = fn.Name;
+        _insideFunction = true;
+
+        bool hasReturn = false;
+        foreach (var bodyStmt in fn.Body)
+        {
+            AnalyzeStatement(bodyStmt);
+            if (bodyStmt is ReturnStatement) hasReturn = true;
+        }
+
+        if (!_currentFunctionIsVoid && !hasReturn)
+            _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
+
+        if (_functions.TryGetValue(fn.Name, out var fnSigCap))
+        {
+            for (int pi = 0; pi < fn.Parameters.Count; pi++)
+            {
+                if (pi < fnSigCap.ParamTypes.Count && fnSigCap.ParamTypes[pi] == SuruType.Array)
+                {
+                    if (_arrayElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pEt))
+                    {
+                        if (!_functionArrayParamMeta.ContainsKey(fn.Name))
+                            _functionArrayParamMeta[fn.Name] = new Dictionary<int, SuruType>();
+                        _functionArrayParamMeta[fn.Name][pi] = pEt;
+                    }
+                    if (_arrayStructElementTypes.TryGetValue(fn.Parameters[pi].Name, out var pStructMeta))
+                    {
+                        if (!_functionArrayStructParamMeta.ContainsKey(fn.Name))
+                            _functionArrayStructParamMeta[fn.Name] = new Dictionary<int, List<(string, SuruType)>>();
+                        _functionArrayStructParamMeta[fn.Name][pi] = pStructMeta;
+                    }
+                }
+            }
+        }
+
+        _symbols.Clear();
+        _structSymbols.Clear();
+        _arrayElementTypes.Clear();
+        _arrayStructElementTypes.Clear();
+        foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
+        foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
+        foreach (var kv in outerArrayElementTypes) _arrayElementTypes[kv.Key] = kv.Value;
+        foreach (var kv in outerArrayStructElementTypes) _arrayStructElementTypes[kv.Key] = kv.Value;
+        _currentFunctionReturnType = null;
+        _currentFunctionIsVoid = false;
+        _currentFunctionName = null;
+        _insideFunction = false;
+    }
+
     private void PropagateArrayMeta(string varName, Expression value)
     {
         switch (value)
         {
             case ArrayLiteralExpression arr when arr.Elements.Count > 0:
-            {
-                var elemType = InferType(arr.Elements[0]);
-                if (elemType.HasValue) _arrayElementTypes[varName] = elemType.Value;
-                break;
-            }
+                {
+                    var elemType = InferType(arr.Elements[0]);
+                    if (elemType.HasValue) _arrayElementTypes[varName] = elemType.Value;
+                    break;
+                }
             case VariableReferenceExpression v when _arrayElementTypes.TryGetValue(v.Name, out var et):
                 _arrayElementTypes[varName] = et;
                 break;
@@ -282,16 +308,16 @@ public sealed class SemanticAnalyzer
         switch (value)
         {
             case StructLiteralExpression lit:
-            {
-                var fields = new List<(string Name, SuruType Type)>();
-                foreach (var (name, expr) in lit.Fields)
                 {
-                    var t = InferType(expr);
-                    if (t.HasValue) fields.Add((name, t.Value));
+                    var fields = new List<(string Name, SuruType Type)>();
+                    foreach (var (name, expr) in lit.Fields)
+                    {
+                        var t = InferType(expr);
+                        if (t.HasValue) fields.Add((name, t.Value));
+                    }
+                    _structSymbols[varName] = fields;
+                    break;
                 }
-                _structSymbols[varName] = fields;
-                break;
-            }
             case VariableReferenceExpression v when _structSymbols.TryGetValue(v.Name, out var meta):
                 _structSymbols[varName] = new List<(string, SuruType)>(meta);
                 break;
@@ -370,24 +396,24 @@ public sealed class SemanticAnalyzer
             case MethodCallExpression nsCall
                 when nsCall.Receiver is VariableReferenceExpression nsRef
                   && _module.Namespaces.Contains(nsRef.Name):
-            {
-                var qualifiedName = nsRef.Name + "." + nsCall.MethodName;
-                if (_functions.TryGetValue(qualifiedName, out var nsSig))
                 {
-                    if (nsCall.Args.Count != nsSig.ParamTypes.Count)
-                        _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {nsSig.ParamTypes.Count}");
+                    var qualifiedName = nsRef.Name + "." + nsCall.MethodName;
+                    if (_functions.TryGetValue(qualifiedName, out var nsSig))
+                    {
+                        if (nsCall.Args.Count != nsSig.ParamTypes.Count)
+                            _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {nsSig.ParamTypes.Count}");
+                        else
+                        {
+                            for (int i = 0; i < nsCall.Args.Count; i++)
+                                AnalyzeExpression(nsCall.Args[i]);
+                        }
+                    }
                     else
                     {
-                        for (int i = 0; i < nsCall.Args.Count; i++)
-                            AnalyzeExpression(nsCall.Args[i]);
+                        _errors.Add($"{_module.SourcePath}: unknown function '{qualifiedName}'");
                     }
+                    break;
                 }
-                else
-                {
-                    _errors.Add($"{_module.SourcePath}: unknown function '{qualifiedName}'");
-                }
-                break;
-            }
 
             case MethodCallExpression method:
                 AnalyzeExpression(method.Receiver);
@@ -529,7 +555,7 @@ public sealed class SemanticAnalyzer
         MethodCallExpression { MethodName: "slice" or "append" } m
             when InferType(m.Receiver) == SuruType.String => SuruType.String,
         MethodCallExpression { MethodName: "from" } m
-            when m.Receiver is VariableReferenceExpression { Name: "Int64" }   => SuruType.Int64,
+            when m.Receiver is VariableReferenceExpression { Name: "Int64" } => SuruType.Int64,
         MethodCallExpression { MethodName: "from" } m
             when m.Receiver is VariableReferenceExpression { Name: "Float64" } => SuruType.Float64,
         MethodCallExpression nsCall
