@@ -48,6 +48,7 @@ public sealed class CodeGenerator
     private LLVMTypeRef _fwriteFnType;
     private LLVMValueRef _exitFn;
     private LLVMTypeRef _exitFnType;
+    private Module _module = new();
     private readonly Dictionary<string, (LLVMValueRef Alloca, SuruType Type)> _vars = new();
     private readonly Dictionary<string, (LLVMValueRef Global, SuruType Type)> _globalVars = new();
     private int _whileCounter;
@@ -82,6 +83,7 @@ public sealed class CodeGenerator
 
         var builder = LLVMBuilderRef.Create(context);
         var gen = new CodeGenerator(llvmModule, builder, printfFn, printfType, ptrType);
+        gen._module = module;
 
         // %suru.Field = type { ptr, i32, i64, ptr }
         gen._fieldNodeType = context.CreateNamedStruct("suru.Field");
@@ -227,8 +229,9 @@ public sealed class CodeGenerator
         SuruType? returnSuruType = fn.ReturnTypeName == "void" ? null : ResolveTypeName(fn.ReturnTypeName);
         var llvmReturnType = returnSuruType.HasValue ? LlvmTypeFor(returnSuruType.Value) : LLVMTypeRef.Void;
 
-        // Rename user-defined 'main' to 'suru_main' to avoid collision with C main wrapper
-        var llvmName = fn.Name == "main" ? "suru_main" : fn.Name;
+        // Rename user-defined 'main' to 'suru_main' to avoid collision with C main wrapper.
+        // Replace dots (namespace prefix) with __ for valid LLVM symbol names.
+        var llvmName = fn.Name == "main" ? "suru_main" : fn.Name.Replace(".", "__");
 
         var fnType = LLVMTypeRef.CreateFunction(llvmReturnType, paramLlvmTypes);
         var llvmFn = _llvmModule.AddFunction(llvmName, fnType);
@@ -566,6 +569,22 @@ public sealed class CodeGenerator
 
     private (LLVMValueRef Value, SuruType Type) EmitMethodCall(MethodCallExpression method)
     {
+        // Namespace calls: ns.fn(args) — receiver is a namespace alias, not a value
+        if (method.Receiver is VariableReferenceExpression nsRef &&
+            _module.Namespaces.Contains(nsRef.Name))
+        {
+            var qualifiedName = nsRef.Name + "." + method.MethodName;
+            if (_userFunctions.TryGetValue(qualifiedName, out var nsFnEntry))
+            {
+                var argVals = method.Args.Select(a => EmitValue(a).Value).ToArray();
+                var callResult = _builder.BuildCall2(nsFnEntry.FnType, nsFnEntry.Fn, argVals, "");
+                return nsFnEntry.ReturnType.HasValue
+                    ? (callResult, nsFnEntry.ReturnType.Value)
+                    : (callResult, SuruType.Int64);
+            }
+            throw new InvalidOperationException($"Unknown namespaced function '{qualifiedName}'");
+        }
+
         // Static-method calls on type names: Int64.from(str), Float64.from(str)
         if (method.Receiver is VariableReferenceExpression typeRef &&
             typeRef.Name is "Int64" or "Float64" or "Bool")

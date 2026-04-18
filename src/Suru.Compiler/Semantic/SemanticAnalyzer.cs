@@ -319,7 +319,9 @@ public sealed class SemanticAnalyzer
         switch (expr)
         {
             case VariableReferenceExpression varRef:
-                if (varRef.Name is not ("Int64" or "Float64" or "Bool") && !_symbols.ContainsKey(varRef.Name))
+                if (varRef.Name is not ("Int64" or "Float64" or "Bool")
+                    && !_symbols.ContainsKey(varRef.Name)
+                    && !_module.Namespaces.Contains(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
                 break;
 
@@ -364,6 +366,28 @@ public sealed class SemanticAnalyzer
                     }
                 }
                 break;
+
+            case MethodCallExpression nsCall
+                when nsCall.Receiver is VariableReferenceExpression nsRef
+                  && _module.Namespaces.Contains(nsRef.Name):
+            {
+                var qualifiedName = nsRef.Name + "." + nsCall.MethodName;
+                if (_functions.TryGetValue(qualifiedName, out var nsSig))
+                {
+                    if (nsCall.Args.Count != nsSig.ParamTypes.Count)
+                        _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {nsSig.ParamTypes.Count}");
+                    else
+                    {
+                        for (int i = 0; i < nsCall.Args.Count; i++)
+                            AnalyzeExpression(nsCall.Args[i]);
+                    }
+                }
+                else
+                {
+                    _errors.Add($"{_module.SourcePath}: unknown function '{qualifiedName}'");
+                }
+                break;
+            }
 
             case MethodCallExpression method:
                 AnalyzeExpression(method.Receiver);
@@ -508,6 +532,11 @@ public sealed class SemanticAnalyzer
             when m.Receiver is VariableReferenceExpression { Name: "Int64" }   => SuruType.Int64,
         MethodCallExpression { MethodName: "from" } m
             when m.Receiver is VariableReferenceExpression { Name: "Float64" } => SuruType.Float64,
+        MethodCallExpression nsCall
+            when nsCall.Receiver is VariableReferenceExpression nsRef2
+              && _module.Namespaces.Contains(nsRef2.Name)
+              && _functions.TryGetValue(nsRef2.Name + "." + nsCall.MethodName, out var nsFnSig)
+            => nsFnSig.ReturnType,
         MethodCallExpression m     => InferType(m.Receiver),
         UnaryExpression            => SuruType.Bool,
         BinaryExpression           => SuruType.Bool,

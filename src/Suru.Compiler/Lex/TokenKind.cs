@@ -29,4 +29,5 @@ public enum TokenKind
     StringLiteral,
     Minus,
     While,
+    Include,
 }

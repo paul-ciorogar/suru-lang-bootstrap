@@ -1,0 +1,7 @@
+fn double(n Int64) Int64 {
+    return n.multiply(2)
+}
+
+fn greet(name String) String {
+    return "Hello, ".append(name).append("!")
+}

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using LLVMSharp.Interop;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse;
@@ -47,6 +48,24 @@ public class Compiler
             return CompilationResult.Fail(ex.Message);
         }
 
+        // 2b. Resolve include directives
+        try
+        {
+            var visitedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                Path.GetFullPath(_sourcePath)
+            };
+            module = ResolveIncludes(module, Path.GetDirectoryName(Path.GetFullPath(_sourcePath))!, visitedPaths);
+        }
+        catch (ParseException ex)
+        {
+            return CompilationResult.Fail(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return CompilationResult.Fail($"Include resolution failed: {ex.Message}");
+        }
+
         // 3. Semantic analysis
         var semanticErrors =  SemanticAnalyzer.Analyze(module);
         if (semanticErrors.Count > 0)
@@ -72,6 +91,58 @@ public class Compiler
             return CompilationResult.Fail($"Link failed: {linkError}");
 
         return CompilationResult.Ok(executablePath);
+    }
+
+    private static Module ResolveIncludes(Module module, string baseDir, HashSet<string> visitedPaths)
+    {
+        var directives = module.Statements.OfType<IncludeDirective>().ToList();
+        if (directives.Count == 0) return module;
+
+        var mergedStatements = module.Statements
+            .Where(s => s is not IncludeDirective)
+            .ToList();
+        var namespaces = new HashSet<string>(module.Namespaces);
+
+        foreach (var directive in directives)
+        {
+            var fullPath = Path.GetFullPath(Path.Combine(baseDir, directive.Path));
+            if (!File.Exists(fullPath))
+                throw new Exception($"Include file not found: {fullPath}");
+            if (visitedPaths.Contains(fullPath))
+                throw new Exception($"Circular include detected: {fullPath}");
+
+            visitedPaths.Add(fullPath);
+
+            var source = File.ReadAllText(fullPath);
+            var includedModule = Parser.Parse(new Tokens(new Lexer(source), fullPath));
+
+            // Recursively resolve includes in the included file
+            var includedDir = Path.GetDirectoryName(fullPath)!;
+            includedModule = ResolveIncludes(includedModule, includedDir, visitedPaths);
+
+            // Prefix all function declarations with the namespace alias
+            var ns = directive.NamespaceName;
+            namespaces.Add(ns);
+            foreach (var stmt in includedModule.Statements)
+            {
+                if (stmt is FunctionDeclaration fn)
+                {
+                    var prefixed = new FunctionDeclaration(
+                        ns + "." + fn.Name,
+                        fn.Parameters,
+                        fn.ReturnTypeName,
+                        fn.Body);
+                    mergedStatements.Add(prefixed);
+                }
+            }
+        }
+
+        return new Module
+        {
+            SourcePath = module.SourcePath,
+            Statements = mergedStatements,
+            Namespaces = namespaces,
+        };
     }
 
     private static void EmitObjectFile(LLVMModuleRef module, string outputPath)

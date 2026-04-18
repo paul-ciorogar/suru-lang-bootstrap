@@ -35,6 +35,9 @@ public sealed class Parser
 
     private Statement ParseStatement()
     {
+        if (CanConsume(TokenKind.Include))
+            return ParseIncludeDirective();
+
         if (CanConsume(TokenKind.Fn))
             return ParseFunctionDeclaration();
 
@@ -81,6 +84,17 @@ public sealed class Parser
         }
 
         return new ExpressionStatement(ParseExpression());
+    }
+
+    private IncludeDirective ParseIncludeDirective()
+    {
+        var pathToken = Consume(TokenKind.StringLiteral);
+        var asToken = Consume(TokenKind.Identifier);
+        if (asToken.Text != "as")
+            throw new ParseException(
+                $"{_tokens.SourcePath}({asToken.Line},{asToken.Column}): expected 'as', got '{asToken.Text}'");
+        var nsToken = Consume(TokenKind.Identifier);
+        return new IncludeDirective(pathToken.Text, nsToken.Text);
     }
 
     private FunctionDeclaration ParseFunctionDeclaration()

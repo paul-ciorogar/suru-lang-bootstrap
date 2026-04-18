@@ -75,10 +75,13 @@ printLn(not true)         // false
 | Method | Description | Example |
 |---|---|---|
 | `equals(n)` | equality | `3.equals(3)` → `true` |
-| `lessThan(n)` | less-than | `5.lessThan(10)` → `true` |
+| `lt(n)` | less-than | `5.lt(10)` → `true` |
+| `gt(n)` | greater-than | `10.gt(5)` → `true` |
+| `lte(n)` | less-than-or-equal | `5.lte(5)` → `true` |
+| `gte(n)` | greater-than-or-equal | `5.gte(3)` → `true` |
 | `compare(n)` | three-way comparison | `2.compare(5)` → `-1` |
 
-`equals` and `lessThan` work on `Int64`, `Float64`, and `Bool`; always return `Bool`. `compare` works on `Int64` and `Float64`; returns `Int64` (`-1` = less, `0` = equal, `1` = greater).
+`equals`, `lt`, `gt`, `lte`, `gte` work on `Int64`, `Float64`, and `Bool`; always return `Bool`. `compare` works on `Int64` and `Float64`; returns `Int64` (`-1` = less, `0` = equal, `1` = greater).
 
 ### Control flow — match
 
@@ -296,6 +299,32 @@ Terminate the process with a specific exit code:
 ```suru
 exit(1)
 ```
+
+### Include directive
+
+Split a program across multiple `.suru` files using `include`. Functions from the included file are accessible under a namespace alias:
+
+```suru
+include "lib.suru" as lib
+
+fn main(args Array) Int64 {
+    let result: lib.double(21)
+    printLn(result)   // 42
+    return 0
+}
+```
+
+`lib.suru`:
+```suru
+fn double(n Int64) Int64 {
+    return n.multiply(2)
+}
+```
+
+- The path is relative to the file that contains the `include`.
+- All functions from the included file become available as `ns.fn(args)`.
+- Circular includes are detected and reported as a compile error.
+- Only functions are imported — constants and top-level statements from the included file are ignored.
 
 ### Main function and CLI arguments
 
