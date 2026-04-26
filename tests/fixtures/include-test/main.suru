@@ -1,9 +1,8 @@
 include "lib.suru" as lib
 
-fn main(args Array) Int64 {
-    let result: lib.double(21)
+fn main(args Array<String>) {
+    let result Int64: lib.double(21)
     printLn(result)
-    let msg: lib.greet("Suru")
+    let msg String: lib.greet("Suru")
     printLn(msg)
-    return 0
 }

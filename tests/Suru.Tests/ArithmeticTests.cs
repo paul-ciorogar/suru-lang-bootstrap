@@ -7,5 +7,5 @@ public class ArithmeticTests(CompiledFixtures fixtures) : IntegrationTestBase
 
     [Fact]
     public void ArithmeticAndVariables_PrintsExpectedOutput()
-        => Assert.Equal("5\n6\n6\n3\n-5\ntrue\nfalse\n", Run(_exe));
+        => Assert.Equal("5\n6\n6\n3\n-5\ntrue\nfalse\n7\n3\n", Run(_exe));
 }

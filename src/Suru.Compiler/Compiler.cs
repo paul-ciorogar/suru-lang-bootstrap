@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Linq;
-using LLVMSharp.Interop;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
@@ -16,15 +15,9 @@ public class Compiler
     public Compiler(string sourcePath)
     {
         _sourcePath = sourcePath;
-        LLVM.InitializeAllTargetInfos();
-        LLVM.InitializeAllTargets();
-        LLVM.InitializeAllTargetMCs();
-        LLVM.InitializeAllAsmParsers();
-        LLVM.InitializeAllAsmPrinters();
-
     }
 
-    public CompilationResult Compile(string buildDir)
+    public CompilationResult CompileIR(string buildDir)
     {
         if (!File.Exists(_sourcePath))
             return CompilationResult.Fail($"File not found: {_sourcePath}");
@@ -37,7 +30,6 @@ public class Compiler
         var lexer = new Lexer(source);
         var tokens = new Tokens(lexer, _sourcePath);
 
-        // 2. Parse
         Module module;
         try
         {
@@ -48,7 +40,6 @@ public class Compiler
             return CompilationResult.Fail(ex.Message);
         }
 
-        // 2b. Resolve include directives
         try
         {
             var visitedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -66,25 +57,19 @@ public class Compiler
             return CompilationResult.Fail($"Include resolution failed: {ex.Message}");
         }
 
-        // 3. Semantic analysis
-        var semanticErrors =  SemanticAnalyzer.Analyze(module);
+        var semanticErrors = SemanticAnalyzer.Analyze(module);
         if (semanticErrors.Count > 0)
             return CompilationResult.Fail(semanticErrors);
 
-        // 4. Codegen → LLVM IR → object file
-        using var llvmModule = CodeGenerator.Generate(module);
+        var ir = IRCodeGenerator.Generate(module, Path.GetFileName(_sourcePath));
+        var irPath = Path.Combine(buildDir, baseName + ".ll");
+        File.WriteAllText(irPath, ir);
+
         var objectPath = Path.Combine(buildDir, baseName + ".o");
+        var clangError = RunClang(irPath, objectPath);
+        if (clangError is not null)
+            return CompilationResult.Fail($"IR compile failed: {clangError}");
 
-        try
-        {
-            EmitObjectFile(llvmModule, objectPath);
-        }
-        catch (Exception ex)
-        {
-            return CompilationResult.Fail($"Codegen failed: {ex.Message}");
-        }
-
-        // 5. Link → native executable
         var executablePath = Path.Combine(buildDir, baseName);
         var linkError = Link(objectPath, executablePath);
         if (linkError is not null)
@@ -116,11 +101,9 @@ public class Compiler
             var source = File.ReadAllText(fullPath);
             var includedModule = Parser.Parse(new Tokens(new Lexer(source), fullPath));
 
-            // Recursively resolve includes in the included file
             var includedDir = Path.GetDirectoryName(fullPath)!;
             includedModule = ResolveIncludes(includedModule, includedDir, visitedPaths);
 
-            // Prefix all function declarations with the namespace alias
             var ns = directive.NamespaceName;
             namespaces.Add(ns);
             foreach (var stmt in includedModule.Statements)
@@ -130,7 +113,7 @@ public class Compiler
                     var prefixed = new FunctionDeclaration(
                         ns + "." + fn.Name,
                         fn.Parameters,
-                        fn.ReturnTypeName,
+                        fn.ReturnType,
                         fn.Body);
                     mergedStatements.Add(prefixed);
                 }
@@ -145,25 +128,39 @@ public class Compiler
         };
     }
 
-    private static void EmitObjectFile(LLVMModuleRef module, string outputPath)
+    private static string? RunClang(string irPath, string objectPath)
     {
-        var triple = LLVMTargetRef.DefaultTriple;
-        if (!LLVMTargetRef.TryGetTargetFromTriple(triple, out var target, out var targetError))
-            throw new Exception(targetError);
+        var clang = FindClang();
+        if (clang is null)
+            return "clang not found (tried clang, clang-20..clang-15)";
 
-        var machine = target.CreateTargetMachine(
-            triple,
-            cpu: "generic",
-            features: "",
-            level: LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault,
-            reloc: LLVMRelocMode.LLVMRelocPIC,
-            codeModel: LLVMCodeModel.LLVMCodeModelDefault);
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = clang,
+            Arguments = $"-c \"{irPath}\" -o \"{objectPath}\"",
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        })!;
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode == 0 ? null : stderr.Trim();
+    }
 
-        unsafe { LLVM.SetModuleDataLayout(module, machine.CreateTargetDataLayout()); }
-        module.Target = triple;
-
-        if (!machine.TryEmitToFile(module, outputPath, LLVMCodeGenFileType.LLVMObjectFile, out var emitError))
-            throw new Exception(emitError);
+    private static string? FindClang()
+    {
+        foreach (var name in new[] { "clang", "clang-20", "clang-19", "clang-18", "clang-17", "clang-16", "clang-15" })
+        {
+            using var which = Process.Start(new ProcessStartInfo
+            {
+                FileName = "which",
+                Arguments = name,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            })!;
+            which.WaitForExit();
+            if (which.ExitCode == 0) return name;
+        }
+        return null;
     }
 
     private static string? Link(string objectPath, string executablePath)

@@ -1,19 +1,26 @@
-fn main(args Array) Int64 {
-    let x: true
+fn main(args Array<String>) {
+    let x Bool: true
     match x { true: printLn(1), _: printLn(0) }
-    let y: match x { true: 1, _: 0 }
+
+    let y Int64: match x { true: 1, _: 0 }
     printLn(y)
-    let a: 3.equals(3)
+
+    let a Bool: 3.equals(3)
     printLn(a)
-    let b: 5.lt(10)
+
+    let b Bool: 5.lt(10)
     printLn(b)
-    let c: 5.lt(3)
+
+    let c Bool: 5.lt(3)
     printLn(c)
-    let day: "Monday"
+
+    let day String: "Monday"
     match day { "Monday": printLn(1), "Friday": printLn(2), _: printLn(0) }
-    let n: 0.take(1)
+
+    let n Int64: 0.take(1)
     match n { -1: printLn(1), 0: printLn(2), 1: printLn(3), _: printLn(0) }
-    let cmp: 2.compare(5)
+
+    let cmp Int64: 2.compare(5)
     printLn(cmp)
-    return 0
+
 }

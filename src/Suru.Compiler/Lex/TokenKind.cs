@@ -30,4 +30,6 @@ public enum TokenKind
     Minus,
     While,
     Include,
+    LessThan,
+    GreaterThan,
 }

@@ -2,14 +2,31 @@ fn identity(d Struct) Struct {
     return d
 }
 
-fn main(args Array) Int64 {
-    let data: { tall: true, height: 2283 }
+fn main(args Array<String>) {
+    let data Struct: { tall: true, height: 2283 }
     printLn(data.tall)
     printLn(data.height)
+
     data.tall: false
     printLn(data.tall)
-    let copy: clone(data)
+
+    let copy Struct: clone(data)
     printLn(copy.tall)
+
     drop(data)
-    return 0
+
+    // let suru: structFromFunction()
+
+    // printLn(suru.name)
+    // printLn(suru.height)
+
+    // drop(suru)
+
+}
+
+fn structFromFunction() Struct {
+    return {
+        name: "Suru"
+        height: 2283
+    }
 }

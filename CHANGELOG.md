@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12 Prep — Mandatory Types + Array<T> Generics
+
+- **Mandatory `let` type annotations** — every `let` declaration must now include an explicit type between the variable name and the `:`. `let x Int64: 42` is valid; `let x: 42` is a parse error. This eliminates silent type inference failures and makes every binding self-documenting.
+
+- **`Array<T>` generic syntax** — arrays now carry a type parameter that names their element type: `let nums Array<Int64>: [10, 20, 30]`, `let tokens Array<Struct>: []`. The type parameter is used by the compiler to emit correct `FromI64`/`ToI64` conversions when loading array elements — no more fragile heuristic inference from the first literal element. Accepted element types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`.
+
+- **Function signatures with `Array<T>`** — function parameters and return types accept generic array annotations: `fn tokenize(src String) Array<Struct>` and `fn process(items Array<Int64>) void`. The compiler propagates the element type directly from the annotation into `_arrayElementTypes`, replacing the previous `_functionReturnArrayMeta` / `_functionArrayParamMeta` propagation chains for explicitly-typed arrays.
+
+- **`fn main(args Array<String>)`** — the entry point signature is updated to declare the element type of the argv array. The semantic analyzer no longer special-cases `main` to inject `_arrayElementTypes["args"] = String`; the annotation is authoritative.
+
+- **Lexer: `<` and `>` tokens** — two new `TokenKind` values (`LessThan`, `GreaterThan`) for parsing generic type parameters. These tokens are only consumed in type annotation positions and do not conflict with comparison (which uses method calls).
+
+- **`TypeAnnotation` AST node** — a new `sealed record TypeAnnotation(string Name, TypeAnnotation? TypeParam)` replaces the `string?` type annotation field on `LetStatement` and the `string TypeName` field on `FunctionParameter` and `FunctionDeclaration.ReturnType`. `ToString()` renders `Array<Struct>` for diagnostics.
+
+- All 16 fixture files updated to use mandatory type annotations and `Array<T>` where applicable.
+
+- **Line comments** — `//` starts a comment that extends to the end of the line. Comments are stripped in the lexer and may appear anywhere in a Suru source file.
+
+- **Implicit void return type** — a function whose parameter list is followed directly by `{` (no explicit return-type token) now defaults to `void`; `fn main(args Array<String>)` is valid without writing the `void` keyword.
+
+- **LLVMSharp removed; IR-only pipeline** — `CodeGenerator.cs` (LLVMSharp-based backend) deleted; `LLVMSharp 20.1.2` NuGet dependency removed. `Compiler.Compile()` renamed to `Compiler.CompileIR()` — the method now writes a `.ll` text file and invokes `clang -c` to produce the object file instead of calling the LLVM C API directly. `FindClang()` probes `clang`, then `clang-20` through `clang-15` for a usable compiler. `IRCodeGenerator` is now the sole codegen backend.
+
 ### Stage 11 Improvements
+
+- **Implicit `return 0` for `main`** — `fn main(args Array) Int64` no longer requires an explicit `return 0` at the end. If the function body falls off without a terminator, the code generator emits `ret i64 0` automatically (both LLVMSharp and IR backends). The semantic analyzer no longer requires a return statement for `main`. All fixtures and README examples updated.
 
 - **Include directive** — `include "relative/path.suru" as ns` imports all functions from another `.suru` file under a namespace alias. Call sites use `ns.fn(args)`. Resolved at compile time: included `FunctionDeclaration`s are merged into the module with a `"ns.fn"` key; LLVM symbols use `ns__fn`. Circular includes are detected and reported as a compile error. `IncludeDirective` AST node; `Module.Namespaces` set; `ResolveIncludes` pre-pass in `Compiler.Compile`; semantic and codegen namespace-call dispatch via `MethodCallExpression` receiver check. Integration test: `tests/fixtures/include-test/`.
 - **Module-level constants accessible inside functions** — Module-level `let` bindings (constants) are now visible inside all function bodies. Two bugs fixed: `SemanticAnalyzer` was clearing constants from `_symbols` on function entry; `CodeGenerator` was not emitting module-level lets at all for programs with an explicit `main`. Constants are now emitted as LLVM global variables (pass 0 in `Generate`) and looked up via a new `_globalVars` fallback in `EmitValue`.

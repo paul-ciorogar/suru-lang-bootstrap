@@ -54,23 +54,24 @@ public sealed class SemanticAnalyzer
         var paramTypes = new List<SuruType>();
         foreach (var p in fn.Parameters)
         {
-            var t = ResolveTypeName(p.TypeName);
+            var t = ResolveTypeAnnotation(p.TypeAnnotation);
             if (t is null)
-                _errors.Add($"{_module.SourcePath}: unknown type '{p.TypeName}' in parameter '{p.Name}' of function '{fn.Name}'");
+                _errors.Add($"{_module.SourcePath}: unknown type '{p.TypeAnnotation}' in parameter '{p.Name}' of function '{fn.Name}'");
             else
                 paramTypes.Add(t.Value);
         }
 
-        SuruType? returnType = fn.ReturnTypeName == "void" ? null : ResolveTypeName(fn.ReturnTypeName);
-        if (fn.ReturnTypeName != "void" && returnType is null)
-            _errors.Add($"{_module.SourcePath}: unknown return type '{fn.ReturnTypeName}' for function '{fn.Name}'");
+        SuruType? returnType = fn.ReturnType.Name is "void" ? null : ResolveTypeAnnotation(fn.ReturnType);
+        if (fn.ReturnType.Name is not "void" && returnType is null)
+            _errors.Add($"{_module.SourcePath}: unknown return type '{fn.ReturnType}' for function '{fn.Name}'");
 
         _functions[fn.Name] = (paramTypes, returnType);
     }
 
-    private static SuruType? ResolveTypeName(string name) => name switch
+    private static SuruType? ResolveTypeAnnotation(TypeAnnotation ann) => ann.Name switch
     {
         "Bool"    => SuruType.Bool,
+        "Int32"   => SuruType.Int32,
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
         "Struct"  => SuruType.Struct,
@@ -147,14 +148,34 @@ public sealed class SemanticAnalyzer
         else
         {
             AnalyzeExpression(let.Value);
-            var type = InferType(let.Value);
-            if (type.HasValue)
+            SuruType? type = ResolveTypeAnnotation(let.TypeAnnotation);
+            if (type is null)
+                _errors.Add($"{_module.SourcePath}: unknown type '{let.TypeAnnotation}' for variable '{let.Name}'");
+            else
             {
                 _symbols[let.Name] = type.Value;
                 if (type.Value == SuruType.Struct)
                     PropagateStructMeta(let.Name, let.Value);
                 if (type.Value == SuruType.Array)
-                    PropagateArrayMeta(let.Name, let.Value);
+                {
+                    if (let.TypeAnnotation.TypeParam is not null)
+                    {
+                        // Annotation is authoritative: Array<T> supplies the element type directly.
+                        var elemType = ResolveTypeAnnotation(let.TypeAnnotation.TypeParam);
+                        if (elemType.HasValue) _arrayElementTypes[let.Name] = elemType.Value;
+                        // For Array<Struct>, also propagate struct layout metadata from the RHS
+                        // expression. The element type stays annotation-authoritative; only the
+                        // field-layout metadata (_arrayStructElementTypes) comes from the expression.
+                        if (elemType == SuruType.Struct)
+                            PropagateArrayMeta(let.Name, let.Value);
+                        // Restore annotation-authoritative element type in case PropagateArrayMeta overwrote it.
+                        if (elemType.HasValue) _arrayElementTypes[let.Name] = elemType.Value;
+                    }
+                    else
+                    {
+                        PropagateArrayMeta(let.Name, let.Value);
+                    }
+                }
             }
             if (!_insideFunction)
                 _constants.Add(let.Name);
@@ -218,16 +239,21 @@ public sealed class SemanticAnalyzer
             for (int i = 0; i < fn.Parameters.Count; i++)
             {
                 if (i < sig.ParamTypes.Count)
+                {
                     _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
+                    // Array<T> parameter annotation supplies element type directly.
+                    if (sig.ParamTypes[i] == SuruType.Array &&
+                        fn.Parameters[i].TypeAnnotation.TypeParam is not null)
+                    {
+                        var et = ResolveTypeAnnotation(fn.Parameters[i].TypeAnnotation.TypeParam!);
+                        if (et.HasValue) _arrayElementTypes[fn.Parameters[i].Name] = et.Value;
+                    }
+                }
             }
-            if (fn.Name == "main")
-                for (int i = 0; i < fn.Parameters.Count; i++)
-                    if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Array)
-                        _arrayElementTypes[fn.Parameters[i].Name] = SuruType.String;
         }
 
         _currentFunctionReturnType = sig.ReturnType;
-        _currentFunctionIsVoid = fn.ReturnTypeName == "void";
+        _currentFunctionIsVoid = fn.ReturnType.Name == "void";
         _currentFunctionName = fn.Name;
         _insideFunction = true;
 
@@ -240,7 +266,7 @@ public sealed class SemanticAnalyzer
                 hasReturn = true;
         }
 
-        if (!_currentFunctionIsVoid && !hasReturn)
+        if (!_currentFunctionIsVoid && !hasReturn && fn.Name != "main")
             _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
         if (_functions.TryGetValue(fn.Name, out var fnSigCap))
@@ -347,7 +373,7 @@ public sealed class SemanticAnalyzer
         switch (expr)
         {
             case VariableReferenceExpression varRef:
-                if (varRef.Name is not ("Int64" or "Float64" or "Bool")
+                if (varRef.Name is not ("Int32" or "Int64" or "Float64" or "Bool")
                     && !_symbols.ContainsKey(varRef.Name)
                     && !_module.Namespaces.Contains(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
@@ -382,16 +408,21 @@ public sealed class SemanticAnalyzer
                 {
                     var addElemType = InferType(addCall.Args[0]);
                     if (addElemType.HasValue)
-                    {
                         _arrayElementTypes[addRv.Name] = addElemType.Value;
-                        if (addElemType.Value == SuruType.Struct &&
-                            !_arrayStructElementTypes.ContainsKey(addRv.Name))
-                        {
-                            if (addCall.Args[0] is CallExpression addFnCall &&
-                                _functionReturnStructSymbols.TryGetValue(addFnCall.Name, out var addStructMeta))
-                                _arrayStructElementTypes[addRv.Name] = addStructMeta;
-                        }
-                    }
+                }
+                // Propagate struct field-layout metadata independently of element-type status.
+                // When the array was declared Array<Struct> (element type already known from
+                // annotation), _arrayStructElementTypes is still unset and must be populated here.
+                if (!_arrayStructElementTypes.ContainsKey(addRv.Name) &&
+                    _arrayElementTypes.TryGetValue(addRv.Name, out var knownEt) &&
+                    knownEt == SuruType.Struct)
+                {
+                    if (addCall.Args[0] is CallExpression addFnCall &&
+                        _functionReturnStructSymbols.TryGetValue(addFnCall.Name, out var addStructMeta))
+                        _arrayStructElementTypes[addRv.Name] = addStructMeta;
+                    else if (addCall.Args[0] is VariableReferenceExpression addVRef &&
+                        _structSymbols.TryGetValue(addVRef.Name, out var addVMeta))
+                        _arrayStructElementTypes[addRv.Name] = addVMeta;
                 }
                 break;
 
@@ -437,8 +468,8 @@ public sealed class SemanticAnalyzer
                 {
                     AnalyzeExpression(exitCall.Args[0]);
                     var exitArgType = InferType(exitCall.Args[0]);
-                    if (exitArgType.HasValue && exitArgType.Value != SuruType.Int64)
-                        _errors.Add($"{_module.SourcePath}: 'exit' expects Int64, got {exitArgType.Value}");
+                    if (exitArgType.HasValue && exitArgType.Value is not (SuruType.Int64 or SuruType.Int32))
+                        _errors.Add($"{_module.SourcePath}: 'exit' expects Int64 or Int32, got {exitArgType.Value}");
                 }
                 break;
 
@@ -557,7 +588,9 @@ public sealed class SemanticAnalyzer
         MethodCallExpression { MethodName: "slice" or "append" } m
             when InferType(m.Receiver) == SuruType.String => SuruType.String,
         MethodCallExpression { MethodName: "from" } m
-            when m.Receiver is VariableReferenceExpression { Name: "Int64" } => SuruType.Int64,
+            when m.Receiver is VariableReferenceExpression { Name: "Int32" }   => SuruType.Int32,
+        MethodCallExpression { MethodName: "from" } m
+            when m.Receiver is VariableReferenceExpression { Name: "Int64" }   => SuruType.Int64,
         MethodCallExpression { MethodName: "from" } m
             when m.Receiver is VariableReferenceExpression { Name: "Float64" } => SuruType.Float64,
         MethodCallExpression nsCall

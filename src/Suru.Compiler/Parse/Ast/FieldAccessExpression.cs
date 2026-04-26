@@ -6,6 +6,6 @@ public sealed class FieldAccessExpression(Expression receiver, string fieldName)
 {
     public Expression Receiver { get; } = receiver;
     public string FieldName { get; } = fieldName;
-    // Set by SemanticAnalyzer; used by CodeGenerator for FromI64 cast.
+    // Set by SemanticAnalyzer; used by IRCodeGenerator for EmitFromI64 cast.
     public SuruType? ResolvedType { get; set; }
 }

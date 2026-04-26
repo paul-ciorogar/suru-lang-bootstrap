@@ -55,12 +55,15 @@ public sealed class Parser
         if (CanConsume(TokenKind.Return))
             return ParseReturnStatement();
 
-        // let <name> : <expr>
+        // let <name> <TypeAnnotation> : <expr>
+        // The type annotation is mandatory. It may be a simple identifier (Int64)
+        // or a generic form (Array<Struct>). ParseTypeAnnotation handles both.
         if (CanConsume(TokenKind.Let))
         {
             var nameToken = Consume(TokenKind.Identifier);
+            var typeAnnotation = ParseTypeAnnotation();
             Consume(TokenKind.Colon);
-            return new LetStatement(nameToken.Text, ParseExpression());
+            return new LetStatement(nameToken.Text, ParseExpression(), typeAnnotation);
         }
 
         // <name> : <expr>  (assignment — must consume identifier first, then check for colon)
@@ -105,13 +108,16 @@ public sealed class Parser
         while (IsNot(TokenKind.RightParen) && IsNot(TokenKind.Eof))
         {
             var paramName = Consume(TokenKind.Identifier);
-            var paramType = Consume(TokenKind.Identifier);
-            parameters.Add(new FunctionParameter(paramName.Text, paramType.Text));
+            var paramType = ParseTypeAnnotation();
+            parameters.Add(new FunctionParameter(paramName.Text, paramType));
             CanConsume(TokenKind.Comma);
         }
         Consume(TokenKind.RightParen);
 
-        string returnTypeName = CanConsume(TokenKind.Void) ? "void" : Consume(TokenKind.Identifier).Text;
+        TypeAnnotation returnType;
+        if      (CanConsume(TokenKind.Void))    returnType = new TypeAnnotation("void");
+        else if (Is(TokenKind.LeftBrace))        returnType = new TypeAnnotation("void");
+        else                                     returnType = ParseTypeAnnotation();
 
         Consume(TokenKind.LeftBrace);
         var body = new List<Statement>();
@@ -119,7 +125,21 @@ public sealed class Parser
             body.Add(ParseStatement());
         Consume(TokenKind.RightBrace);
 
-        return new FunctionDeclaration(nameToken.Text, parameters, returnTypeName, body);
+        return new FunctionDeclaration(nameToken.Text, parameters, returnType, body);
+    }
+
+    // Parses a type annotation: Identifier [< TypeAnnotation >]
+    // Examples: Int64, Array<Struct>, Array<Array<Int64>>
+    private TypeAnnotation ParseTypeAnnotation()
+    {
+        var name = Consume(TokenKind.Identifier).Text;
+        TypeAnnotation? param = null;
+        if (CanConsume(TokenKind.LessThan))
+        {
+            param = ParseTypeAnnotation();
+            Consume(TokenKind.GreaterThan);
+        }
+        return new TypeAnnotation(name, param);
     }
 
     private ReturnStatement ParseReturnStatement()

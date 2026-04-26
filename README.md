@@ -18,12 +18,13 @@ printLn(3.14)
 
 ### Variables
 
-Declare with `let`. Type is inferred from the right-hand side:
+Declare with `let`. The type annotation is **mandatory** and appears between the variable name and the `:`:
 
 ```suru
-let x: 42
-let ratio: 1.5
-let flag: true
+let x Int64: 42
+let ratio Float64: 1.5
+let flag Bool: true
+let name String: "suru"
 ```
 
 Reassign with `name: value` (no `let`):
@@ -35,12 +36,22 @@ flag: false
 A `let` declared at module level (outside any function) is a **constant** — reassignment is a compile error:
 
 ```suru
-let MAX_SIZE: 1024
+let MAX_SIZE Int64: 1024
 
-fn main(args Array) Int64 {
+fn main(args Array<String>) {
     MAX_SIZE: 2048  // error: cannot reassign constant 'MAX_SIZE'
-    return 0
 }
+```
+
+Available scalar types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`, `Array<T>`.
+
+### Comments
+
+Use `//` for line comments. Everything from `//` to the end of the line is ignored:
+
+```suru
+// full-line comment
+let x Int64: 42  // inline comment
 ```
 
 ### Arithmetic
@@ -58,7 +69,7 @@ Arithmetic is expressed as method calls on values:
 Methods chain naturally:
 
 ```suru
-let result: 2.add(3).multiply(4)
+let result Int64: 2.add(3).multiply(4)
 printLn(result)
 ```
 
@@ -90,28 +101,28 @@ printLn(not true)         // false
 Statement form (arms produce side effects):
 
 ```suru
-let x: true
+let x Bool: true
 match x { true: printLn(1), _: printLn(0) }
 ```
 
 Expression form (arms produce a value):
 
 ```suru
-let y: match x { true: 1, _: 0 }
+let y Int64: match x { true: 1, _: 0 }
 printLn(y)
 ```
 
 Match on integers (negative literals supported):
 
 ```suru
-let n: 0.take(1)
+let n Int64: 0.take(1)
 match n { -1: printLn("negative"), 0: printLn("zero"), 1: printLn("positive"), _: printLn("other") }
 ```
 
 Match on strings:
 
 ```suru
-let day: "Monday"
+let day String: "Monday"
 match day { "Monday": printLn("start"), "Friday": printLn("end"), _: printLn("middle") }
 ```
 
@@ -141,7 +152,7 @@ Recursion is supported:
 
 ```suru
 fn fibonacci(n Int64) Int64 {
-  return match n.lessThan(2) {
+  return match n.lt(2) {
     true: n,
     _: fibonacci(n.take(1)).add(fibonacci(n.take(2)))
   }
@@ -152,10 +163,10 @@ printLn(fibonacci(10))
 
 ### Structs
 
-Create a struct with a `{ field: value, ... }` literal. Fields are separated by `,` or newlines. Type is inferred from the fields:
+Create a struct with a `{ field: value, ... }` literal. Fields are separated by `,` or newlines:
 
 ```suru
-let person: { tall: true, height: 2283 }
+let person Struct: { tall: true, height: 2283 }
 ```
 
 Read a field with `.field` (no parentheses):
@@ -175,7 +186,7 @@ printLn(person.tall)  // false
 Deep-copy a struct with `clone`:
 
 ```suru
-let copy: clone(person)
+let copy Struct: clone(person)
 ```
 
 Free a struct's memory with `drop`:
@@ -191,18 +202,22 @@ fn identity(d Struct) Struct {
   return d
 }
 
-let result: identity(person)
+let result Struct: identity(person)
 ```
 
 > **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field values carry a runtime tag (0=Bool, 1=Int64, 2=Float64, 3=pointer) used when the compile-time type is unknown.
 
 ### Arrays
 
-Create an array with `[e1, e2, ...]`. All elements must have the same type:
+Create an array with `[e1, e2, ...]`. The element type is specified with the `Array<T>` generic annotation:
 
 ```suru
-let nums: [10, 20, 30]
+let nums Array<Int64>: [10, 20, 30]
+let words Array<String>: ["hello", "world"]
+let items Array<Struct>: []
 ```
+
+The type parameter `T` can be any Suru type: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`.
 
 | Method | Description | Example |
 |---|---|---|
@@ -214,19 +229,29 @@ let nums: [10, 20, 30]
 | `slice(from, to)` | new array copy of `[from, to)` | `nums.slice(1, 3)` |
 
 ```suru
-let nums: [10, 20, 30]
+let nums Array<Int64>: [10, 20, 30]
 printLn(nums.len())      // 3
 nums.add(40)
 printLn(nums.at(3))      // 40
-let part: nums.slice(0, 2)
+let part Array<Int64>: nums.slice(0, 2)
 printLn(part.len())      // 2
 ```
 
-Pass arrays to and from functions using the `Array` type:
+Pass arrays to and from functions using the `Array<T>` type:
 
 ```suru
-fn first(arr Array) Int64 {
-  return arr.at(0)
+fn tokenize(source String) Array<Struct> {
+    let tokens Array<Struct>: []
+    // ... build tokens ...
+    return tokens
+}
+
+fn processAll(items Array<Int64>) void {
+    let i Int64: 0
+    while i.lt(items.len()) {
+        printLn(items.at(i))
+        i: i.add(1)
+    }
 }
 ```
 
@@ -237,7 +262,7 @@ Use `clone(arr)` to deep-copy and `drop(arr)` to free the array and its data.
 String literals are written with double quotes. Supported escapes: `\n`, `\t`, `\\`, `\"`.
 
 ```suru
-let s: "hello\nworld"
+let s String: "hello\nworld"
 printLn(s)
 ```
 
@@ -248,13 +273,14 @@ printLn(s)
 | `equals(other)` | string equality | `s.equals("hello")` → `true` |
 | `append(other)` | concatenate, new string | `s.append(" world")` |
 | `slice(from, to)` | substring copy of `[from, to)` | `s.slice(1, 3)` → `"el"` |
+| `ord()` | ASCII code of first byte | `"A".ord()` → `65` |
 | `toString()` | identity — returns itself | `s.toString()` |
 
 ```suru
-let s: "hello"
+let s String: "hello"
 printLn(s.len())            // 5
 printLn(s.equals("hello"))  // true
-let s2: s.append(" world")
+let s2 String: s.append(" world")
 printLn(s2)                 // hello world
 printLn(s.at(0))            // h
 ```
@@ -264,15 +290,15 @@ printLn(s.at(0))            // h
 Convert a `String` to a number with the static `from` method:
 
 ```suru
-let n: Int64.from("42")
-let f: Float64.from("3.14")
+let n Int64: Int64.from("42")
+let f Float64: Float64.from("3.14")
 ```
 
 Convert any primitive to a `String` with `toString()`:
 
 ```suru
-let s: 42.toString()
-let b: true.toString()
+let s String: 42.toString()
+let b String: true.toString()
 printLn(s)  // 42
 printLn(b)  // true
 ```
@@ -282,7 +308,7 @@ printLn(b)  // true
 Read an entire file as a `String`:
 
 ```suru
-let content: readFile("input.txt")
+let content String: readFile("input.txt")
 printLn(content)
 ```
 
@@ -297,7 +323,7 @@ writeFile("output.txt", content)
 Terminate the process with a specific exit code. `exit` is a terminal statement — a non-void function does not need an explicit `return` after it:
 
 ```suru
-fn main(args Array) Int64 {
+fn main(args Array<String>) {
     exit(1)
 }
 ```
@@ -318,10 +344,9 @@ Split a program across multiple `.suru` files using `include`. Functions from th
 ```suru
 include "lib.suru" as lib
 
-fn main(args Array) Int64 {
-    let result: lib.double(21)
+fn main(args Array<String>) {
+    let result Int64: lib.double(21)
     printLn(result)   // 42
-    return 0
 }
 ```
 
@@ -339,13 +364,12 @@ fn double(n Int64) Int64 {
 
 ### Main function and CLI arguments
 
-Every Suru program defines `fn main(args Array) Int64` as its entry point. `args.at(0)` is the program name; `args.at(1)` is the first user argument, and so on. The return value becomes the process exit code.
+Every Suru program defines `fn main(args Array<String>)` as its entry point. `args.at(0)` is the program name; `args.at(1)` is the first user argument, and so on. The process always exits with code `0` unless `exit(code)` is called explicitly.
 
 ```suru
-fn main(args Array) Int64 {
-    let path: args.at(1)
-    let content: readFile(path)
+fn main(args Array<String>) {
+    let path String: args.at(1)
+    let content String: readFile(path)
     printLn(content)
-    return 0
 }
 ```

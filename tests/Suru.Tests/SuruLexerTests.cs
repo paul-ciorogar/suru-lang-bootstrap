@@ -34,9 +34,11 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase
             "7 ( 1:8\n" +
             "1 args 1:9\n" +
             "1 Array 1:14\n" +
-            "8 ) 1:19\n" +
-            "1 Int64 1:21\n" +
-            "12 { 1:27\n" +
+            "0 < 1:19\n" +
+            "1 String 1:20\n" +
+            "0 > 1:26\n" +
+            "8 ) 1:27\n" +
+            "12 { 1:29\n" +
             "1 printLn 2:5\n" +
             "7 ( 2:12\n" +
             "2 true 2:13\n" +
@@ -53,10 +55,8 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase
             "7 ( 5:12\n" +
             "5 1.2 5:13\n" +
             "8 ) 5:16\n" +
-            "23 return 6:5\n" +
-            "4 0 6:12\n" +
-            "13 } 7:1\n" +
-            "0  8:1\n";
+            "13 } 6:1\n" +
+            "0  7:1\n";
 
         Assert.Equal(expected, Run(_exe, FixturePath("print")));
     }

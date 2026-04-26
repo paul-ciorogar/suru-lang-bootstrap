@@ -10,7 +10,7 @@ var sourcePath = Path.GetFullPath(args[1]);
 var buildDir = Path.Combine(Path.GetDirectoryName(sourcePath)!, "build");
 
 var compiler = new Compiler(sourcePath);
-var result = compiler.Compile(buildDir);
+var result = compiler.CompileIR(buildDir);
 
 if (!result.Success)
 {

@@ -1,5 +1,4 @@
-fn main(args Array) Int64 {
+fn main(args Array<String>) {
     printError("error: something went wrong")
     printLn("stdout line")
-    return 0
 }

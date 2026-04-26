@@ -1,25 +1,24 @@
-fn main(args Array) Int64 {
-    let i: 1
+fn main(args Array<String>) {
+    let i Int64: 1
     while i.lte(5) {
         printLn(i)
         i: i.add(1)
     }
 
-    let sum: 0
-    let j: 1
+    let sum Int64: 0
+    let j Int64: 1
     while j.lte(10) {
         sum: sum.add(j)
         j: j.add(1)
     }
     printLn(sum)
 
-    let s: ""
-    let k: 0
+    let s String: ""
+    let k Int64: 0
     while k.lt(3) {
         s: s.append("x")
         k: k.add(1)
     }
     printLn(s)
 
-    return 0
 }

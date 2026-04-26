@@ -1,19 +1,19 @@
 namespace Suru.Compiler.Parse.Ast;
 
-public sealed class FunctionParameter(string name, string typeName)
+public sealed class FunctionParameter(string name, TypeAnnotation typeAnnotation)
 {
-    public string Name     { get; } = name;
-    public string TypeName { get; } = typeName;
+    public string Name             { get; } = name;
+    public TypeAnnotation TypeAnnotation { get; } = typeAnnotation;
 }
 
 public sealed class FunctionDeclaration(
     string name,
     IReadOnlyList<FunctionParameter> parameters,
-    string returnTypeName,
+    TypeAnnotation returnType,
     IReadOnlyList<Statement> body) : Statement
 {
     public string Name                                  { get; } = name;
     public IReadOnlyList<FunctionParameter> Parameters { get; } = parameters;
-    public string ReturnTypeName                        { get; } = returnTypeName;
+    public TypeAnnotation ReturnType                    { get; } = returnType;
     public IReadOnlyList<Statement> Body               { get; } = body;
 }

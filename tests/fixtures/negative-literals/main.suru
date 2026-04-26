@@ -1,8 +1,7 @@
-fn main(args Array) Int64 {
-    let a: -5
-    let b: -2.5
+fn main(args Array<String>) {
+    let a Int64: -5
+    let b Float64: -2.5
     printLn(a)
     printLn(b)
     printLn(a.add(-3))
-    return 0
 }

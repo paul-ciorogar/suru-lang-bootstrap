@@ -1,4 +1,4 @@
-fn main(args Array) Int64 {
+fn main(args Array<String>) {
     printLn(3.lt(5))
     printLn(5.lt(3))
     printLn(5.gt(3))
@@ -9,9 +9,8 @@ fn main(args Array) Int64 {
     printLn(5.gte(5))
     printLn(6.gte(5))
     printLn(4.gte(5))
-    let a: "A"
+    let a String: "A"
     printLn(a.ord())
-    let z: "0"
+    let z String: "0"
     printLn(z.ord())
-    return 0
 }
