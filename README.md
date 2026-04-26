@@ -373,3 +373,67 @@ fn main(args Array<String>) {
     printLn(content)
 }
 ```
+
+## CLI Reference
+
+```
+suru <command> <file.suru>
+```
+
+### `build`
+
+Compiles a `.suru` file to a native executable. The output is written to a `build/` directory next to the source file.
+
+```bash
+dotnet run --project src/Suru.CLI -- build examples/hello.suru
+# Produces: examples/build/hello
+```
+
+Errors are printed to stderr and the process exits with code 1.
+
+### `lex`
+
+Tokenises the source file and prints every token to stdout, one per line:
+
+```
+   1:1   Fn
+   1:4   Identifier      main
+   1:8   LeftParen
+   1:9   Identifier      args
+   1:14  Identifier      Array
+   1:19  LessThan
+   1:20  Identifier      String
+   1:26  GreaterThan
+   1:27  RightParen
+   ...
+```
+
+Columns: `line:col`, token kind (padded), source text (where non-empty). Useful for checking that the lexer recognises all tokens before debugging a parse failure.
+
+```bash
+dotnet run --project src/Suru.CLI -- lex examples/hello.suru
+```
+
+### `parse`
+
+Parses the source file (include directives are expanded) and prints the AST as an indented tree. Each node kind appears on its own line; child nodes are indented by two spaces. Leaf values — names, literals — are shown in `[square brackets]`.
+
+```
+Module [examples/hello.suru]
+  FunctionDeclaration [main](args : Array<String>) -> void
+    ExpressionStatement
+      CallExpression [printLn]
+        StringLiteral ["hello\n"]
+```
+
+```bash
+dotnet run --project src/Suru.CLI -- parse examples/hello.suru
+```
+
+### `ir`
+
+Runs the full front-end pipeline (lex → parse → semantic analysis → IR codegen) and prints the generated LLVM IR text to stdout. No files are written and `clang` is not invoked. Useful for inspecting or diffing generated IR without a full build.
+
+```bash
+dotnet run --project src/Suru.CLI -- ir examples/hello.suru
+```

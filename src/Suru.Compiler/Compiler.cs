@@ -8,6 +8,13 @@ using Suru.Compiler.Codegen;
 
 namespace Suru.Compiler;
 
+/// <summary>
+/// Orchestrates the full Suru compilation pipeline for a single source file:
+/// Lex → Parse → Include resolution → Semantic analysis → IR codegen → Clang → Link.
+///
+/// Each public method exposes a prefix of the pipeline so that individual stages can
+/// be invoked independently (e.g. for the <c>lex</c>, <c>parse</c>, and <c>ir</c> CLI commands).
+/// </summary>
 public class Compiler
 {
     private readonly string _sourcePath;
@@ -17,51 +24,88 @@ public class Compiler
         _sourcePath = sourcePath;
     }
 
-    public CompilationResult CompileIR(string buildDir)
+    // ─── Stage: lex ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads the source file and returns every token produced by the lexer,
+    /// including the final <see cref="TokenKind.Eof"/> sentinel.
+    /// Returns a failure result if the file does not exist or contains a bad character.
+    /// </summary>
+    public CompilationResult<IReadOnlyList<Token>> LexFile()
     {
         if (!File.Exists(_sourcePath))
-            return CompilationResult.Fail($"File not found: {_sourcePath}");
-
-        Directory.CreateDirectory(buildDir);
-
-        var source = File.ReadAllText(_sourcePath);
-        var baseName = Path.GetFileNameWithoutExtension(_sourcePath);
-
-        var lexer = new Lexer(source);
-        var tokens = new Tokens(lexer, _sourcePath);
-
-        Module module;
+            return CompilationResult<IReadOnlyList<Token>>.Fail($"File not found: {_sourcePath}");
         try
         {
-            module = Parser.Parse(tokens);
-        }
-        catch (ParseException ex)
-        {
-            return CompilationResult.Fail(ex.Message);
-        }
-
-        try
-        {
-            var visitedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                Path.GetFullPath(_sourcePath)
-            };
-            module = ResolveIncludes(module, Path.GetDirectoryName(Path.GetFullPath(_sourcePath))!, visitedPaths);
-        }
-        catch (ParseException ex)
-        {
-            return CompilationResult.Fail(ex.Message);
+            var source = File.ReadAllText(_sourcePath);
+            var tokens = Lexer.Tokenize(source).ToList();
+            return CompilationResult<IReadOnlyList<Token>>.Ok(tokens);
         }
         catch (Exception ex)
         {
-            return CompilationResult.Fail($"Include resolution failed: {ex.Message}");
+            return CompilationResult<IReadOnlyList<Token>>.Fail(ex.Message);
         }
+    }
 
-        var semanticErrors = SemanticAnalyzer.Analyze(module);
+    // ─── Stage: parse ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs the lexer, parser, and include resolution on the source file and returns
+    /// the fully merged <see cref="Module"/> that the semantic analyzer would receive.
+    /// Include directives are expanded so the caller sees all imported functions.
+    /// Returns a failure result on any lex, parse, or include error.
+    /// </summary>
+    public CompilationResult<Module> ParseFile()
+    {
+        var (module, errors) = ParseAndResolve();
+        if (errors.Count > 0)
+            return CompilationResult<Module>.Fail(errors);
+        return CompilationResult<Module>.Ok(module!);
+    }
+
+    // ─── Stage: ir ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs the full front-end pipeline (lex → parse → include resolution → semantic analysis)
+    /// and returns the LLVM IR text that would be passed to <c>clang</c>.
+    /// Returns a failure result on any error at any stage.
+    /// No files are written and no external tools are invoked.
+    /// </summary>
+    public CompilationResult<string> GenerateIr()
+    {
+        var (module, parseErrors) = ParseAndResolve();
+        if (parseErrors.Count > 0)
+            return CompilationResult<string>.Fail(parseErrors);
+
+        var semanticErrors = SemanticAnalyzer.Analyze(module!);
+        if (semanticErrors.Count > 0)
+            return CompilationResult<string>.Fail(semanticErrors);
+
+        var ir = IRCodeGenerator.Generate(module!, Path.GetFileName(_sourcePath));
+        return CompilationResult<string>.Ok(ir);
+    }
+
+    // ─── Stage: build ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs the complete pipeline through to a native executable:
+    /// lex → parse → include resolution → semantic → IR codegen → clang → link.
+    /// Writes <c>&lt;buildDir&gt;/&lt;name&gt;.ll</c>, <c>.o</c>, and the final binary.
+    /// </summary>
+    public CompilationResult CompileIR(string buildDir)
+    {
+        Directory.CreateDirectory(buildDir);
+
+        var (module, parseErrors) = ParseAndResolve();
+        if (parseErrors.Count > 0)
+            return CompilationResult.Fail(parseErrors);
+
+        var semanticErrors = SemanticAnalyzer.Analyze(module!);
         if (semanticErrors.Count > 0)
             return CompilationResult.Fail(semanticErrors);
 
-        var ir = IRCodeGenerator.Generate(module, Path.GetFileName(_sourcePath));
+        var baseName = Path.GetFileNameWithoutExtension(_sourcePath);
+        var ir = IRCodeGenerator.Generate(module!, Path.GetFileName(_sourcePath));
         var irPath = Path.Combine(buildDir, baseName + ".ll");
         File.WriteAllText(irPath, ir);
 
@@ -76,6 +120,51 @@ public class Compiler
             return CompilationResult.Fail($"Link failed: {linkError}");
 
         return CompilationResult.Ok(executablePath);
+    }
+
+    // ─── Shared: lex + parse + include resolution ────────────────────────────
+
+    /// <summary>
+    /// Reads, lexes, parses, and resolves include directives for <see cref="_sourcePath"/>.
+    /// Returns <c>(module, [])</c> on success or <c>(null, errors)</c> on failure.
+    /// Extracted so each public stage method (ParseFile, GenerateIr, CompileIR) shares
+    /// identical front-end behaviour without duplication.
+    /// </summary>
+    private (Module? Module, IReadOnlyList<string> Errors) ParseAndResolve()
+    {
+        if (!File.Exists(_sourcePath))
+            return (null, [$"File not found: {_sourcePath}"]);
+
+        var source = File.ReadAllText(_sourcePath);
+
+        Module module;
+        try
+        {
+            module = Parser.Parse(new Tokens(new Lexer(source), _sourcePath));
+        }
+        catch (ParseException ex)
+        {
+            return (null, [ex.Message]);
+        }
+
+        try
+        {
+            var visitedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                Path.GetFullPath(_sourcePath)
+            };
+            module = ResolveIncludes(module, Path.GetDirectoryName(Path.GetFullPath(_sourcePath))!, visitedPaths);
+        }
+        catch (ParseException ex)
+        {
+            return (null, [ex.Message]);
+        }
+        catch (Exception ex)
+        {
+            return (null, [$"Include resolution failed: {ex.Message}"]);
+        }
+
+        return (module, []);
     }
 
     private static Module ResolveIncludes(Module module, string baseDir, HashSet<string> visitedPaths)

@@ -7,7 +7,23 @@ public sealed class Lexer(string source)
     private int _line = 1;
     private int _column = 1;
 
-    internal Token NextToken()
+    /// <summary>
+    /// Returns every token in <paramref name="source"/> in order, ending with a single
+    /// <see cref="TokenKind.Eof"/> token. Throws on unrecognised characters.
+    /// </summary>
+    public static IEnumerable<Token> Tokenize(string source)
+    {
+        var lexer = new Lexer(source);
+        Token t;
+        do
+        {
+            t = lexer.NextToken();
+            yield return t;
+        } while (t.Kind != TokenKind.Eof);
+    }
+
+    /// <summary>Scans and returns the next token from the source.</summary>
+    public Token NextToken()
     {
         while (_pos < source.Length)
         {

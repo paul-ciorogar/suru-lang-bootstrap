@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CLI Inspection Commands
+
+- **`suru lex <file>`** — tokenises a source file and prints every token to stdout (`line:col  Kind  text`), one per line. Runs only the lexer so it succeeds even on syntactically invalid input. Useful for debugging tokenisation without running the full parser.
+
+- **`suru parse <file>`** — runs the lexer, parser, and include resolution, then prints the resulting AST as an indented tree to stdout. Each node kind is on its own line; child nodes are indented two spaces; leaf values (names, literals) appear in `[square brackets]`. Include directives are expanded so the output reflects the fully merged module that the semantic analyser sees.
+
+- **`suru ir <file>`** — runs the full front-end (lex → parse → include resolution → semantic analysis → `IRCodeGenerator`) and prints the generated LLVM IR to stdout. No files are written; `clang` is not invoked. Useful for inspecting or diffing generated IR without triggering a build.
+
+- **`suru` / unknown command** — now prints a usage summary listing all four commands instead of a single-line error.
+
+- **`AstPrinter`** (`Parse/AstPrinter.cs`) — new static class; `Print(Module)` walks every AST node type (all statements and expressions) and returns an indented tree string.
+
+- **`Compiler.LexFile()`** — new public method; returns `CompilationResult<IReadOnlyList<Token>>` (tokens including EOF sentinel, or an error on bad character / missing file).
+
+- **`Compiler.ParseFile()`** — new public method; runs lex + parse + include resolution and returns `CompilationResult<Module>`.
+
+- **`Compiler.GenerateIr()`** — new public method; runs the full front-end through `IRCodeGenerator.Generate()` and returns `CompilationResult<string>`.
+
+- **`CompilationResult<T>`** — new generic variant of `CompilationResult` for stages that produce a typed value rather than an output file path.
+
+- **`Compiler.ParseAndResolve()`** — private helper extracted from `CompileIR`; shared by `ParseFile`, `GenerateIr`, and `CompileIR` so all three stages run identical front-end logic.
+
+- **`Lexer.Tokenize(string source)`** — new public static method; yields all tokens until EOF. `NextToken()` is now `public` (was `internal`).
+
 ### Stage 12 Prep — Mandatory Types + Array<T> Generics
 
 - **Mandatory `let` type annotations** — every `let` declaration must now include an explicit type between the variable name and the `:`. `let x Int64: 42` is valid; `let x: 42` is a parse error. This eliminates silent type inference failures and makes every binding self-documenting.
