@@ -9,37 +9,39 @@ namespace Suru.Compiler.Codegen;
 // String IR emission for IRCodeGenerator.
 //
 // Every Suru String value is a `ptr` to a heap-allocated %suru.Seq = { i64 len, ptr data }.
-// `data` points to a null-terminated i8 buffer. `len` holds the character count excluding
-// the null terminator. This matches the CodeGenerator.cs (LLVMSharp) representation exactly,
-// so the two backends produce compatible runtime semantics.
+// `data` points to a null-terminated i8 buffer; `len` holds the character count excluding
+// the null terminator.
 //
-// String literals are interned as [N x i8] private constant globals (the raw bytes); at runtime
-// EmitStringLiteralValue mallocs a 16-byte Seq header and stores the len + a pointer to the
-// global. The header itself is heap-allocated so it can be stored as a uniform `ptr` value
-// in variables and passed between functions without special treatment.
+// String literals are interned as [N x i8] private constant globals (the raw bytes).  At
+// runtime EmitStringLiteralValue mallocs a fresh char buffer, memcpy's the bytes from the
+// global, and wraps both in a new 16-byte Seq header.  The heap-owned data buffer means every
+// Seq can be safely freed by drop() — no special case for literal vs computed strings.
 //
-// Layout diagram for `let s: "hi"`:
+// Layout diagram for `let s String: "hi"`:
 //
-//   @.str_0 = [3 x i8] c"hi\00"        ← interned global, shared across all uses of "hi"
+//   @.str_0 = [3 x i8] c"hi\00"        ← interned global, source bytes only
 //
 //   suru_main:
-//     %seq  = malloc 16                 ← Seq header, one per runtime occurrence
-//     store i64 2 → %seq[0]            ← len field
-//     store ptr @.str_0 → %seq[1]      ← data field
+//     %buf  = malloc 3                  ← heap-owned copy of the 3 raw bytes
+//     memcpy(%buf, @.str_0, 3)
+//     %seq  = malloc 16                 ← Seq header
+//     store i64 2 → %seq[0]            ← len field (excludes null terminator)
+//     store ptr %buf → %seq[1]         ← data field (heap-owned, always free-able)
 //     %s.addr = alloca ptr
-//     store ptr %seq → %s.addr          ← variable `s` holds a ptr-to-Seq
+//     store ptr %seq → %s.addr
 //
-// String mutations (append, slice, at) always produce a NEW Seq; the old one is leaked.
-// This is intentional for the IR migration stage — drop/clone support comes later.
+// String mutations (append, slice, at) produce a NEW Seq; the old one is currently leaked.
+// Every Seq's data pointer is heap-owned, so drop(arr) for Array<String> can free it safely.
 partial class IRCodeGenerator
 {
     // ─── String literal ──────────────────────────────────────────────────────
 
-    // Intern the raw bytes as a global constant and wrap them in a heap-allocated Seq header.
-    // Deduplication is applied to the global (identical source strings share one [N x i8]
-    // constant) but each call site gets its own Seq header — this matches the semantics of
-    // the LLVMSharp CodeGenerator and avoids aliasing issues when a string variable is later
-    // overwritten.
+    // Intern the raw bytes as a global constant, then malloc-copy them into a fresh heap buffer
+    // and wrap in a new 16-byte Seq header.  The global is deduped (identical strings share one
+    // [N x i8] constant), but each call site gets its own heap buffer and Seq header.
+    //
+    // Heap-owning the data buffer ensures every Seq can be uniformly freed by drop() — there
+    // is no need to distinguish "literal" strings from "computed" strings at the call site.
     private (string val, SuruType type) EmitStringLiteralValue(string text)
     {
         if (!_stringLiterals.TryGetValue(text, out var entry))
@@ -50,8 +52,16 @@ partial class IRCodeGenerator
             _stringLiterals[text] = entry;
         }
         // byteLen includes the null terminator; len stored in the Seq excludes it.
-        var charLen = (entry.byteLen - 1).ToString(CultureInfo.InvariantCulture);
-        return EmitCreateStringSeq(entry.name, charLen);
+        var charLen   = (entry.byteLen - 1).ToString(CultureInfo.InvariantCulture);
+        var byteCount = entry.byteLen.ToString(CultureInfo.InvariantCulture);
+
+        // Heap-allocate a copy of the global bytes so the data ptr is always free-able.
+        _externals.AddMemcpy();
+        var buf = NextTmp();
+        _funcs.AppendLine($"  {buf} = call ptr @malloc(i64 {byteCount})");
+        _funcs.AppendLine($"  call ptr @memcpy(ptr {buf}, ptr {entry.name}, i64 {byteCount})");
+
+        return EmitCreateStringSeq(buf, charLen);
     }
 
     // ─── Low-level Seq helpers ───────────────────────────────────────────────

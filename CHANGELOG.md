@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Array IR: dedicated `%suru.Array` struct, amortised growth, clone, and drop
+
+- **New `%suru.Array` type** — arrays now use a dedicated 24-byte IR struct
+  `%suru.Array = { i64 len, i64 cap, ptr data }` instead of sharing `%suru.Seq`
+  with strings. The separate `cap` field enables amortised growth without
+  realloc on every `.add()` call.
+
+- **Amortised `.add(v)` growth** — `EmitArrayAdd` branches once on `len == cap`.
+  Inside the grow path two `select` instructions choose the new capacity with no
+  additional branches: `cap == 0 → 4`, `0 < cap < 1024 → cap * 2` (doubling),
+  `cap ≥ 1024 → cap + 1024` (linear). The data pointer is reloaded from the
+  header after the branch merge, since `realloc` may have moved it.
+
+- **`clone(arr)` — deep copy** — `EmitCloneArray` produces an independent copy
+  of the array. Scalar element types (`Int64`, `Float64`, `Bool`) are copied via
+  a single `memcpy`. Pointer element types (`String`, `Struct`, `Array`) are
+  copied element-by-element in a loop:
+  - `String` → `EmitCloneStringValue`: new 16-byte Seq header + malloc+memcpy char buffer
+  - `Struct` → `EmitCloneStruct` (existing linked-list traversal)
+  - Nested `Array` → shallow bitwise copy (nested element type not tracked by SSA value)
+
+  The clone's `cap` is set to `len` (exact fit).  `EmitCloneArrayDispatch`
+  extracts the element type from `_arrayElementTypes[variableName]` so the
+  correct clone path is selected at each call site.
+
+- **`drop(arr)` — free array memory** — `EmitDropArray` frees the data buffer
+  and header. For scalar elements two `free` calls suffice. For pointer elements
+  a loop drops each element before freeing the buffer:
+  - `String` → `free(data)`, `free(Seq header)` (data is heap-owned, always safe)
+  - `Struct` → `EmitDropStruct`
+  - Nested `Array` → shallow drop (`free(data)`, `free(header)`)
+
+  `EmitDropArrayDispatch` mirrors `EmitCloneArrayDispatch` for element-type lookup.
+
+- **`IRArrayCodeGenerator.cs` extracted and documented** — all array-specific
+  codegen lives in `IRArrayCodeGenerator.cs` as a `sealed partial` slice of
+  `IRCodeGenerator`. New helpers `EmitExtractArrayLen`, `EmitExtractArrayCap`,
+  `EmitExtractArrayData` use `%suru.Array` GEP offsets 0/1/2 rather than the
+  string helpers. `EmitCloneStringValue` and `EmitCloneArrayShallow` /
+  `EmitDropArrayShallow` are private IR-emit helpers (not user-visible language
+  features). `_arrayCounter` provides unique block-label suffixes for all
+  grow/clone/drop sites.
+
+- **String literals now heap-own their data** — `EmitStringLiteralValue` now
+  malloc+memcpy's the string bytes from the interned `[N x i8]` global into a
+  fresh heap buffer before building the Seq header. Every Seq's `data` field is
+  therefore always heap-owned, making `drop(Array<String>)` safe without any
+  distinction between literal and computed strings.
+
+- **`PeekType(clone(x))` generalised** — the `clone` pattern in `PeekType` now
+  returns `PeekType(arg)` rather than the hardcoded `SuruType.Struct`, so match
+  expressions over a cloned array see the correct `Array` return type.
+
 ### CLI Inspection Commands
 
 - **`suru lex <file>`** — tokenises a source file and prints every token to stdout (`line:col  Kind  text`), one per line. Runs only the lexer so it succeeds even on syntactically invalid input. Useful for debugging tokenisation without running the full parser.

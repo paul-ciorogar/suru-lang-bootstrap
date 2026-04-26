@@ -97,10 +97,15 @@ public sealed partial class IRCodeGenerator
     // struct literals appear. Set true by EnsureFindFieldHelper().
     private bool _findFieldEmitted = false;
 
-    // Monotonically increasing counter for clone/drop loop label uniqueness
+    // Monotonically increasing counter for struct clone/drop loop label uniqueness
     // (clone_cond_N, drop_cond_N, etc). Incremented at the start of each
     // EmitCloneStruct / EmitDropStruct call.
     private int _structCounter = 0;
+
+    // Monotonically increasing counter for array clone/drop/add label uniqueness
+    // (arr_clone_cond_N, arr_drop_cond_N, arr_grow_N, arr_store_N).
+    // Incremented per EmitArrayAdd, EmitCloneArray, EmitDropArray call site.
+    private int _arrayCounter = 0;
 
     private IRCodeGenerator(Module module, string sourceName)
     {
@@ -153,7 +158,8 @@ public sealed partial class IRCodeGenerator
         sb.AppendLine($"; ModuleID = '{_sourceName}'");
         sb.AppendLine($"source_filename = \"{_sourceName}\"");
         sb.AppendLine();
-        sb.AppendLine("%suru.Seq   = type { i64, ptr }");
+        sb.AppendLine("%suru.Seq   = type { i64, ptr }");        // String: { len, data ptr }
+        sb.AppendLine("%suru.Array = type { i64, i64, ptr }");   // Array:  { len, cap, data ptr }
         sb.AppendLine("%suru.Field = type { ptr, i32, i64, ptr }");
         sb.AppendLine();
 
@@ -442,6 +448,14 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
         StructLiteralExpression structLit => EmitStructLiteral(structLit),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
+        // clone(x) for Array — deep copy; recurses into String/Struct elements.
+        CallExpression { Name: "clone", Args: [var cloneArrArg] }
+            when PeekType(cloneArrArg) == SuruType.Array
+            => EmitCloneArrayDispatch(cloneArrArg),
+        // drop(x) for Array — frees each element (if pointer type) then the buffer and header.
+        CallExpression { Name: "drop", Args: [var dropArrArg] }
+            when PeekType(dropArrArg) == SuruType.Array
+            => EmitDropArrayDispatch(dropArrArg),
         // clone(x) for Struct — deep copy via linked-list traversal.
         CallExpression { Name: "clone", Args: [var cloneArg] }
             when PeekType(cloneArg) == SuruType.Struct
@@ -841,7 +855,7 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression        => SuruType.Array,
         StructLiteralExpression       => SuruType.Struct,
         FieldAccessExpression fa      => fa.ResolvedType ?? SuruType.Struct,
-        CallExpression { Name: "clone" } => SuruType.Struct,
+        CallExpression { Name: "clone", Args: [var cloneArgPeek] } => PeekType(cloneArgPeek),
         UnaryExpression                   => SuruType.Bool,
         BinaryExpression                  => SuruType.Bool,
         VariableReferenceExpression v =>

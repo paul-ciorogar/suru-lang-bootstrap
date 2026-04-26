@@ -15,14 +15,23 @@ fn main(args Array<String>) {
     printLn(nums2.len())
     printLn(nums2.at(0))
 
-    // let numsFromFn: generateArrayInt()
-    // printLn(numsFromFn.len())
-    // printLn(numsFromFn.at(2))
+    // clone: independent copy — mutating the clone does not affect the original
+    let nums3 Array<Int64>: clone(nums)
+    printLn(nums3.len())
+    printLn(nums3.at(0))
+    nums3.set(777, 0)
+    printLn(nums3.at(0))
+    printLn(nums.at(0))
 
-    // let numsFromString: generateArrayString()
-    // printLn(numsFromString.len())
-    // printLn(numsFromString.at(2))
+    drop(nums3)
 
+    // Array<String> clone and drop (recursive element clone/drop)
+    let words Array<String>: ["hello", "world"]
+    let words2 Array<String>: clone(words)
+    printLn(words2.len())
+    printLn(words2.at(0))
+    drop(words2)
+    drop(words)
 }
 
 fn generateArrayInt() Array<Int64> {
