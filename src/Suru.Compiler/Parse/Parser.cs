@@ -370,6 +370,12 @@ public sealed class Parser
             throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
         }
 
+        if (token.Kind == TokenKind.Identifier)
+        {
+            Advance();
+            return new VariableReferenceExpression(token.Text);
+        }
+
         throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected match pattern, got {token.Kind}");
     }
 

@@ -126,6 +126,22 @@ let day String: "Monday"
 match day { "Monday": printLn("start"), "Friday": printLn("end"), _: printLn("middle") }
 ```
 
+Match on variables or constants (any identifier in pattern position is loaded and compared at runtime):
+
+```suru
+let THRESHOLD Int64: 10
+
+fn main(args Array<String>) {
+    let score Int64: 10
+    match score {
+        THRESHOLD: printLn("exact")
+        _: printLn("other")
+    }
+}
+```
+
+This works for both module-level constants and local variables.
+
 Arms are separated by `,` or newlines. The condition must be `Bool`, `Int64`, `Float64`, or `String`.
 
 ### Functions

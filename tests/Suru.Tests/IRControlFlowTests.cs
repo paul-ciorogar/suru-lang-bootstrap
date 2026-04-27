@@ -14,6 +14,11 @@ namespace Suru.Tests;
 // raw null-terminated pointers with no length header.
 //
 // compare() returns -1 / 0 / 1 via the zext(gt) - zext(lt) trick.
+//
+// Variable/constant patterns: match arms may name a module-level constant or a
+// local variable as a pattern. The parser returns a VariableReferenceExpression
+// for any identifier in pattern position; EmitMatchTestChain loads it via
+// EmitValue before emitting the icmp/fcmp comparison — no codegen changes needed.
 [Collection("IntegrationIR")]
 public class IRControlFlowTests(CompiledFixturesIR fixtures) : IntegrationTestBase
 {
@@ -21,5 +26,5 @@ public class IRControlFlowTests(CompiledFixturesIR fixtures) : IntegrationTestBa
 
     [Fact]
     public void PrintsExpectedOutput()
-        => Assert.Equal("1\n1\ntrue\ntrue\nfalse\n1\n1\n-1\n", Run(_exe));
+        => Assert.Equal("1\n1\ntrue\ntrue\nfalse\n1\n1\n-1\nFriday\nFriday\n", Run(_exe));
 }

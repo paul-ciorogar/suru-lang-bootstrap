@@ -1,3 +1,6 @@
+let CONST_MONDAY Int64: 1
+let CONST_FRIDAY Int64: 5
+
 fn main(args Array<String>) {
     let x Bool: true
     match x { true: printLn(1), _: printLn(0) }
@@ -22,5 +25,19 @@ fn main(args Array<String>) {
 
     let cmp Int64: 2.compare(5)
     printLn(cmp)
+
+    match 5 {
+        CONST_MONDAY: printLn("Monday")
+        CONST_FRIDAY: printLn("Friday")
+        _: printLn("undefined")
+    }
+
+    let monday Int64: 1
+    let friday Int64: 5
+    match 5 {
+        monday: printLn("Monday")
+        friday: printLn("Friday")
+        _: printLn("undefined")
+    }
 
 }

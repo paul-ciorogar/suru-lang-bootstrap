@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Match on Variables and Constants
+
+Match arm patterns now accept any identifier in addition to literals. The named variable (local or module-level constant) is loaded at runtime and compared against the match condition using the same `icmp`/`fcmp`/`strcmp` logic as literal patterns — no codegen changes were needed.
+
+- **Parser** (`Parse/Parser.cs`) — `ParseMatchPattern()` now handles `TokenKind.Identifier` by returning a `VariableReferenceExpression`; any defined local variable or module-level constant can appear as a match pattern.
+- **SemanticAnalyzer** (`Semantic/SemanticAnalyzer.cs`) — `AnalyzeExpression` for `MatchExpression` now calls `AnalyzeExpression(arm.Pattern)` for each non-wildcard arm so undefined variable patterns are caught at compile time.
+- **`tests/fixtures/control-flow/main.suru`** — two previously-commented TODO blocks are now active: one matching against module-level constants (`CONST_MONDAY`, `CONST_FRIDAY`), one matching against local variables (`monday`, `friday`). Both match `5` against `CONST_FRIDAY`/`friday` and print `Friday`.
+- **`IRControlFlowTests`** / **`ControlFlowTests`** — expected output updated from `…-1\n` to `…-1\nFriday\nFriday\n`.
+
 ### Suru Runtime Modules
 
 Extracted all non-trivial string, array, and struct operations from inline per-function IR codegen into three standalone LLVM runtime modules (`suru_string.ll`, `suru_array.ll`, `suru_struct.ll`). User `.ll` files now emit only `declare` stubs; the linker resolves the symbols at link time.

@@ -558,7 +558,10 @@ public sealed class SemanticAnalyzer
                 if (condType.HasValue && condType.Value is not (SuruType.Bool or SuruType.Int64 or SuruType.Float64 or SuruType.String))
                     _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType.Value}");
                 foreach (var arm in match.Arms)
+                {
+                    if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
                     AnalyzeExpression(arm.Body);
+                }
                 break;
         }
     }
