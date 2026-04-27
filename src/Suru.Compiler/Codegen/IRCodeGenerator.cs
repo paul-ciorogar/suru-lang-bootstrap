@@ -39,6 +39,10 @@ public sealed partial class IRCodeGenerator
     // _externals is populated lazily; Emit() emits only what is needed.
     private readonly Externals _externals = new();
 
+    // Suru runtime function declarations (suru_string.ll, suru_array.ll, suru_struct.ll).
+    // Populated lazily; Emit() emits only the declare stubs that are actually needed.
+    private readonly SuruRuntimeDeclarations _runtimeDecls = new();
+
     // Format-string and bool-string globals — emitted only if referenced.
     private BoolStirngGlobals _boolStringGlobals = new();
 
@@ -91,21 +95,6 @@ public sealed partial class IRCodeGenerator
     // Populated in pass 0 by EmitGlobalConstants(); used by EmitLoad and PeekType as a
     // fallback when the name is absent from the per-function _vars table.
     private readonly Dictionary<string, (string GlobalName, SuruType Type)> _globalVars = new();
-
-    // Whether the suru_find_field helper function has been emitted into _funcs.
-    // Guarded so it is emitted at most once per module regardless of how many
-    // struct literals appear. Set true by EnsureFindFieldHelper().
-    private bool _findFieldEmitted = false;
-
-    // Monotonically increasing counter for struct clone/drop loop label uniqueness
-    // (clone_cond_N, drop_cond_N, etc). Incremented at the start of each
-    // EmitCloneStruct / EmitDropStruct call.
-    private int _structCounter = 0;
-
-    // Monotonically increasing counter for array clone/drop/add label uniqueness
-    // (arr_clone_cond_N, arr_drop_cond_N, arr_grow_N, arr_store_N).
-    // Incremented per EmitArrayAdd, EmitCloneArray, EmitDropArray call site.
-    private int _arrayCounter = 0;
 
     private IRCodeGenerator(Module module, string sourceName)
     {
@@ -192,11 +181,18 @@ public sealed partial class IRCodeGenerator
 
         // External symbol declarations — only what the module actually uses
         sb.Append(_externals.ToString());
+
+        // Suru runtime declares (suru_string/array/struct.ll) — only what is used
+        sb.Append(_runtimeDecls.ToString());
         sb.AppendLine();
 
         sb.Append(_helpers);
         sb.Append(_funcs);
-        EmitMainWrapper(sb);
+
+        // Only emit the C-ABI @main wrapper when this module defines `fn main`.
+        // Included modules compiled as standalone units have no main entry point.
+        var hasMain = _module.Statements.OfType<FunctionDeclaration>().Any(f => f.Name == "main");
+        if (hasMain) EmitMainWrapper(sb);
 
         return sb.ToString();
     }
@@ -205,6 +201,18 @@ public sealed partial class IRCodeGenerator
 
     private void EmitFunction(FunctionDeclaration fn)
     {
+        // External functions (from include directives) live in their own compiled module.
+        // Emit a `declare` so this module can call them; skip the body entirely — it
+        // belongs to the other .o file and will be resolved by the linker.
+        if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
+        {
+            var retLlvmType = LlvmType(FnReturnSuruType(fn));
+            var paramTypes  = string.Join(", ", fn.Parameters.Select(
+                p => LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))));
+            _funcs.AppendLine($"declare {retLlvmType} @{originalName}({paramTypes})");
+            return;
+        }
+
         // Reset per-function state before emitting the body.
         _blockOpen = true;
         _vars = new();
@@ -231,11 +239,16 @@ public sealed partial class IRCodeGenerator
             // Non-main functions: build the LLVM parameter list and return type from
             // the declared Suru types. The LLVM return type must match the actual type
             // (e.g. `ptr` for String-returning functions, `i64` for Int64).
+            //
+            // External linkage (no `internal`) is required: with the LLVM module model,
+            // an included module's functions are compiled into their own .o and called
+            // from other .o files. `internal` would give them static linkage, making them
+            // invisible to the linker across compilation units.
             var retLlvmType = LlvmType(FnReturnSuruType(fn));
             _currentFnReturnLlvmType = retLlvmType;
             var paramStr = string.Join(", ", fn.Parameters.Select(
                 p => $"{LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))} %{p.Name}"));
-            _funcs.AppendLine($"define internal {retLlvmType} @{fn.Name}({paramStr}) {{");
+            _funcs.AppendLine($"define {retLlvmType} @{fn.Name}({paramStr}) {{");
             _funcs.AppendLine("entry:");
 
             // Alloca + store each parameter so the body can read them via EmitLoad.
@@ -467,11 +480,11 @@ public sealed partial class IRCodeGenerator
         // clone(x) for Struct — deep copy via linked-list traversal.
         CallExpression { Name: "clone", Args: [var cloneArg] }
             when PeekType(cloneArg) == SuruType.Struct
-            => EmitCloneStruct(EmitValue(cloneArg).val),
+            => EmitCloneStructDispatch(cloneArg),
         // drop(x) for Struct — free all field nodes; result is discarded by caller.
         CallExpression { Name: "drop", Args: [var dropArg] }
             when PeekType(dropArg) == SuruType.Struct
-            => EmitDropStruct(EmitValue(dropArg).val),
+            => EmitDropStructDispatch(dropArg),
         VariableReferenceExpression v => EmitLoad(v.Name),
         MethodCallExpression m    => EmitMethodCall(m),
         // `not x` — boolean NOT. Emits `xor i1 %val, true`.
@@ -656,11 +669,11 @@ public sealed partial class IRCodeGenerator
     // Recursive self-calls work without forward declarations because LLVM IR
     // definitions are visible module-wide regardless of textual order.
     //
-    // Namespace-prefixed calls (e.g., `lib.double`) are transparent here: include
-    // resolution renames the FunctionDeclaration to `"lib.double"` before codegen
-    // runs, so both the define site and the call site use the same name. LLVM IR
-    // accepts dots in function identifiers (`@lib.double` is a valid symbol), so
-    // no name mangling is required.
+    // For local functions, `call.Name` IS the LLVM symbol (e.g. `fibonacci`).
+    // For external (imported) functions, `call.Name` is the Suru qualified name
+    // (e.g. `lib.double`) but the LLVM symbol is the original unqualified name from
+    // the included module's IR (e.g. `@double`). ExternalFunctions maps the qualified
+    // Suru name back to the original so we emit `call @double`, not `call @lib.double`.
     private (string val, SuruType type) EmitUserFunctionCall(CallExpression call)
     {
         var (paramDefs, returnType) = _userFunctions[call.Name];
@@ -671,11 +684,11 @@ public sealed partial class IRCodeGenerator
             var llvmT       = LlvmType(SuruTypeFromAnnotation(paramDefs[i].TypeAnnotation));
             argParts.Add($"{llvmT} {argVal}");
         }
-        // Use the registered LLVM return type, not a hardcoded `i64` — String-returning
-        // functions are defined as `ptr` and the call instruction must match the definition.
+        // Use the original symbol name for external functions; local name for everything else.
+        var llvmName    = _module.ExternalFunctions.TryGetValue(call.Name, out var orig) ? orig : call.Name;
         var callTmp     = NextTmp();
         var retLlvmType = LlvmType(returnType);
-        _funcs.AppendLine($"  {callTmp} = call {retLlvmType} @{call.Name}({string.Join(", ", argParts)})");
+        _funcs.AppendLine($"  {callTmp} = call {retLlvmType} @{llvmName}({string.Join(", ", argParts)})");
         return (callTmp, returnType);
     }
 

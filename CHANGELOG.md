@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Suru Runtime Modules
+
+Extracted all non-trivial string, array, and struct operations from inline per-function IR codegen into three standalone LLVM runtime modules (`suru_string.ll`, `suru_array.ll`, `suru_struct.ll`). User `.ll` files now emit only `declare` stubs; the linker resolves the symbols at link time.
+
+- **`SuruRuntime`** (`Codegen/SuruRuntime.cs`, new) — static class with three methods returning raw LLVM IR strings: `GenerateStringRuntime()`, `GenerateArrayRuntime()`, `GenerateStructRuntime()`. Each method returns a complete `.ll` module with all function definitions for that domain. `CompileIR` writes these into the build directory on every build.
+
+- **`SuruRuntimeDeclarations`** (`Codegen/SuruRuntimeDeclarations.cs`, new) — tracks which Suru runtime `declare` stubs are needed in a user module. Same idempotent Add* pattern as `Externals`. Covers all string functions (`suru_string_create/clone/drop/append/at/equals/slice/ord`, `suru_int64_from_string`, `suru_int64_to_string`), all array functions (`suru_array_at/set/add/slice`, `suru_array_clone_scalar/string/struct`, `suru_array_drop_scalar/string/struct`), and all struct functions (`suru_find_field`, `suru_struct_clone/drop`). `IRCodeGenerator` holds a `private readonly SuruRuntimeDeclarations _runtimeDecls` field; `Emit()` appends `_runtimeDecls.ToString()` after the `_externals` block.
+
+- **`suru_string.ll`** — defines 10 functions: `suru_string_create` (malloc Seq header, store data+len), `suru_string_clone` (malloc Seq+buffer, memcpy), `suru_string_drop` (free buffer, free Seq), `suru_string_append` (malloc new buffer, memcpy both halves), `suru_string_at` (malloc 2-byte buffer, copy 1 char), `suru_string_equals` (strcmp wrapper returning i1), `suru_string_slice` (malloc slice buffer, memcpy range), `suru_string_ord` (load first byte as i64), `suru_int64_from_string` (strtol on data ptr), `suru_int64_to_string` (two-call snprintf pattern).
+
+- **`suru_array.ll`** — defines 10 functions: `suru_array_at/set` (GEP into data buffer), `suru_array_add` (grow branch with two `select` instructions for cap==0→4, cap<1024→cap×2, cap≥1024→cap+1024; realloc updates header in-place), `suru_array_slice` (malloc new header+buffer, memcpy range), `suru_array_clone_scalar` (malloc new header+buffer, memcpy all elements), `suru_array_clone_string/struct` (loop calling `suru_string_clone` / `suru_struct_clone` per element), `suru_array_drop_scalar` (free data+header), `suru_array_drop_string/struct` (loop calling `suru_string_drop` / `suru_struct_drop` per element, then free data+header). Cross-module calls to `suru_string_clone/drop` and `suru_struct_clone/drop` resolve at link time.
+
+- **`suru_struct.ll`** — defines 3 functions: `suru_find_field` (phi-loop through linked list, strcmp to match name), `suru_struct_clone` (loop: malloc 32 bytes per node, copy name/tag/val slots, wire `next`; tracks head via alloca), `suru_struct_drop` (loop: load `next` before `free` to avoid use-after-free).
+
+- **`IRStringCodeGenerator.cs` rewritten** — all complex string operations replaced with `_runtimeDecls.Add*()` + `call @suru_string_*`. Kept inline: `EmitExtractStringData`, `EmitExtractStringLen`, `EmitStringLen`, `EmitStringLiteralValue` (references module-local `[N x i8]` globals). Removed: all direct `_externals.Add*()` calls from string/conversion methods; `_boolStringGlobals.AddFmtIntRaw()` from `EmitInt64ToString`.
+
+- **`IRArrayCodeGenerator.cs` rewritten** — `EmitArrayAt/Set/Add/Slice` emit `call @suru_array_*`; `EmitCloneArrayDispatch`/`EmitDropArrayDispatch` dispatch to `@suru_array_clone_scalar/string/struct` based on element type. Removed: `EmitCloneArray`, `EmitDropArray`, `EmitCloneArrayShallow`, `EmitDropArrayShallow`, `_arrayCounter`.
+
+- **`IRStructCodeGenerator.cs` rewritten** — `EmitFindFieldCall` uses `_runtimeDecls.AddFindField()`; `EmitCloneStruct`/`EmitDropStruct` emit `call @suru_struct_clone` / `call void @suru_struct_drop`; dispatch wrappers `EmitCloneStructDispatch`/`EmitDropStructDispatch` added. Removed: `EnsureFindFieldHelper`, `EmitFindFieldHelper` (inline phi-loop), `_structCounter`. The `_helpers` StringBuilder is retained but no longer used for `suru_find_field`.
+
+- **`IRCodeGenerator.cs`** — added `_runtimeDecls` field; removed `_findFieldEmitted`, `_structCounter`, `_arrayCounter` fields; `clone`/`drop` struct dispatch sites updated to call `EmitCloneStructDispatch`/`EmitDropStructDispatch`.
+
+- **`Compiler.CompileIR`** — updated from 3-step to 4-step build: step 3 generates and compiles the three runtime modules into the build directory; step 4 links all objects. Runtime objects are always linked unconditionally.
+
+### LLVM Module Model for Includes
+
+Refactored the include system from a single merged IR module to the standard LLVM separate-compilation model. Each `.suru` source file now compiles to its own `.ll` and `.o`; the linker resolves cross-module symbol references.
+
+- **`Module.ExternalFunctions`** (new) — `IReadOnlyDictionary<string, string>` populated by `ResolveIncludes`; maps every Suru-qualified call name (`"ns.fn"`) to the original LLVM symbol name (`"fn"`). Codegen uses this table in two places: `EmitFunction` emits `declare @fn(...)` instead of a `define` body for imported functions; `EmitUserFunctionCall` calls `@fn` (not `@ns.fn`) at call sites. The namespace is a Suru language concept only and does not appear in any LLVM IR.
+
+- **`Module.IncludedSourcePaths`** (new) — `IReadOnlyList<string>` of absolute source file paths, collected transitively by `ResolveIncludes`. Paths are deduplicated: each file appears at most once regardless of how many include chains reach it. `CompileIR` iterates this list to compile every included file into its own `.o`.
+
+- **`ResolveIncludes` rewritten** — still merges included `FunctionDeclaration`s (with `"ns."` prefix) into the main module's statement list for semantic analysis; additionally populates `ExternalFunctions` and `IncludedSourcePaths`. Transitive includes are collected by merging `includedModule.IncludedSourcePaths` into the outer set.
+
+- **`CompileIR` three-step pipeline** — (1) compile main source to `.ll`/`.o`; (2) for each path in `module.IncludedSourcePaths`, call `new Compiler(path).GenerateIr()` and compile the resulting standalone IR to its own `.o`; (3) link all `.o` files together with `cc`. Each included file's standalone IR is produced by the same full front-end pipeline (lex → parse → include resolution → semantic → codegen), so transitive includes appear as `declare` stubs in that file's own IR.
+
+- **`Link` signature updated** — now accepts `IReadOnlyList<string> objectPaths`; passes all objects to `cc` on a single command line.
+
+- **`EmitFunction` external-function guard** — if the function name is a key in `_module.ExternalFunctions`, emits a `declare` with the original symbol name and returns immediately; no function body is emitted in the importing module.
+
+- **`EmitFunction` external linkage** — user-defined functions now use `define <rettype> @name(...)` (external linkage); the previous `define internal` made functions invisible across compilation unit boundaries.
+
+- **`@main` wrapper guard** — `EmitMainWrapper` is only called when the current module contains a `fn main` declaration; included modules compiled standalone no longer produce a broken C `main` referencing an undefined `@suru_main`.
+
 ### String IR: self-contained clone and drop
 
 - **`clone(s)` for String** — `EmitCloneStringDispatch` / `EmitCloneString` (new, in

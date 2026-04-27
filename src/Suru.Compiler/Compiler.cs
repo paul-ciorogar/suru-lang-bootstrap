@@ -92,6 +92,20 @@ public class Compiler
     /// lex → parse → include resolution → semantic → IR codegen → clang → link.
     /// Writes <c>&lt;buildDir&gt;/&lt;name&gt;.ll</c>, <c>.o</c>, and the final binary.
     /// </summary>
+    // Runs the complete pipeline to a native executable using the LLVM module model:
+    //
+    //   1. Compile the main source to its own .ll and .o.
+    //   2. For every file listed in module.IncludedSourcePaths, generate its standalone
+    //      IR (extern declarations for any of *its* includes) and compile to .o.
+    //   3. Generate the three Suru runtime modules (suru_string.ll, suru_array.ll,
+    //      suru_struct.ll) into the build directory and compile each to .o.
+    //   4. Link all .o files together with cc.
+    //
+    // Each .suru file is an independent compilation unit — included files are not merged
+    // into the main IR. Instead, cross-module calls compile to `call @fn` (original name,
+    // no namespace prefix) and the linker resolves them against the included modules' .o.
+    // The runtime .o files are always linked unconditionally so that any declare stub
+    // emitted by the user module resolves at link time.
     public CompilationResult CompileIR(string buildDir)
     {
         Directory.CreateDirectory(buildDir);
@@ -104,18 +118,63 @@ public class Compiler
         if (semanticErrors.Count > 0)
             return CompilationResult.Fail(semanticErrors);
 
-        var baseName = Path.GetFileNameWithoutExtension(_sourcePath);
-        var ir = IRCodeGenerator.Generate(module!, Path.GetFileName(_sourcePath));
-        var irPath = Path.Combine(buildDir, baseName + ".ll");
-        File.WriteAllText(irPath, ir);
+        var objectPaths = new List<string>();
 
-        var objectPath = Path.Combine(buildDir, baseName + ".o");
-        var clangError = RunClang(irPath, objectPath);
+        // Step 1: compile the main source.
+        var baseName = Path.GetFileNameWithoutExtension(_sourcePath);
+        var mainIr   = IRCodeGenerator.Generate(module!, Path.GetFileName(_sourcePath));
+        var mainIrPath  = Path.Combine(buildDir, baseName + ".ll");
+        var mainObjPath = Path.Combine(buildDir, baseName + ".o");
+        File.WriteAllText(mainIrPath, mainIr);
+        var clangError = RunClang(mainIrPath, mainObjPath);
         if (clangError is not null)
             return CompilationResult.Fail($"IR compile failed: {clangError}");
+        objectPaths.Add(mainObjPath);
 
+        // Step 2: compile each included source file into its own object.
+        // GenerateIr() on each included Compiler instance runs the full front-end for that
+        // file (including its own include resolution) and produces standalone IR where any
+        // *further* includes appear as extern declarations.
+        foreach (var includedPath in module!.IncludedSourcePaths)
+        {
+            var inclName    = Path.GetFileNameWithoutExtension(includedPath);
+            var inclIrPath  = Path.Combine(buildDir, inclName + ".ll");
+            var inclObjPath = Path.Combine(buildDir, inclName + ".o");
+
+            var inclResult = new Compiler(includedPath).GenerateIr();
+            if (!inclResult.Success)
+                return CompilationResult.Fail($"Failed to compile included file '{includedPath}':\n" +
+                                              string.Join("\n", inclResult.Errors));
+
+            File.WriteAllText(inclIrPath, inclResult.Value!);
+            var inclClangError = RunClang(inclIrPath, inclObjPath);
+            if (inclClangError is not null)
+                return CompilationResult.Fail($"IR compile of '{inclName}' failed: {inclClangError}");
+
+            objectPaths.Add(inclObjPath);
+        }
+
+        // Step 3: generate and compile the three Suru runtime modules.
+        var runtimes = new[]
+        {
+            ("suru_string", SuruRuntime.GenerateStringRuntime()),
+            ("suru_array",  SuruRuntime.GenerateArrayRuntime()),
+            ("suru_struct", SuruRuntime.GenerateStructRuntime()),
+        };
+        foreach (var (rtName, rtIr) in runtimes)
+        {
+            var rtIrPath  = Path.Combine(buildDir, rtName + ".ll");
+            var rtObjPath = Path.Combine(buildDir, rtName + ".o");
+            File.WriteAllText(rtIrPath, rtIr);
+            var rtClangError = RunClang(rtIrPath, rtObjPath);
+            if (rtClangError is not null)
+                return CompilationResult.Fail($"IR compile of runtime '{rtName}' failed: {rtClangError}");
+            objectPaths.Add(rtObjPath);
+        }
+
+        // Step 4: link all objects into the final executable.
         var executablePath = Path.Combine(buildDir, baseName);
-        var linkError = Link(objectPath, executablePath);
+        var linkError = Link(objectPaths, executablePath);
         if (linkError is not null)
             return CompilationResult.Fail($"Link failed: {linkError}");
 
@@ -167,6 +226,22 @@ public class Compiler
         return (module, []);
     }
 
+    // Resolves `include "path" as ns` directives in module by merging function signatures
+    // from each included file into the statement list under the `ns.` prefix — enabling
+    // semantic analysis to type-check cross-module calls without a separate declaration step.
+    //
+    // Two additional collections are populated and returned in the Module:
+    //
+    //   ExternalFunctions — maps every merged "ns.fn" Suru name back to the original
+    //     LLVM symbol name "fn". IRCodeGenerator uses this to emit `declare @fn` instead
+    //     of `define @ns.fn` and to call `@fn` (not `@ns.fn`) at call sites.
+    //
+    //   IncludedSourcePaths — absolute paths of all included source files, collected
+    //     transitively so CompileIR can build each into its own object file and link
+    //     everything together. Each path appears at most once (deduplicated via a set).
+    //
+    // visitedPaths guards against circular includes; it accumulates across the recursive
+    // calls so a file can't be included twice anywhere in the include graph.
     private static Module ResolveIncludes(Module module, string baseDir, HashSet<string> visitedPaths)
     {
         var directives = module.Statements.OfType<IncludeDirective>().ToList();
@@ -175,7 +250,10 @@ public class Compiler
         var mergedStatements = module.Statements
             .Where(s => s is not IncludeDirective)
             .ToList();
-        var namespaces = new HashSet<string>(module.Namespaces);
+        var namespaces       = new HashSet<string>(module.Namespaces);
+        var externalFns      = new Dictionary<string, string>();
+        var seenPaths        = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var includedPaths    = new List<string>();
 
         foreach (var directive in directives)
         {
@@ -187,33 +265,43 @@ public class Compiler
 
             visitedPaths.Add(fullPath);
 
-            var source = File.ReadAllText(fullPath);
+            var source         = File.ReadAllText(fullPath);
             var includedModule = Parser.Parse(new Tokens(new Lexer(source), fullPath));
 
             var includedDir = Path.GetDirectoryName(fullPath)!;
-            includedModule = ResolveIncludes(includedModule, includedDir, visitedPaths);
+            includedModule  = ResolveIncludes(includedModule, includedDir, visitedPaths);
+
+            // Collect this file and its transitive includes as separate compilation units.
+            if (seenPaths.Add(fullPath))
+                includedPaths.Add(fullPath);
+            foreach (var transPath in includedModule.IncludedSourcePaths)
+                if (seenPaths.Add(transPath))
+                    includedPaths.Add(transPath);
 
             var ns = directive.NamespaceName;
             namespaces.Add(ns);
+
             foreach (var stmt in includedModule.Statements)
             {
                 if (stmt is FunctionDeclaration fn)
                 {
-                    var prefixed = new FunctionDeclaration(
-                        ns + "." + fn.Name,
-                        fn.Parameters,
-                        fn.ReturnType,
-                        fn.Body);
-                    mergedStatements.Add(prefixed);
+                    // Register the qualified name ("ns.fn") and record the original LLVM
+                    // symbol name ("fn") so codegen can emit `declare @fn` and `call @fn`.
+                    var qualifiedName = ns + "." + fn.Name;
+                    externalFns[qualifiedName] = fn.Name;
+                    mergedStatements.Add(new FunctionDeclaration(
+                        qualifiedName, fn.Parameters, fn.ReturnType, fn.Body));
                 }
             }
         }
 
         return new Module
         {
-            SourcePath = module.SourcePath,
-            Statements = mergedStatements,
-            Namespaces = namespaces,
+            SourcePath           = module.SourcePath,
+            Statements           = mergedStatements,
+            Namespaces           = namespaces,
+            ExternalFunctions    = externalFns,
+            IncludedSourcePaths  = includedPaths,
         };
     }
 
@@ -252,12 +340,16 @@ public class Compiler
         return null;
     }
 
-    private static string? Link(string objectPath, string executablePath)
+    // Links one or more object files into a native executable using cc.
+    // All objects are passed on a single command line so the linker resolves cross-module
+    // symbol references (e.g. a call @tokenize in parser.o resolved against lexer.o).
+    private static string? Link(IReadOnlyList<string> objectPaths, string executablePath)
     {
+        var quotedObjs = string.Join(" ", objectPaths.Select(p => $"\"{p}\""));
         using var process = Process.Start(new ProcessStartInfo
         {
             FileName = "cc",
-            Arguments = $"\"{objectPath}\" -o \"{executablePath}\"",
+            Arguments = $"{quotedObjs} -o \"{executablePath}\"",
             RedirectStandardError = true,
             UseShellExecute = false,
         })!;

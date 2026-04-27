@@ -12,42 +12,49 @@ namespace Suru.Compiler.Codegen;
 // `data` points to a null-terminated i8 buffer; `len` holds the character count excluding
 // the null terminator.
 //
-// String literals are interned as [N x i8] private constant globals (the raw bytes).  At
-// runtime EmitStringLiteralValue mallocs a fresh char buffer, memcpy's the bytes from the
-// global, and wraps both in a new 16-byte Seq header.  The heap-owned data buffer means every
-// Seq can be safely freed by drop() — no special case for literal vs computed strings.
+// ── Runtime module ────────────────────────────────────────────────────────────
 //
-// Layout diagram for `let s String: "hi"`:
+// All non-trivial string operations (append, at, equals, slice, ord, clone, drop,
+// Int64.from, toString) are implemented in suru_string.ll and linked as a separate
+// compilation unit. The user's .ll only emits `declare` stubs via _runtimeDecls.
 //
-//   @.str_0 = [3 x i8] c"hi\00"        ← interned global, source bytes only
+// ── What stays inline ─────────────────────────────────────────────────────────
+//
+//   EmitExtractStringData / EmitExtractStringLen — simple 2-instruction GEP+load
+//     patterns; used by printLn, writeFile, and EmitMatchTestChain (string patterns).
+//
+//   EmitStringLiteralValue — interns the raw bytes as a module-local [N x i8] global,
+//     malloc+memcpy's them into a heap buffer, then calls suru_string_create.
+//     The global is module-local so it cannot move to the runtime module.
+//
+//   EmitCreateStringSeq — now delegates to @suru_string_create in the runtime.
+//     Kept as a thin helper for call sites that already have a data ptr and length.
+//
+// ── Layout diagram for `let s String: "hi"` ──────────────────────────────────
+//
+//   @.str_0 = [3 x i8] c"hi\00"         ← interned global, source bytes only
 //
 //   suru_main:
-//     %buf  = malloc 3                  ← heap-owned copy of the 3 raw bytes
+//     %buf  = malloc 3                   ← heap-owned copy of the 3 raw bytes
 //     memcpy(%buf, @.str_0, 3)
-//     %seq  = malloc 16                 ← Seq header
-//     store i64 2 → %seq[0]            ← len field (excludes null terminator)
-//     store ptr %buf → %seq[1]         ← data field (heap-owned, always free-able)
-//     %s.addr = alloca ptr
+//     %seq  = call @suru_string_create(%buf, 2)  ← runtime allocates the 16-byte Seq
 //     store ptr %seq → %s.addr
-//
-// String mutations (append, slice, at) produce a NEW Seq; the old one is currently leaked.
-// Every Seq's data pointer is heap-owned, so drop(arr) for Array<String> can free it safely.
 partial class IRCodeGenerator
 {
     // ─── String literal ──────────────────────────────────────────────────────
 
-    // Intern the raw bytes as a global constant, then malloc-copy them into a fresh heap buffer
-    // and wrap in a new 16-byte Seq header.  The global is deduped (identical strings share one
-    // [N x i8] constant), but each call site gets its own heap buffer and Seq header.
+    // Intern the raw bytes as a global constant; malloc+memcpy into a fresh heap buffer;
+    // then call suru_string_create to wrap data+len in a new Seq header.
     //
-    // Heap-owning the data buffer ensures every Seq can be uniformly freed by drop() — there
-    // is no need to distinguish "literal" strings from "computed" strings at the call site.
+    // The global is module-local (cannot move to the runtime module), but the Seq
+    // allocation itself is delegated to the runtime so the header layout stays
+    // centralised in suru_string.ll.
     private (string val, SuruType type) EmitStringLiteralValue(string text)
     {
         if (!_stringLiterals.TryGetValue(text, out var entry))
         {
             var globalName = $"@.str_{_strCount++}";
-            var byteLen    = CountStringBytes(text) + 1; // +1 for null terminator
+            var byteLen    = CountStringBytes(text) + 1;  // +1 for null terminator
             entry = (globalName, byteLen);
             _stringLiterals[text] = entry;
         }
@@ -65,6 +72,9 @@ partial class IRCodeGenerator
     }
 
     // ─── Low-level Seq helpers ───────────────────────────────────────────────
+    //
+    // These two helpers remain inline because they are used in contexts where a full
+    // function call would be wasteful (printLn, writeFile, string match patterns).
 
     // Extract the `data` pointer from a %suru.Seq (field index 1).
     // Returns the SSA name of the loaded ptr value.
@@ -88,217 +98,98 @@ partial class IRCodeGenerator
         return len;
     }
 
-    // Allocate a new %suru.Seq on the heap, populate its fields, and return a ptr to it.
-    // `dataPtr`  — SSA name (or global name) of the i8* data buffer.
-    // `lenVal`   — SSA name or integer literal string for the i64 character count.
+    // Call @suru_string_create(data, len) to allocate a new %suru.Seq on the heap.
+    // `dataPtr` — SSA name of the i8* data buffer (must be heap-owned).
+    // `lenVal`  — SSA name or integer literal string for the i64 character count.
     private (string val, SuruType type) EmitCreateStringSeq(string dataPtr, string lenVal)
     {
-        _externals.AddMalloc();
-        var seqPtr  = NextTmp();
-        var lenGep  = NextTmp();
-        var dataGep = NextTmp();
-        _funcs.AppendLine($"  {seqPtr}  = call ptr @malloc(i64 16)");
-        _funcs.AppendLine($"  {lenGep}  = getelementptr %suru.Seq, ptr {seqPtr}, i32 0, i32 0");
-        _funcs.AppendLine($"  store i64 {lenVal}, ptr {lenGep}");
-        _funcs.AppendLine($"  {dataGep} = getelementptr %suru.Seq, ptr {seqPtr}, i32 0, i32 1");
-        _funcs.AppendLine($"  store ptr {dataPtr}, ptr {dataGep}");
-        return (seqPtr, SuruType.String);
+        _runtimeDecls.AddStringCreate();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_create(ptr {dataPtr}, i64 {lenVal})");
+        return (tmp, SuruType.String);
     }
 
     // ─── String instance methods ─────────────────────────────────────────────
 
-    // .len() → Int64: load the len field directly from the Seq header.
-    // No C runtime calls needed — the length was stored at construction time.
+    // .len() → Int64: load the len field inline (2 instructions; no runtime call needed).
     private (string val, SuruType type) EmitStringLen(string seqVal)
         => (EmitExtractStringLen(seqVal), SuruType.Int64);
 
-    // .append(other) → String: concatenate two strings into a new heap-allocated Seq.
-    //
-    // Strategy:
-    //   1. Extract len and data from both Seqs.
-    //   2. totalLen = len1 + len2; malloc totalLen+1 bytes for the new data buffer.
-    //   3. memcpy the first string's bytes into the buffer.
-    //   4. GEP to the midpoint (offset len1); memcpy the second string's bytes.
-    //   5. Store a null terminator at offset totalLen.
-    //   6. Wrap in a new Seq via EmitCreateStringSeq.
-    //
-    // The old Seqs are not freed — memory management is the caller's responsibility.
+    // .append(other) → String: delegate to @suru_string_append in the runtime.
     private (string val, SuruType type) EmitStringAppend(string lhsSeqVal, Expression rhsExpr)
     {
         var (rhsSeqVal, _) = EmitValue(rhsExpr);
-
-        var lhsLen  = EmitExtractStringLen(lhsSeqVal);
-        var lhsData = EmitExtractStringData(lhsSeqVal);
-        var rhsLen  = EmitExtractStringLen(rhsSeqVal);
-        var rhsData = EmitExtractStringData(rhsSeqVal);
-
-        // totalLen = len1 + len2; bufSize = totalLen + 1 (null terminator)
-        var totalLen = NextTmp();
-        var bufSize  = NextTmp();
-        _funcs.AppendLine($"  {totalLen} = add i64 {lhsLen}, {rhsLen}");
-        _funcs.AppendLine($"  {bufSize}  = add i64 {totalLen}, 1");
-
-        var newData = NextTmp();
-        _funcs.AppendLine($"  {newData} = call ptr @malloc(i64 {bufSize})");
-
-        // Copy first half: memcpy(newData, lhsData, lhsLen)
-        _externals.AddMemcpy();
-        _funcs.AppendLine($"  call ptr @memcpy(ptr {newData}, ptr {lhsData}, i64 {lhsLen})");
-
-        // Copy second half: GEP to newData + lhsLen, then memcpy(mid, rhsData, rhsLen)
-        var midPtr = NextTmp();
-        _funcs.AppendLine($"  {midPtr} = getelementptr i8, ptr {newData}, i64 {lhsLen}");
-        _funcs.AppendLine($"  call ptr @memcpy(ptr {midPtr}, ptr {rhsData}, i64 {rhsLen})");
-
-        // Null-terminate: newData[totalLen] = '\0'
-        var nullPtr = NextTmp();
-        _funcs.AppendLine($"  {nullPtr} = getelementptr i8, ptr {newData}, i64 {totalLen}");
-        _funcs.AppendLine($"  store i8 0, ptr {nullPtr}");
-
-        return EmitCreateStringSeq(newData, totalLen);
+        _runtimeDecls.AddStringAppend();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_append(ptr {lhsSeqVal}, ptr {rhsSeqVal})");
+        return (tmp, SuruType.String);
     }
 
-    // .at(idx) → String: return a single-character string at the given index.
-    //
-    // Allocates a 2-byte buffer ([char, '\0']), copies the byte at `idx` from the
-    // source data, null-terminates it, and wraps in a new Seq with len=1.
+    // .at(i) → String: single-character String at byte index i.
     private (string val, SuruType type) EmitStringAt(string seqVal, Expression idxExpr)
     {
         var (idxVal, _) = EmitValue(idxExpr);
-        var dataPtr     = EmitExtractStringData(seqVal);
-
-        // Point to the character at position idx
-        var charPtr = NextTmp();
-        _funcs.AppendLine($"  {charPtr} = getelementptr i8, ptr {dataPtr}, i64 {idxVal}");
-
-        // Allocate [char, '\0'] and copy
-        var buf     = NextTmp();
-        var charVal = NextTmp();
-        var nullPtr = NextTmp();
-        _funcs.AppendLine($"  {buf}     = call ptr @malloc(i64 2)");
-        _funcs.AppendLine($"  {charVal} = load i8, ptr {charPtr}");
-        _funcs.AppendLine($"  store i8 {charVal}, ptr {buf}");
-        _funcs.AppendLine($"  {nullPtr} = getelementptr i8, ptr {buf}, i64 1");
-        _funcs.AppendLine($"  store i8 0, ptr {nullPtr}");
-
-        return EmitCreateStringSeq(buf, "1");
+        _runtimeDecls.AddStringAt();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_at(ptr {seqVal}, i64 {idxVal})");
+        return (tmp, SuruType.String);
     }
 
     // .equals(other) → Bool: byte-exact comparison via strcmp.
-    // strcmp returns 0 when the strings are identical; icmp eq converts that to i1 true.
     private (string val, SuruType type) EmitStringEquals(string lhsSeqVal, Expression rhsExpr)
     {
         var (rhsSeqVal, _) = EmitValue(rhsExpr);
-        var lhsData        = EmitExtractStringData(lhsSeqVal);
-        var rhsData        = EmitExtractStringData(rhsSeqVal);
-
-        _externals.AddStrcmp();
-        var cmpResult = NextTmp();
-        var eqResult  = NextTmp();
-        _funcs.AppendLine($"  {cmpResult} = call i32 @strcmp(ptr {lhsData}, ptr {rhsData})");
-        _funcs.AppendLine($"  {eqResult}  = icmp eq i32 {cmpResult}, 0");
-        return (eqResult, SuruType.Bool);
+        _runtimeDecls.AddStringEquals();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i1 @suru_string_equals(ptr {lhsSeqVal}, ptr {rhsSeqVal})");
+        return (tmp, SuruType.Bool);
     }
 
-    // .slice(from, to) → String: return the substring covering bytes [from, to).
-    //
-    // Strategy: GEP to `from` in the source data; memcpy `(to - from)` bytes into a new
-    // malloc'd buffer; null-terminate; wrap in a new Seq. The slice length is computed
-    // as an SSA value so it serves both as the memcpy count and the Seq len field.
+    // .slice(from, to) → String: substring covering bytes [from, to).
     private (string val, SuruType type) EmitStringSlice(
         string seqVal, Expression fromExpr, Expression toExpr)
     {
         var (fromVal, _) = EmitValue(fromExpr);
         var (toVal, _)   = EmitValue(toExpr);
-        var dataPtr      = EmitExtractStringData(seqVal);
-
-        // sliceLen = to - from
-        var sliceLen = NextTmp();
-        _funcs.AppendLine($"  {sliceLen} = sub i64 {toVal}, {fromVal}");
-
-        // srcPtr = dataPtr + from
-        var srcPtr = NextTmp();
-        _funcs.AppendLine($"  {srcPtr} = getelementptr i8, ptr {dataPtr}, i64 {fromVal}");
-
-        // Allocate sliceLen+1 bytes (room for null terminator)
-        var bufSize = NextTmp();
-        var buf     = NextTmp();
-        _funcs.AppendLine($"  {bufSize} = add i64 {sliceLen}, 1");
-        _funcs.AppendLine($"  {buf}     = call ptr @malloc(i64 {bufSize})");
-
-        // Copy the slice
-        _externals.AddMemcpy();
-        _funcs.AppendLine($"  call ptr @memcpy(ptr {buf}, ptr {srcPtr}, i64 {sliceLen})");
-
-        // Null-terminate at offset sliceLen
-        var nullPtr = NextTmp();
-        _funcs.AppendLine($"  {nullPtr} = getelementptr i8, ptr {buf}, i64 {sliceLen}");
-        _funcs.AppendLine($"  store i8 0, ptr {nullPtr}");
-
-        return EmitCreateStringSeq(buf, sliceLen);
+        _runtimeDecls.AddStringSlice();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_slice(ptr {seqVal}, i64 {fromVal}, i64 {toVal})");
+        return (tmp, SuruType.String);
     }
 
-    // .ord() → Int64: return the ASCII value of the first character.
-    // Extracts the data pointer from the Seq, loads the first i8, and zero-extends to i64.
+    // .ord() → Int64: ASCII code of the first byte.
     private (string val, SuruType type) EmitStringOrd(string seqVal)
     {
-        var dataPtr = EmitExtractStringData(seqVal);
-        var byteTmp = NextTmp();
-        var extTmp  = NextTmp();
-        _funcs.AppendLine($"  {byteTmp} = load i8, ptr {dataPtr}");
-        _funcs.AppendLine($"  {extTmp}  = zext i8 {byteTmp} to i64");
-        return (extTmp, SuruType.Int64);
+        _runtimeDecls.AddStringOrd();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i64 @suru_string_ord(ptr {seqVal})");
+        return (tmp, SuruType.Int64);
     }
 
-        // ─── Clone ───────────────────────────────────────────────────────────────
+    // ─── Clone ───────────────────────────────────────────────────────────────
 
     // Dispatch helper for `clone(s)` in expression position.
-    //
-    // Evaluates the argument (must be a String), delegates to EmitCloneString,
-    // and returns the new Seq ptr typed as SuruType.String.  Mirrors the array
-    // counterpart EmitCloneArrayDispatch in IRArrayCodeGenerator.cs.
+    // Evaluates the argument, delegates to @suru_string_clone, returns String.
     internal (string val, SuruType type) EmitCloneStringDispatch(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
         return (EmitCloneString(seqVal), SuruType.String);
     }
 
-    // Produce an independent copy of a %suru.Seq String value.
-    //
-    // Allocates a new 16-byte Seq header and a new char buffer of `len + 1` bytes
-    // (includes the null terminator), copies all bytes from the source buffer, and
-    // returns a ptr to the new Seq.  The new Seq is fully heap-owned and can be
-    // freed by EmitDropString without any special-casing.
-    //
-    // This is also called internally from IRArrayCodeGenerator.cs when cloning an
-    // Array<String> element-by-element.
+    // Emit a call to @suru_string_clone — produces an independent copy of a String.
+    // Also called from IRArrayCodeGenerator when cloning an Array<String> element.
     internal string EmitCloneString(string seqPtr)
     {
-        _externals.AddMalloc();
-        _externals.AddMemcpy();
-
-        var srcLen  = EmitExtractStringLen(seqPtr);
-        var srcData = EmitExtractStringData(seqPtr);
-
-        // Allocate a new char buffer: len+1 bytes (includes the null terminator).
-        var bufBytes = NextTmp();
-        var newBuf   = NextTmp();
-        _funcs.AppendLine($"  {bufBytes} = add i64 {srcLen}, 1");
-        _funcs.AppendLine($"  {newBuf}   = call ptr @malloc(i64 {bufBytes})");
-        _funcs.AppendLine($"  call ptr @memcpy(ptr {newBuf}, ptr {srcData}, i64 {bufBytes})");
-
-        // Build new Seq header with the same len and the newly allocated data buffer.
-        var (newSeq, _) = EmitCreateStringSeq(newBuf, srcLen);
-        return newSeq;
+        _runtimeDecls.AddStringClone();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_clone(ptr {seqPtr})");
+        return tmp;
     }
 
     // ─── Drop ────────────────────────────────────────────────────────────────
 
     // Dispatch helper for `drop(s)` in expression position.
-    //
-    // Evaluates the argument (must be a String), frees its memory via EmitDropString,
-    // and returns ("0", Bool) so the call can appear in statement or expression position.
-    // Mirrors EmitDropArrayDispatch in IRArrayCodeGenerator.cs.
+    // Returns ("0", Bool) so the call can appear in statement or expression position.
     internal (string val, SuruType type) EmitDropStringDispatch(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
@@ -306,77 +197,33 @@ partial class IRCodeGenerator
         return ("0", SuruType.Bool);
     }
 
-    // Free the memory backing a %suru.Seq String value.
-    //
-    // Two `free` calls in order:
-    //   1. free(data)   — the heap-owned null-terminated char buffer.
-    //   2. free(seqPtr) — the 16-byte Seq header.
-    //
-    // Because EmitStringLiteralValue always mallocs a fresh char buffer (even for
-    // compile-time string literals), every Seq's data ptr is heap-owned and this
-    // sequence is always safe.  Called from IRArrayCodeGenerator when dropping
-    // an Array<String> element.
+    // Emit a call to @suru_string_drop — frees the char buffer then the Seq header.
+    // Also called from IRArrayCodeGenerator when dropping an Array<String> element.
     internal void EmitDropString(string seqPtr)
     {
-        _externals.AddFree();
-        var dataPtr = EmitExtractStringData(seqPtr);
-        _funcs.AppendLine($"  call void @free(ptr {dataPtr})");
-        _funcs.AppendLine($"  call void @free(ptr {seqPtr})");
+        _runtimeDecls.AddStringDrop();
+        _funcs.AppendLine($"  call void @suru_string_drop(ptr {seqPtr})");
     }
 
     // ─── String ↔ Int64 conversions ──────────────────────────────────────────
 
-    // Int64.from(str) → Int64: parse a decimal string to a 64-bit integer via strtol.
-    // Extracts the data pointer from the argument Seq and passes it to strtol with base 10.
-    // The second argument (endptr) is null — we don't need to inspect the stop position.
+    // Int64.from(str) → Int64: parse a decimal string via strtol.
     private (string val, SuruType type) EmitInt64FromString(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
-        var dataPtr     = EmitExtractStringData(seqVal);
-
-        _externals.AddStrtol();
-        var result = NextTmp();
-        _funcs.AppendLine($"  {result} = call i64 @strtol(ptr {dataPtr}, ptr null, i32 10)");
-        return (result, SuruType.Int64);
+        _runtimeDecls.AddInt64FromString();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i64 @suru_int64_from_string(ptr {seqVal})");
+        return (tmp, SuruType.Int64);
     }
 
     // n.toString() → String: format an Int64 as a decimal string via snprintf.
-    //
-    // Strategy (two-call snprintf pattern):
-    //   1. snprintf(null, 0, "%lld", val) — C99-defined; returns the number of characters
-    //      that would have been written (excluding the null terminator). No buffer needed.
-    //   2. malloc(count + 1) — exact-size allocation.
-    //   3. snprintf(buf, count+1, "%lld", val) — write the formatted digits into the buffer.
-    //   4. Wrap the buffer in a new Seq via EmitCreateStringSeq.
-    //
-    // The count returned by snprintf is an i32; it is sign-extended to i64 for use as the
-    // Seq len field and as the malloc size operand (i64).
     private (string val, SuruType type) EmitInt64ToString(string int64Val)
     {
-        _boolStringGlobals.AddFmtIntRaw();
-        _externals.AddSnprintf();
-
-        // Measure: snprintf(null, 0, "%lld", val) → i32 char count
-        var countRaw = NextTmp();
-        _funcs.AppendLine(
-            $"  {countRaw} = call i32 (ptr, i64, ptr, ...) @snprintf(" +
-            $"ptr null, i64 0, ptr @.fmt_int_raw, i64 {int64Val})");
-
-        var count64 = NextTmp();
-        _funcs.AppendLine($"  {count64} = sext i32 {countRaw} to i64");
-
-        // Allocate: count + 1 bytes (includes null terminator)
-        var bufSize = NextTmp();
-        var buf     = NextTmp();
-        _funcs.AppendLine($"  {bufSize} = add i64 {count64}, 1");
-        _funcs.AppendLine($"  {buf}     = call ptr @malloc(i64 {bufSize})");
-
-        // Write: snprintf(buf, bufSize, "%lld", val)
-        _funcs.AppendLine(
-            $"  call i32 (ptr, i64, ptr, ...) @snprintf(" +
-            $"ptr {buf}, i64 {bufSize}, ptr @.fmt_int_raw, i64 {int64Val})");
-
-        return EmitCreateStringSeq(buf, count64);
+        _runtimeDecls.AddInt64ToString();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_int64_to_string(i64 {int64Val})");
+        return (tmp, SuruType.String);
     }
 
     // Int64 static method dispatch — mirrors EmitInt32StaticMethod in the main file.

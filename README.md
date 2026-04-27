@@ -360,7 +360,9 @@ fn double(n Int64) Int64 {
 - The path is relative to the file that contains the `include`.
 - All functions from the included file become available as `ns.fn(args)`.
 - Circular includes are detected and reported as a compile error.
-- Only functions are imported — constants and top-level statements from the included file are ignored.
+- Only functions are imported — constants and top-level statements from the included file are not exported to the importing module.
+- Each `.suru` file is compiled to its own object file; the linker resolves cross-module references. The `ns.` prefix is a Suru language concept only — LLVM call sites use the original unqualified function name.
+- Include chains are transitive: if `main.suru` includes `a.suru` which includes `b.suru`, all three are compiled to separate objects and linked together.
 
 ### Main function and CLI arguments
 

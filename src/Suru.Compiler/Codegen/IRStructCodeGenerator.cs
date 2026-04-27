@@ -24,72 +24,27 @@ namespace Suru.Compiler.Codegen;
 //   EmitFieldNamePtr reuses _stringLiterals to deduplicate field name constants.
 //   The global is used as a raw i8* by suru_find_field — NOT wrapped in a Seq.
 //
-// suru_find_field:
-//   An internal IR helper function emitted once per module (guarded by _findFieldEmitted).
-//   It phi-loops through the linked list using strcmp to match field names and returns
-//   the node pointer. All field access and assignment go through this runtime helper.
+// ── Runtime module ────────────────────────────────────────────────────────────
+//
+// All non-trivial struct operations (suru_find_field, suru_struct_clone, suru_struct_drop)
+// are implemented in suru_struct.ll and linked as a separate compilation unit. The user's
+// .ll only emits `declare` stubs via _runtimeDecls.
+//
+// ── What stays inline ─────────────────────────────────────────────────────────
+//
+//   EmitFieldNamePtr  — interns field name strings as module-local constants; cannot
+//                       move to the runtime module.
+//   EmitStructLiteral — constructs field nodes inline; allocates per-field malloc+GEP+store.
+//   EmitFieldAccess   — field read: EmitFindFieldCall + GEP + load + EmitFromI64.
+//   EmitFieldAssignment — field write: EmitFindFieldCall + EmitToI64 + GEP + store.
 //
 // ResolvedType on FieldAccessExpression:
 //   The SemanticAnalyzer sets fa.ResolvedType from _structSymbols for fields declared
 //   in the same lexical scope. The IR emitter uses this static type to call EmitFromI64
 //   directly, avoiding a runtime tag-branch for the common case.
-//
-// Clone strategy (EmitCloneStruct):
-//   Allocates a new node per field via a while-style loop (alloca + load + icmp + branch).
-//   The head of the new list is tracked via a `chead` alloca, detected when `cprev == null`.
-//   After copying slots 0-2 (name, tag, val), the previous node's `next` slot is wired up.
-//
-// Drop strategy (EmitDropStruct):
-//   Walks the linked list, loading `next` before calling @free(current) to avoid
-//   use-after-free. Terminates when the loaded node is null.
-//
-// Both clone and drop use _structCounter for unique label suffixes so multiple
-// clone/drop calls within a single function don't produce duplicate labels.
-//
-// Why the fixture fix:
-//   tests/fixtures/structs/main.suru had `drop(suru)` (line 23) without a matching
-//   `let suru:` — the let was commented out, leaving a dangling undefined-variable
-//   reference that caused a compile error. That line was commented out as part of
-//   this migration.
 partial class IRCodeGenerator
 {
-    // ─── suru_find_field helper ──────────────────────────────────────────────
-
-    // Ensure the suru_find_field helper is present in the module (emitted at most once).
-    private void EnsureFindFieldHelper()
-    {
-        if (_findFieldEmitted) return;
-        _findFieldEmitted = true;
-        EmitFindFieldHelper();
-    }
-
-    // Emit the suru_find_field internal helper into _helpers (module-level, before user fns).
-    //
-    // Uses a phi-loop: %ff_node starts as %head and advances to the next field on each
-    // iteration. strcmp compares the stored name ptr against the search key. The function
-    // assumes the field exists — no null-termination check. Called from EmitFindFieldCall.
-    private void EmitFindFieldHelper()
-    {
-        _externals.AddStrcmp();
-        _helpers.AppendLine("define internal ptr @suru_find_field(ptr %head, ptr %name) {");
-        _helpers.AppendLine("entry:");
-        _helpers.AppendLine("  br label %ff_loop");
-        _helpers.AppendLine("ff_loop:");
-        _helpers.AppendLine("  %ff_node = phi ptr [ %head, %entry ], [ %ff_next, %ff_continue ]");
-        _helpers.AppendLine("  %ff_name_slot = getelementptr %suru.Field, ptr %ff_node, i32 0, i32 0");
-        _helpers.AppendLine("  %ff_stored = load ptr, ptr %ff_name_slot");
-        _helpers.AppendLine("  %ff_cmp = call i32 @strcmp(ptr %ff_stored, ptr %name)");
-        _helpers.AppendLine("  %ff_found = icmp eq i32 %ff_cmp, 0");
-        _helpers.AppendLine("  br i1 %ff_found, label %ff_done, label %ff_continue");
-        _helpers.AppendLine("ff_continue:");
-        _helpers.AppendLine("  %ff_next_slot = getelementptr %suru.Field, ptr %ff_node, i32 0, i32 3");
-        _helpers.AppendLine("  %ff_next = load ptr, ptr %ff_next_slot");
-        _helpers.AppendLine("  br label %ff_loop");
-        _helpers.AppendLine("ff_done:");
-        _helpers.AppendLine("  ret ptr %ff_node");
-        _helpers.AppendLine("}");
-        _helpers.AppendLine();
-    }
+    // ─── Field name interning ────────────────────────────────────────────────
 
     // Intern a field name as a raw string constant (reuses _stringLiterals dedup logic).
     // Returns the global name (e.g. @.str_3) suitable for use as a raw ptr argument
@@ -110,7 +65,7 @@ partial class IRCodeGenerator
     // Returns the SSA name of the resulting node ptr.
     private string EmitFindFieldCall(string headPtr, string fieldName)
     {
-        EnsureFindFieldHelper();
+        _runtimeDecls.AddFindField();
         var nameGlobal = EmitFieldNamePtr(fieldName);
         var node = NextTmp();
         _funcs.AppendLine($"  {node} = call ptr @suru_find_field(ptr {headPtr}, ptr {nameGlobal})");
@@ -126,7 +81,6 @@ partial class IRCodeGenerator
     // For each field: malloc(32), store name/tag/val/next, link to prior node.
     private (string val, SuruType type) EmitStructLiteral(StructLiteralExpression lit)
     {
-        EnsureFindFieldHelper();
         _externals.AddMalloc();
 
         var prevNodePtr = "null";
@@ -210,131 +164,38 @@ partial class IRCodeGenerator
 
     // ─── Clone ───────────────────────────────────────────────────────────────
 
-    // clone(src) → Struct: deep-copy the linked list into a new set of nodes.
-    //
-    // Allocates a new node for each source node, copying slots 0-2 (name, tag, val).
-    // The head of the new list is tracked: when cprev is null (first node), the new
-    // node is stored as the new head; otherwise the previous node's next slot is wired
-    // to the new node. After the loop the new head is loaded and returned.
-    private (string val, SuruType type) EmitCloneStruct(string headPtr)
+    // Dispatch helper for `clone(x)` in expression position.
+    // Evaluates the argument, delegates to @suru_struct_clone, returns Struct.
+    internal (string val, SuruType type) EmitCloneStructDispatch(Expression arg)
     {
-        _externals.AddMalloc();
-        var n = _structCounter++;
+        var (headPtr, _) = EmitValue(arg);
+        return (EmitCloneStruct(headPtr), SuruType.Struct);
+    }
 
-        // Loop state allocas
-        var csrc  = NextTmp();
-        var cprev = NextTmp();
-        var chead = NextTmp();
-        _funcs.AppendLine($"  {csrc}  = alloca ptr");
-        _funcs.AppendLine($"  {cprev} = alloca ptr");
-        _funcs.AppendLine($"  {chead} = alloca ptr");
-        _funcs.AppendLine($"  store ptr {headPtr}, ptr {csrc}");
-        _funcs.AppendLine($"  store ptr null, ptr {cprev}");
-        _funcs.AppendLine($"  store ptr null, ptr {chead}");
-        _funcs.AppendLine($"  br label %clone_cond_{n}");
-
-        _funcs.AppendLine($"clone_cond_{n}:");
-        var csrcV  = NextTmp();
-        var cnull  = NextTmp();
-        _funcs.AppendLine($"  {csrcV} = load ptr, ptr {csrc}");
-        _funcs.AppendLine($"  {cnull} = icmp eq ptr {csrcV}, null");
-        _funcs.AppendLine($"  br i1 {cnull}, label %clone_done_{n}, label %clone_body_{n}");
-
-        _funcs.AppendLine($"clone_body_{n}:");
-        var cnode = NextTmp();
-        _funcs.AppendLine($"  {cnode} = call ptr @malloc(i64 32)");
-
-        // Copy slot [0] name ptr
-        var srcName = NextTmp(); var srcNameV = NextTmp(); var dstName = NextTmp();
-        _funcs.AppendLine($"  {srcName}  = getelementptr %suru.Field, ptr {csrcV}, i32 0, i32 0");
-        _funcs.AppendLine($"  {srcNameV} = load ptr, ptr {srcName}");
-        _funcs.AppendLine($"  {dstName}  = getelementptr %suru.Field, ptr {cnode}, i32 0, i32 0");
-        _funcs.AppendLine($"  store ptr {srcNameV}, ptr {dstName}");
-
-        // Copy slot [1] tag i32
-        var srcTag = NextTmp(); var srcTagV = NextTmp(); var dstTag = NextTmp();
-        _funcs.AppendLine($"  {srcTag}  = getelementptr %suru.Field, ptr {csrcV}, i32 0, i32 1");
-        _funcs.AppendLine($"  {srcTagV} = load i32, ptr {srcTag}");
-        _funcs.AppendLine($"  {dstTag}  = getelementptr %suru.Field, ptr {cnode}, i32 0, i32 1");
-        _funcs.AppendLine($"  store i32 {srcTagV}, ptr {dstTag}");
-
-        // Copy slot [2] val i64
-        var srcVal = NextTmp(); var srcValV = NextTmp(); var dstVal = NextTmp();
-        _funcs.AppendLine($"  {srcVal}  = getelementptr %suru.Field, ptr {csrcV}, i32 0, i32 2");
-        _funcs.AppendLine($"  {srcValV} = load i64, ptr {srcVal}");
-        _funcs.AppendLine($"  {dstVal}  = getelementptr %suru.Field, ptr {cnode}, i32 0, i32 2");
-        _funcs.AppendLine($"  store i64 {srcValV}, ptr {dstVal}");
-
-        // Slot [3] next = null initially
-        var dstNext = NextTmp();
-        _funcs.AppendLine($"  {dstNext} = getelementptr %suru.Field, ptr {cnode}, i32 0, i32 3");
-        _funcs.AppendLine($"  store ptr null, ptr {dstNext}");
-
-        // First node? → set chead; otherwise → wire previous node's next
-        var cprevV  = NextTmp();
-        var cfirst  = NextTmp();
-        _funcs.AppendLine($"  {cprevV}  = load ptr, ptr {cprev}");
-        _funcs.AppendLine($"  {cfirst}  = icmp eq ptr {cprevV}, null");
-        _funcs.AppendLine($"  br i1 {cfirst}, label %clone_sethead_{n}, label %clone_wire_{n}");
-
-        _funcs.AppendLine($"clone_sethead_{n}:");
-        _funcs.AppendLine($"  store ptr {cnode}, ptr {chead}");
-        _funcs.AppendLine($"  br label %clone_after_{n}");
-
-        _funcs.AppendLine($"clone_wire_{n}:");
-        var cprevNext = NextTmp();
-        _funcs.AppendLine($"  {cprevNext} = getelementptr %suru.Field, ptr {cprevV}, i32 0, i32 3");
-        _funcs.AppendLine($"  store ptr {cnode}, ptr {cprevNext}");
-        _funcs.AppendLine($"  br label %clone_after_{n}");
-
-        _funcs.AppendLine($"clone_after_{n}:");
-        _funcs.AppendLine($"  store ptr {cnode}, ptr {cprev}");
-        var srcNextGep = NextTmp(); var csrcNext = NextTmp();
-        _funcs.AppendLine($"  {srcNextGep} = getelementptr %suru.Field, ptr {csrcV}, i32 0, i32 3");
-        _funcs.AppendLine($"  {csrcNext}   = load ptr, ptr {srcNextGep}");
-        _funcs.AppendLine($"  store ptr {csrcNext}, ptr {csrc}");
-        _funcs.AppendLine($"  br label %clone_cond_{n}");
-
-        _funcs.AppendLine($"clone_done_{n}:");
-        var cloneResult = NextTmp();
-        _funcs.AppendLine($"  {cloneResult} = load ptr, ptr {chead}");
-        return (cloneResult, SuruType.Struct);
+    // Emit a call to @suru_struct_clone — deep-copies the field-node linked list.
+    internal string EmitCloneStruct(string headPtr)
+    {
+        _runtimeDecls.AddStructClone();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_struct_clone(ptr {headPtr})");
+        return tmp;
     }
 
     // ─── Drop ────────────────────────────────────────────────────────────────
 
-    // drop(src) — free all field nodes in the linked list.
-    //
-    // Loads `next` before calling @free so the node pointer remains valid at
-    // the free call site (no use-after-free). Returns ("0", Bool) to allow
-    // drop() in expression position (the result is always discarded).
-    private (string val, SuruType type) EmitDropStruct(string headPtr)
+    // Dispatch helper for `drop(x)` in expression position.
+    // Returns ("0", Bool) so the call can appear in statement or expression position.
+    internal (string val, SuruType type) EmitDropStructDispatch(Expression arg)
     {
-        _externals.AddFree();
-        var n = _structCounter++;
-
-        var dsrc = NextTmp();
-        _funcs.AppendLine($"  {dsrc} = alloca ptr");
-        _funcs.AppendLine($"  store ptr {headPtr}, ptr {dsrc}");
-        _funcs.AppendLine($"  br label %drop_cond_{n}");
-
-        _funcs.AppendLine($"drop_cond_{n}:");
-        var dsrcV = NextTmp();
-        var dnull = NextTmp();
-        _funcs.AppendLine($"  {dsrcV} = load ptr, ptr {dsrc}");
-        _funcs.AppendLine($"  {dnull} = icmp eq ptr {dsrcV}, null");
-        _funcs.AppendLine($"  br i1 {dnull}, label %drop_done_{n}, label %drop_body_{n}");
-
-        _funcs.AppendLine($"drop_body_{n}:");
-        var dnextGep = NextTmp();
-        var dnext    = NextTmp();
-        _funcs.AppendLine($"  {dnextGep} = getelementptr %suru.Field, ptr {dsrcV}, i32 0, i32 3");
-        _funcs.AppendLine($"  {dnext}    = load ptr, ptr {dnextGep}");
-        _funcs.AppendLine($"  store ptr {dnext}, ptr {dsrc}");
-        _funcs.AppendLine($"  call void @free(ptr {dsrcV})");
-        _funcs.AppendLine($"  br label %drop_cond_{n}");
-
-        _funcs.AppendLine($"drop_done_{n}:");
+        var (headPtr, _) = EmitValue(arg);
+        EmitDropStruct(headPtr);
         return ("0", SuruType.Bool);
+    }
+
+    // Emit a call to @suru_struct_drop — frees all field nodes in the linked list.
+    internal void EmitDropStruct(string headPtr)
+    {
+        _runtimeDecls.AddStructDrop();
+        _funcs.AppendLine($"  call void @suru_struct_drop(ptr {headPtr})");
     }
 }
