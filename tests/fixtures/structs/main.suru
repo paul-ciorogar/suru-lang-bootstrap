@@ -1,32 +1,52 @@
-fn identity(d Struct) Struct {
-    return d
+fn structFromFunction() Struct {
+    return {
+        name String: "Suru"
+        height Int64: 2283
+    }
+}
+
+fn getHeight(data Struct) Int64 {
+    return data.height
 }
 
 fn main(args Array<String>) {
-    let data Struct: { tall: true, height: 2283 }
+    // basic: field read/write/clone/drop
+    let data Struct: { tall Bool: true, height Int64: 2283 }
     printLn(data.tall)
     printLn(data.height)
-
     data.tall: false
     printLn(data.tall)
-
     let copy Struct: clone(data)
     printLn(copy.tall)
-
     drop(data)
+    drop(copy)
 
-    // let suru: structFromFunction()
+    // struct returned from function — extract via typed let
+    let suru Struct: structFromFunction()
+    let suruName String: suru.name
+    printLn(suruName)
+    let suruHeight Int64: suru.height
+    printLn(suruHeight)
+    drop(suru)
 
-    // printLn(suru.name)
-    // printLn(suru.height)
+    // struct passed to function, field returned
+    let tok Struct: { name String: "hello", height Int64: 42 }
+    let h Int64: getHeight(tok)
+    printLn(h)
+    drop(tok)
 
-    // drop(suru)
+    // deep chain via let intermediaries:
+    // covers struct.someArray.at(i).nested.deeper.value
+    let lvl3 Struct: { someValue Int64: 99 }
+    let lvl2 Struct: { anotherParam Struct: lvl3 }
+    let lvl1 Struct: { otherParam Struct: lvl2 }
+    let someArray Array<Struct>: [lvl1]
+    let parent Struct: { someArray Array<Struct>: someArray }
 
-}
-
-fn structFromFunction() Struct {
-    return {
-        name: "Suru"
-        height: 2283
-    }
+    let arr Array<Struct>: parent.someArray
+    let item Struct: arr.at(0)
+    let l1 Struct: item.otherParam
+    let l2 Struct: l1.anotherParam
+    let deepVal Int64: l2.someValue
+    printLn(deepVal)
 }

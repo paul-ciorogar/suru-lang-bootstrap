@@ -209,9 +209,9 @@ public sealed class SemanticAnalyzer
             if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
             {
                 var fields = new List<(string Name, SuruType Type)>();
-                foreach (var (name, expr) in retLit.Fields)
+                foreach (var (name, typeAnn, _) in retLit.Fields)
                 {
-                    var t = InferType(expr);
+                    var t = ResolveTypeAnnotation(typeAnn);
                     if (t.HasValue) fields.Add((name, t.Value));
                 }
                 if (fields.Count > 0)
@@ -338,9 +338,9 @@ public sealed class SemanticAnalyzer
             case StructLiteralExpression lit:
                 {
                     var fields = new List<(string Name, SuruType Type)>();
-                    foreach (var (name, expr) in lit.Fields)
+                    foreach (var (name, typeAnn, _) in lit.Fields)
                     {
-                        var t = InferType(expr);
+                        var t = ResolveTypeAnnotation(typeAnn);
                         if (t.HasValue) fields.Add((name, t.Value));
                     }
                     _structSymbols[varName] = fields;
@@ -388,7 +388,7 @@ public sealed class SemanticAnalyzer
                 break;
 
             case StructLiteralExpression lit:
-                foreach (var (_, fieldVal) in lit.Fields)
+                foreach (var (_, _, fieldVal) in lit.Fields)
                     AnalyzeExpression(fieldVal);
                 break;
 

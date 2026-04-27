@@ -32,6 +32,22 @@ fn main(args Array<String>) {
     printLn(words2.at(0))
     drop(words2)
     drop(words)
+
+    // array returned from function
+    let fromInt Array<Int64>: generateArrayInt()
+    printLn(fromInt.len())
+    printLn(fromInt.at(0))
+    drop(fromInt)
+
+    let fromStr Array<String>: generateArrayString()
+    printLn(fromStr.len())
+    printLn(fromStr.at(0))
+    drop(fromStr)
+
+    // array passed to function
+    let testArr Array<Int64>: [5, 6, 7]
+    printLn(firstElement(testArr))
+    drop(testArr)
 }
 
 fn generateArrayInt() Array<Int64> {
@@ -40,4 +56,8 @@ fn generateArrayInt() Array<Int64> {
 
 fn generateArrayString() Array<String> {
     return ["1 one","2 two","3 three","4 four"]
+}
+
+fn firstElement(arr Array<Int64>) Int64 {
+    return arr.at(0)
 }

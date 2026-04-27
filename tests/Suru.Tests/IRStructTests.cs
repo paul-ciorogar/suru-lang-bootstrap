@@ -61,13 +61,12 @@ public class IRStructTests(CompiledFixturesIR fixtures) : IntegrationTestBase
     private readonly string _exe = fixtures.GetExecutable("structs");
 
     [Fact]
-    public void Struct_FieldReadWriteCloneDrop()
+    public void Struct_AllPatterns()
     {
-        // { tall: true, height: 2283 }
-        // printLn(data.tall)    → true
-        // printLn(data.height)  → 2283
-        // data.tall: false; printLn(data.tall) → false
-        // let copy: clone(data); printLn(copy.tall) → false
-        Assert.Equal("true\n2283\nfalse\nfalse\n", Run(_exe));
+        // basic: field read/write/clone/drop
+        // struct from function: return s.field via typed let
+        // struct passed to function: return s.field
+        // deep chain: struct.array.at(i).nested.nested.value via let intermediaries
+        Assert.Equal("true\n2283\nfalse\nfalse\nSuru\n2283\n42\n99\n", Run(_exe));
     }
 }

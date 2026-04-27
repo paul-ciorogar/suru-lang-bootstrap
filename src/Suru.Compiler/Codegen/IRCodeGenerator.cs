@@ -79,7 +79,8 @@ public sealed partial class IRCodeGenerator
     // LLVM return type of the function currently being emitted (e.g. "i64" or "ptr").
     // Set at the start of EmitFunction and used by the ReturnStatement emitter so that
     // `ret <type>` matches the function's definition regardless of return type.
-    private string _currentFnReturnLlvmType = "i64";
+    private string  _currentFnReturnLlvmType  = "i64";
+    private SuruType _currentFnReturnSuruType = SuruType.Int64;
 
     // Element type of each array variable: name → SuruType.
     // Populated by LetStatement when the RHS produces an Array (literal or slice).
@@ -245,7 +246,8 @@ public sealed partial class IRCodeGenerator
             // from other .o files. `internal` would give them static linkage, making them
             // invisible to the linker across compilation units.
             var retLlvmType = LlvmType(FnReturnSuruType(fn));
-            _currentFnReturnLlvmType = retLlvmType;
+            _currentFnReturnLlvmType  = retLlvmType;
+            _currentFnReturnSuruType  = FnReturnSuruType(fn);
             var paramStr = string.Join(", ", fn.Parameters.Select(
                 p => $"{LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))} %{p.Name}"));
             _funcs.AppendLine($"define {retLlvmType} @{fn.Name}({paramStr}) {{");
@@ -345,6 +347,11 @@ public sealed partial class IRCodeGenerator
 
             // ── let name TypeAnnotation: expr — allocate stack slot ──────────
             case LetStatement { Name: var name, Value: var valExpr, TypeAnnotation: var ann }:
+                // Annotation is authoritative: if the RHS is a field access whose type was
+                // not resolved by the semantic analyzer (struct from function boundary),
+                // set it now so EmitFieldAccess uses the right EmitFromI64 conversion.
+                if (valExpr is FieldAccessExpression { ResolvedType: null } faLet)
+                    faLet.ResolvedType = SuruTypeFromAnnotation(ann);
                 var (letVal, letType) = EmitValue(valExpr);
                 // Int32 annotation coerces Int64 literals / expressions to i32.
                 if (ann.Name == "Int32" && letType == SuruType.Int64)
@@ -387,6 +394,8 @@ public sealed partial class IRCodeGenerator
             // Use _currentFnReturnLlvmType so the `ret` instruction matches the
             // function's declared return type (e.g. `ret ptr` for String-returning fns).
             case ReturnStatement { Value: var retExpr }:
+                if (retExpr is FieldAccessExpression { ResolvedType: null } faRet)
+                    faRet.ResolvedType = _currentFnReturnSuruType;
                 var retVal = retExpr is null ? "0" : EmitValue(retExpr).Item1;
                 _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {retVal}");
                 _blockOpen = false;
@@ -581,8 +590,23 @@ public sealed partial class IRCodeGenerator
         // metadata is the signal to fall through to EmitArgAt.
         if (recvType == SuruType.Array)
         {
+            // Try to find the element type. Prefer the variable-name lookup (most common),
+            // fall back to _pendingArrayElemType (set by EmitArrayLiteral/EmitArraySlice),
+            // then fall back to Int64. This handles array receivers that are not simple
+            // variable references (e.g. field-access chains or function calls).
+            SuruType? resolvedElemType = null;
             if (m.Receiver is VariableReferenceExpression { Name: var arrName }
-                && _arrayElementTypes.TryGetValue(arrName, out var elemType))
+                && _arrayElementTypes.TryGetValue(arrName, out var et))
+                resolvedElemType = et;
+            else if (_pendingArrayElemType.HasValue)
+            {
+                resolvedElemType = _pendingArrayElemType.Value;
+                _pendingArrayElemType = null;
+            }
+
+            if (resolvedElemType.HasValue)
+            {
+                var elemType = resolvedElemType.Value;
                 return m.MethodName switch
                 {
                     "len"   => EmitArrayLen(recvVal),
@@ -592,12 +616,14 @@ public sealed partial class IRCodeGenerator
                     "slice" => EmitArraySlice(recvVal, m.Receiver, elemType, m.Args[0], m.Args[1]),
                     _ => throw new NotSupportedException($"IR codegen: unsupported Array method '{m.MethodName}'"),
                 };
+            }
 
             // argv Seq: data is char** (not i64[]); only .at(i) is supported.
             return m.MethodName switch
             {
-                "at" => EmitArgAt(recvVal, m.Args[0]),
-                _ => throw new NotSupportedException($"IR codegen: unsupported argv Array method '{m.MethodName}'"),
+                "at"  => EmitArgAt(recvVal, m.Args[0]),
+                "len" => EmitArrayLen(recvVal),
+                _ => throw new NotSupportedException($"IR codegen: unsupported argv/untyped Array method '{m.MethodName}'"),
             };
         }
 

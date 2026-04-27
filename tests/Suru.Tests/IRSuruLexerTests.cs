@@ -81,9 +81,9 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             "7 ( 1:8\n" +
             "1 args 1:9\n" +
             "1 Array 1:14\n" +
-            "0 < 1:19\n" +
+            "27 < 1:19\n" +
             "1 String 1:20\n" +
-            "0 > 1:26\n" +
+            "28 > 1:26\n" +
             "8 ) 1:27\n" +
             "12 { 1:29\n" +
             "1 printLn 2:5\n" +

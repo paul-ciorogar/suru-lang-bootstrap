@@ -145,9 +145,9 @@ public static class AstPrinter
 
             case StructLiteralExpression st:
                 sb.AppendLine($"{indent}StructLiteral [{st.Fields.Count} fields]");
-                foreach (var (name, val) in st.Fields)
+                foreach (var (name, typeAnn, val) in st.Fields)
                 {
-                    sb.AppendLine($"{indent}  Field [{name}]");
+                    sb.AppendLine($"{indent}  Field [{name} {typeAnn.Name}]");
                     PrintExpression(sb, indent + "    ", val);
                 }
                 break;

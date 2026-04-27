@@ -87,8 +87,17 @@ partial class IRCodeGenerator
 
         for (int i = lit.Fields.Count - 1; i >= 0; i--)
         {
-            var (fieldName, fieldExpr) = lit.Fields[i];
-            var (fieldVal, fieldType)  = EmitValue(fieldExpr);
+            var (fieldName, fieldTypeAnn, fieldExpr) = lit.Fields[i];
+            // Field type comes from the annotation, not the emitted value type.
+            // This makes the tag authoritative and avoids inference ambiguity (e.g.
+            // a struct-valued field would otherwise emit with type=Struct/Ptr correctly,
+            // but a Bool field stored via a variable reference would emit as Int64).
+            var fieldType = SuruTypeFromAnnotation(fieldTypeAnn);
+            // Same annotation-authoritative fix as LetStatement: if the value is a field
+            // access with unknown type, set it from the field's annotation before emitting.
+            if (fieldExpr is FieldAccessExpression { ResolvedType: null } faField)
+                faField.ResolvedType = fieldType;
+            var (fieldVal, _) = EmitValue(fieldExpr);
 
             var nodePtr = NextTmp();
             _funcs.AppendLine($"  {nodePtr} = call ptr @malloc(i64 32)");
@@ -99,7 +108,7 @@ partial class IRCodeGenerator
             _funcs.AppendLine($"  {nameGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 0");
             _funcs.AppendLine($"  store ptr {namePtr}, ptr {nameGep}");
 
-            // [1] tag
+            // [1] tag — annotation-authoritative
             int tag = fieldType switch { SuruType.Bool => 0, SuruType.Int64 => 1, SuruType.Float64 => 2, _ => 3 };
             var tagGep = NextTmp();
             _funcs.AppendLine($"  {tagGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 1");

@@ -255,6 +255,18 @@ public class Compiler
         var seenPaths        = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var includedPaths    = new List<string>();
 
+        // Track constant names already in the main module so we can deduplicate
+        // constants from multiple included files that share the same names.
+        var seenConstantNames = new HashSet<string>();
+        foreach (var s in module.Statements)
+            if (s is LetStatement ls) seenConstantNames.Add(ls.Name);
+
+        // Collect constants from all included files (deduplicated) so that included
+        // function bodies can reference them during semantic analysis of the merged module.
+        // These are inserted before function declarations to ensure they're in _symbols
+        // before AnalyzeFunctionDeclaration re-injects constants at function entry.
+        var includedConstants = new List<Statement>();
+
         foreach (var directive in directives)
         {
             var fullPath = Path.GetFullPath(Path.Combine(baseDir, directive.Path));
@@ -292,8 +304,22 @@ public class Compiler
                     mergedStatements.Add(new FunctionDeclaration(
                         qualifiedName, fn.Parameters, fn.ReturnType, fn.Body));
                 }
+                else if (stmt is LetStatement constant && seenConstantNames.Add(constant.Name))
+                {
+                    // Only scalar (Bool/Int64/Float64) module-level constants are merged:
+                    // they become internal globals in both the main .ll and the included .ll
+                    // (internal linkage means no symbol conflict at link time). String
+                    // constants are skipped — they can't be emitted as simple LLVM globals
+                    // and are only needed in the included file's own translation unit.
+                    if (constant.Value is BoolLiteral or IntLiteral or FloatLiteral)
+                        includedConstants.Add(stmt);
+                }
             }
         }
+
+        // Prepend constants so they precede all function declarations in the merged list,
+        // ensuring SemanticAnalyzer sees them before analyzing any function body.
+        mergedStatements.InsertRange(0, includedConstants);
 
         return new Module
         {

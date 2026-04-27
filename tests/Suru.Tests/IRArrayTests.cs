@@ -75,6 +75,7 @@ public class IRArrayTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         // drop(nums3)
         // clone(words) Array<String> → len=2, at(0)="hello"
         // drop(words2), drop(words)
-        Assert.Equal("3\n10\n30\n99\n4\n40\n2\n99\n4\n10\n777\n10\n2\nhello\n", Run(_exe));
+        // + arrays from functions, arrays passed to functions
+        Assert.Equal("3\n10\n30\n99\n4\n40\n2\n99\n4\n10\n777\n10\n2\nhello\n4\n1\n4\n1 one\n5\n", Run(_exe));
     }
 }

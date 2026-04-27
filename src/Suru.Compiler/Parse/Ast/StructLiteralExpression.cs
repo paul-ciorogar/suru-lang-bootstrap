@@ -1,7 +1,7 @@
 namespace Suru.Compiler.Parse.Ast;
 
 public sealed class StructLiteralExpression(
-    IReadOnlyList<(string Name, Expression Value)> fields) : Expression
+    IReadOnlyList<(string Name, TypeAnnotation TypeAnnotation, Expression Value)> fields) : Expression
 {
-    public IReadOnlyList<(string Name, Expression Value)> Fields { get; } = fields;
+    public IReadOnlyList<(string Name, TypeAnnotation TypeAnnotation, Expression Value)> Fields { get; } = fields;
 }

@@ -179,24 +179,27 @@ printLn(fibonacci(10))
 
 ### Structs
 
-Create a struct with a `{ field: value, ... }` literal. Fields are separated by `,` or newlines:
+Create a struct with a `{ field Type: value, ... }` literal. Every field requires a **mandatory type annotation** between the field name and the `:`. Fields are separated by `,` or newlines:
 
 ```suru
-let person Struct: { tall: true, height: 2283 }
+let person Struct: { tall Bool: true, height Int64: 2283 }
 ```
 
-Read a field with `.field` (no parentheses):
+Read a field with `.field` (no parentheses). Extract to a typed `let` before using the value:
 
 ```suru
-printLn(person.tall)    // true
-printLn(person.height)  // 2283
+let isTall Bool: person.tall
+let h Int64: person.height
+printLn(isTall)  // true
+printLn(h)       // 2283
 ```
 
 Write a field with `receiver.field: value`:
 
 ```suru
 person.tall: false
-printLn(person.tall)  // false
+let isTall Bool: person.tall
+printLn(isTall)  // false
 ```
 
 Deep-copy a struct with `clone`:
@@ -211,17 +214,27 @@ Free a struct's memory with `drop`:
 drop(person)
 ```
 
-Pass structs to and from functions using the `Struct` type:
+Pass structs to and from functions using the `Struct` type. Extract fields to typed `let` bindings before using them — the type annotation is the authoritative source when the struct crosses a function boundary:
 
 ```suru
-fn identity(d Struct) Struct {
-  return d
+fn makePoint(x Int64, y Int64) Struct {
+    return { x Int64: x, y Int64: y }
 }
 
-let result Struct: identity(person)
+fn getX(p Struct) Int64 {
+    return p.x
+}
+
+fn main(args Array<String>) {
+    let pt Struct: makePoint(3, 4)
+    let px Int64: pt.x
+    printLn(px)            // 3
+    printLn(getX(pt))      // 3
+    drop(pt)
+}
 ```
 
-> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). Field values carry a runtime tag (0=Bool, 1=Int64, 2=Float64, 3=pointer) used when the compile-time type is unknown.
+> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). The mandatory field type annotation drives the runtime tag (0=Bool, 1=Int64, 2=Float64, 3=pointer) stored in each node.
 
 ### Arrays
 
