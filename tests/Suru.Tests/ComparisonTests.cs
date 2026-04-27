@@ -1,16 +1,22 @@
 namespace Suru.Tests;
 
 [Collection("Integration")]
-public class ComparisonTests(CompiledFixtures fixtures) : IntegrationTestBase
+public class ComparisonTests(CompiledFixtures fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("comparisons");
+    private bool _testPassed;
 
     [Fact]
     public void Comparisons_PrintsExpectedOutput()
+    {
         // lt: 3<5=true, 5<3=false
         // gt: 5>3=true, 3>5=false
         // lte: 5<=5=true, 4<=5=true, 6<=5=false
         // gte: 5>=5=true, 6>=5=true, 4>=5=false
         // ord: 'A'=65, '0'=48
-        => Assert.Equal("true\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\n65\n48\n", Run(_exe));
+        Assert.Equal("true\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\n65\n48\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("comparisons"); }
 }

@@ -21,6 +21,8 @@ public sealed class CompiledFixtures : IDisposable
     public string GetExecutable(string name)
         => _executables.GetOrAdd(name, Compile);
 
+    public void RecordFailure(string _) { }
+
     public void Dispose()
     {
         if (Directory.Exists(_buildRoot))
@@ -56,24 +58,29 @@ public sealed class CompiledFixtures : IDisposable
 
 public sealed class CompiledFixturesIR : IDisposable
 {
-    private readonly string _buildRoot =
-        Path.Combine(Path.GetTempPath(), "suru-tests-ir", Guid.NewGuid().ToString("N"));
-
     private readonly ConcurrentDictionary<string, string> _executables = new();
+    private readonly ConcurrentDictionary<string, byte> _failures = new();
 
     public string GetExecutable(string name)
         => _executables.GetOrAdd(name, Compile);
 
+    public void RecordFailure(string name) => _failures.TryAdd(name, 0);
+
     public void Dispose()
     {
-        if (Directory.Exists(_buildRoot))
-            Directory.Delete(_buildRoot, recursive: true);
+        foreach (var name in _executables.Keys)
+        {
+            if (_failures.ContainsKey(name)) continue;
+            var buildDir = GetBuildDir(name);
+            if (Directory.Exists(buildDir))
+                Directory.Delete(buildDir, recursive: true);
+        }
     }
 
     private string Compile(string name)
     {
         var sourcePath = FindFixturePath(name);
-        var buildDir = Path.Combine(_buildRoot, name);
+        var buildDir = GetBuildDir(name);
 
         var result = new SuruCompiler(sourcePath).CompileIR(buildDir);
         if (!result.Success)
@@ -83,13 +90,19 @@ public sealed class CompiledFixturesIR : IDisposable
         return result.OutputPath!;
     }
 
+    private static string GetBuildDir(string name)
+        => Path.Combine(FindFixtureDir(name), "build");
+
     private static string FindFixturePath(string name)
+        => Path.Combine(FindFixtureDir(name), "main.suru");
+
+    private static string FindFixtureDir(string name)
     {
         var dir = AppContext.BaseDirectory;
         while (dir is not null)
         {
-            var candidate = Path.Combine(dir, "tests", "fixtures", name, "main.suru");
-            if (File.Exists(candidate)) return candidate;
+            var candidate = Path.Combine(dir, "tests", "fixtures", name);
+            if (Directory.Exists(candidate)) return candidate;
             dir = Path.GetDirectoryName(dir);
         }
         throw new DirectoryNotFoundException(

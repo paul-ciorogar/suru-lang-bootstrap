@@ -15,11 +15,17 @@ namespace Suru.Tests;
 // returns it as an int, letting the test assert the exact code without parsing
 // stdout/stderr.
 [Collection("IntegrationIR")]
-public class IRExitTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRExitTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("exit_test");
+    private bool _testPassed;
 
     [Fact]
     public void Exit_ReturnsCode()
-        => Assert.Equal(42, RunGetExitCode(_exe));
+    {
+        Assert.Equal(42, RunGetExitCode(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("exit_test"); }
 }

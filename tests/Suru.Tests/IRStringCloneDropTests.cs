@@ -15,12 +15,18 @@ namespace Suru.Tests;
 // These operations are dispatched from EmitValue ahead of the Array and Struct
 // clone/drop arms, guarded by PeekType returning SuruType.String.
 [Collection("IntegrationIR")]
-public class IRStringCloneDropTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRStringCloneDropTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("string-clone-drop");
+    private bool _testPassed;
 
     [Fact]
     public void StringCloneDrop_PrintsExpectedOutput()
+    {
         // clone survives after original is dropped; chained clones are independent.
-        => Assert.Equal("hello\nfoo bar\nworld\n", Run(_exe));
+        Assert.Equal("hello\nfoo bar\nworld\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("string-clone-drop"); }
 }

@@ -17,11 +17,17 @@ namespace Suru.Tests;
 // emitted in the final assembly pass if at least one printLn of that type was
 // encountered during pass 1.
 [Collection("IntegrationIR")]
-public class IRPrintTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRPrintTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("print");
+    private bool _testPassed;
 
     [Fact]
     public void PrintsExpectedOutput()
-        => Assert.Equal("true\nfalse\n1\n1.2\n", Run(_exe));
+    {
+        Assert.Equal("true\nfalse\n1\n1.2\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("print"); }
 }

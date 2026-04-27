@@ -44,10 +44,11 @@ namespace Suru.Tests;
 // Seq headers, then calls fopen("w") + fwrite + fclose.
 // "w" mode truncates an existing file before writing.
 [Collection("IntegrationIR")]
-public class IRFileIoTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRFileIoTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _readExe  = fixtures.GetExecutable("file_io");
     private readonly string _writeExe = fixtures.GetExecutable("file_io_write");
+    private bool _testPassed;
 
     [Fact]
     public void ReadFile_EchoesFileContent()
@@ -62,6 +63,7 @@ public class IRFileIoTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         {
             File.Delete(tmpPath);
         }
+        _testPassed = true;
     }
 
     [Fact]
@@ -79,6 +81,16 @@ public class IRFileIoTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         {
             File.Delete(inPath);
             File.Delete(outPath);
+        }
+        _testPassed = true;
+    }
+
+    public void Dispose()
+    {
+        if (!_testPassed)
+        {
+            fixtures.RecordFailure("file_io");
+            fixtures.RecordFailure("file_io_write");
         }
     }
 }

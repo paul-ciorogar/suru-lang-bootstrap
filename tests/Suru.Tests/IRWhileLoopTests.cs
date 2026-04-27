@@ -31,11 +31,17 @@ namespace Suru.Tests;
 //   5. Overwrites %s.addr (an `alloca ptr`) with the new Seq pointer.
 // The old Seq pointers are leaked — memory management is out of scope for this migration.
 [Collection("IntegrationIR")]
-public class IRWhileLoopTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRWhileLoopTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("while-loop");
+    private bool _testPassed;
 
     [Fact]
     public void WhileLoop_PrintsExpectedOutput()
-        => Assert.Equal("1\n2\n3\n4\n5\n55\nxxx\n", Run(_exe));
+    {
+        Assert.Equal("1\n2\n3\n4\n5\n55\nxxx\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("while-loop"); }
 }

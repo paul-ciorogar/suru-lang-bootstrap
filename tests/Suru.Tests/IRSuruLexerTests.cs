@@ -54,9 +54,10 @@ namespace Suru.Tests;
 //
 //   printLn(String)         — outputs each formatted token line via @printf with %s\n.
 [Collection("IntegrationIR")]
-public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("suru-lexer");
+    private bool _testPassed;
 
     private static string FixturePath(string name)
     {
@@ -106,6 +107,7 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             "0  7:1\n";
 
         Assert.Equal(expected, Run(_exe, FixturePath("print")));
+        _testPassed = true;
     }
 
     [Fact]
@@ -115,6 +117,7 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal("22 fn 1:1", lines[0]);   // first token is 'fn'
         Assert.StartsWith("0 ", lines[^1]);     // last token is EOF
+        _testPassed = true;
     }
 
     [Fact]
@@ -128,6 +131,7 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         Assert.StartsWith("0 ", lines[^1]);
         // Should be a substantial number of tokens
         Assert.True(lines.Length > 1000, $"Expected >1000 tokens, got {lines.Length}");
+        _testPassed = true;
     }
 
     [Fact]
@@ -137,5 +141,8 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         Assert.NotEmpty(output);
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.StartsWith("0 ", lines[^1]);  // ends with EOF
+        _testPassed = true;
     }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("suru-lexer"); }
 }

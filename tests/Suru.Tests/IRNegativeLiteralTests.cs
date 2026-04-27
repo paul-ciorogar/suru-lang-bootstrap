@@ -15,11 +15,17 @@ namespace Suru.Tests;
 // The fixture prints -5, -2.5, and -8 (result of -5 + -3 via `.add(-3)`), confirming
 // that negative literals are usable in expression positions, not just let declarations.
 [Collection("IntegrationIR")]
-public class IRNegativeLiteralTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRNegativeLiteralTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("negative-literals");
+    private bool _testPassed;
 
     [Fact]
     public void PrintsExpectedOutput()
-        => Assert.Equal("-5\n-2.5\n-8\n", Run(_exe));
+    {
+        Assert.Equal("-5\n-2.5\n-8\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("negative-literals"); }
 }

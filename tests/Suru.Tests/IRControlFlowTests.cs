@@ -20,11 +20,17 @@ namespace Suru.Tests;
 // for any identifier in pattern position; EmitMatchTestChain loads it via
 // EmitValue before emitting the icmp/fcmp comparison — no codegen changes needed.
 [Collection("IntegrationIR")]
-public class IRControlFlowTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRControlFlowTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("control-flow");
+    private bool _testPassed;
 
     [Fact]
     public void PrintsExpectedOutput()
-        => Assert.Equal("1\n1\ntrue\ntrue\nfalse\n1\n1\n-1\nFriday\nFriday\n", Run(_exe));
+    {
+        Assert.Equal("1\n1\ntrue\ntrue\nfalse\n1\n1\n-1\nFriday\nFriday\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("control-flow"); }
 }

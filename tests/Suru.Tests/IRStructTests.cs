@@ -56,9 +56,10 @@ namespace Suru.Tests;
 // commented out, leaving a dangling undefined-variable reference that caused a compile
 // error in both backends. That line was commented out as part of this migration.
 [Collection("IntegrationIR")]
-public class IRStructTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRStructTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("structs");
+    private bool _testPassed;
 
     [Fact]
     public void Struct_AllPatterns()
@@ -68,5 +69,8 @@ public class IRStructTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         // struct passed to function: return s.field
         // deep chain: struct.array.at(i).nested.nested.value via let intermediaries
         Assert.Equal("true\n2283\nfalse\nfalse\nSuru\n2283\n42\n99\n", Run(_exe));
+        _testPassed = true;
     }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("structs"); }
 }

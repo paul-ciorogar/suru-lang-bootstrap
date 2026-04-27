@@ -33,11 +33,17 @@ namespace Suru.Tests;
 //   - Call site: `call ptr @greet(...)` — type must match the declare
 // Without these, clang rejects the IR with a type mismatch error.
 [Collection("IntegrationIR")]
-public class IRIncludeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRIncludeTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("include-test");
+    private bool _testPassed;
 
     [Fact]
     public void Include_CallsNamespacedFunctions()
-        => Assert.Equal("42\nHello, Suru!\n", Run(_exe));
+    {
+        Assert.Equal("42\nHello, Suru!\n", Run(_exe));
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("include-test"); }
 }

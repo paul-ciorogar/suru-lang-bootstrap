@@ -60,9 +60,10 @@ namespace Suru.Tests;
 // method dispatch for `args.at(i)` falls through to EmitArgAt, which uses a ptr-array
 // GEP (not an i64-array GEP) followed by strlen and String Seq wrapping.
 [Collection("IntegrationIR")]
-public class IRArrayTests(CompiledFixturesIR fixtures) : IntegrationTestBase
+public class IRArrayTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
     private readonly string _exe = fixtures.GetExecutable("arrays");
+    private bool _testPassed;
 
     [Fact]
     public void Array_LenAtSetAddSlice()
@@ -77,5 +78,8 @@ public class IRArrayTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         // drop(words2), drop(words)
         // + arrays from functions, arrays passed to functions
         Assert.Equal("3\n10\n30\n99\n4\n40\n2\n99\n4\n10\n777\n10\n2\nhello\n4\n1\n4\n1 one\n5\n", Run(_exe));
+        _testPassed = true;
     }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("arrays"); }
 }
