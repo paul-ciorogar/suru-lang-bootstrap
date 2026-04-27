@@ -380,7 +380,7 @@ partial class IRCodeGenerator
             // Clone the element based on its type.
             string clonedPtr = elemType switch
             {
-                SuruType.String => EmitCloneStringValue(elemPtr),
+                SuruType.String => EmitCloneString(elemPtr),
                 SuruType.Struct => EmitCloneStruct(elemPtr).val,
                 _               => EmitCloneArrayShallow(elemPtr),  // Array: shallow
             };
@@ -410,45 +410,6 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  store ptr {newData}, ptr {dataGep}");
 
         return (newHdr, SuruType.Array);
-    }
-
-    // Inline clone of a single %suru.Seq (String) value.
-    //
-    // Allocates a new 16-byte Seq header and a new char buffer, copies len+1
-    // bytes (including the null terminator), and returns the new Seq ptr.
-    // This is an internal helper, not a user-visible clone(str) built-in.
-    private string EmitCloneStringValue(string seqPtr)
-    {
-        _externals.AddMalloc();
-        _externals.AddMemcpy();
-
-        var lenGep   = NextTmp();
-        var srcLen   = NextTmp();
-        var dataGep  = NextTmp();
-        var srcData  = NextTmp();
-        _funcs.AppendLine($"  {lenGep}  = getelementptr %suru.Seq, ptr {seqPtr}, i32 0, i32 0");
-        _funcs.AppendLine($"  {srcLen}  = load i64, ptr {lenGep}");
-        _funcs.AppendLine($"  {dataGep} = getelementptr %suru.Seq, ptr {seqPtr}, i32 0, i32 1");
-        _funcs.AppendLine($"  {srcData} = load ptr, ptr {dataGep}");
-
-        // Allocate new char buffer: len+1 bytes (includes null terminator).
-        var bufBytes = NextTmp();
-        var newBuf   = NextTmp();
-        _funcs.AppendLine($"  {bufBytes} = add i64 {srcLen}, 1");
-        _funcs.AppendLine($"  {newBuf}   = call ptr @malloc(i64 {bufBytes})");
-        _funcs.AppendLine($"  call ptr @memcpy(ptr {newBuf}, ptr {srcData}, i64 {bufBytes})");
-
-        // Build new Seq header.
-        var newSeq   = NextTmp();
-        var newLenG  = NextTmp();
-        var newDataG = NextTmp();
-        _funcs.AppendLine($"  {newSeq}   = call ptr @malloc(i64 16)");
-        _funcs.AppendLine($"  {newLenG}  = getelementptr %suru.Seq, ptr {newSeq}, i32 0, i32 0");
-        _funcs.AppendLine($"  store i64 {srcLen}, ptr {newLenG}");
-        _funcs.AppendLine($"  {newDataG} = getelementptr %suru.Seq, ptr {newSeq}, i32 0, i32 1");
-        _funcs.AppendLine($"  store ptr {newBuf}, ptr {newDataG}");
-
-        return newSeq;
     }
 
     // Shallow clone of a nested Array element: copies the header and buffer
@@ -541,13 +502,8 @@ partial class IRCodeGenerator
             switch (elemType)
             {
                 case SuruType.String:
-                    // Free the char buffer then the Seq header.
-                    var strDataGep = NextTmp();
-                    var strDataPtr = NextTmp();
-                    _funcs.AppendLine($"  {strDataGep} = getelementptr %suru.Seq, ptr {elemPtr}, i32 0, i32 1");
-                    _funcs.AppendLine($"  {strDataPtr} = load ptr, ptr {strDataGep}");
-                    _funcs.AppendLine($"  call void @free(ptr {strDataPtr})");
-                    _funcs.AppendLine($"  call void @free(ptr {elemPtr})");
+                    // Delegate to the canonical string drop — free data buffer, then Seq header.
+                    EmitDropString(elemPtr);
                     break;
                 case SuruType.Struct:
                     EmitDropStruct(elemPtr);

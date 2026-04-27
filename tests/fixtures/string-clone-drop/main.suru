@@ -1,0 +1,23 @@
+fn main(args Array<String>) {
+    // Basic clone + drop: clone survives after the original is freed.
+    let s String: "hello"
+    let s2 String: clone(s)
+    drop(s)
+    printLn(s2)
+
+    // Clone of a computed string (append result) survives after both sources are freed.
+    let a String: "foo"
+    let b String: a.append(" bar")
+    let c String: clone(b)
+    drop(a)
+    drop(b)
+    printLn(c)
+
+    // Chained clones: each clone is independent; dropping intermediates is safe.
+    let x String: "world"
+    let y String: clone(x)
+    let z String: clone(y)
+    drop(x)
+    drop(y)
+    printLn(z)
+}

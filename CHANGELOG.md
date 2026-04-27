@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### String IR: self-contained clone and drop
+
+- **`clone(s)` for String** — `EmitCloneStringDispatch` / `EmitCloneString` (new, in
+  `IRStringCodeGenerator.cs`) produce an independent copy of a `%suru.Seq`: a new
+  16-byte Seq header and a new heap-allocated char buffer are allocated; `len + 1` bytes
+  (including the null terminator) are `memcpy`'d from the source buffer.  The result is
+  typed `SuruType.String` and dispatched from `EmitValue` ahead of the Array and Struct
+  clone arms.
+
+- **`drop(s)` for String** — `EmitDropStringDispatch` / `EmitDropString` (new, in
+  `IRStringCodeGenerator.cs`) free a String's memory in two steps: `free(data)` releases
+  the char buffer, then `free(seqPtr)` releases the 16-byte Seq header.  Because
+  `EmitStringLiteralValue` always mallocs a fresh char buffer, every Seq's data pointer
+  is heap-owned and this sequence is unconditionally safe.  Returns `("0", Bool)` so
+  `drop(s)` can appear in both statement and expression position.
+
+- **`EmitCloneStringValue` removed from `IRArrayCodeGenerator.cs`** — the logic is
+  now canonical in `EmitCloneString` (string partial class).  `EmitCloneArray` and
+  `EmitDropArray` delegate to `EmitCloneString` / `EmitDropString` instead of inlining
+  the string memory operations.  The array file no longer contains any string-level GEP
+  or malloc logic.
+
+- **`EmitValue` dispatch order** — String clone/drop arms are added before the Array
+  and Struct arms so that `PeekType` guards resolve correctly when the argument is a
+  `String` variable (all three types map to `ptr` in LLVM, but Suru tracks them as
+  distinct `SuruType` values).
+
 ### Array IR: dedicated `%suru.Array` struct, amortised growth, clone, and drop
 
 - **New `%suru.Array` type** — arrays now use a dedicated 24-byte IR struct

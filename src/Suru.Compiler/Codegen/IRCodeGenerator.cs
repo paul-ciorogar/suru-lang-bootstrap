@@ -448,6 +448,14 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
         StructLiteralExpression structLit => EmitStructLiteral(structLit),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
+        // clone(s) for String — new Seq header + new heap-allocated char buffer.
+        CallExpression { Name: "clone", Args: [var cloneStrArg] }
+            when PeekType(cloneStrArg) == SuruType.String
+            => EmitCloneStringDispatch(cloneStrArg),
+        // drop(s) for String — free char buffer, then free Seq header.
+        CallExpression { Name: "drop", Args: [var dropStrArg] }
+            when PeekType(dropStrArg) == SuruType.String
+            => EmitDropStringDispatch(dropStrArg),
         // clone(x) for Array — deep copy; recurses into String/Struct elements.
         CallExpression { Name: "clone", Args: [var cloneArrArg] }
             when PeekType(cloneArrArg) == SuruType.Array

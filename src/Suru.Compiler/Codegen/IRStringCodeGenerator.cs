@@ -250,6 +250,80 @@ partial class IRCodeGenerator
         return (extTmp, SuruType.Int64);
     }
 
+        // ─── Clone ───────────────────────────────────────────────────────────────
+
+    // Dispatch helper for `clone(s)` in expression position.
+    //
+    // Evaluates the argument (must be a String), delegates to EmitCloneString,
+    // and returns the new Seq ptr typed as SuruType.String.  Mirrors the array
+    // counterpart EmitCloneArrayDispatch in IRArrayCodeGenerator.cs.
+    internal (string val, SuruType type) EmitCloneStringDispatch(Expression arg)
+    {
+        var (seqVal, _) = EmitValue(arg);
+        return (EmitCloneString(seqVal), SuruType.String);
+    }
+
+    // Produce an independent copy of a %suru.Seq String value.
+    //
+    // Allocates a new 16-byte Seq header and a new char buffer of `len + 1` bytes
+    // (includes the null terminator), copies all bytes from the source buffer, and
+    // returns a ptr to the new Seq.  The new Seq is fully heap-owned and can be
+    // freed by EmitDropString without any special-casing.
+    //
+    // This is also called internally from IRArrayCodeGenerator.cs when cloning an
+    // Array<String> element-by-element.
+    internal string EmitCloneString(string seqPtr)
+    {
+        _externals.AddMalloc();
+        _externals.AddMemcpy();
+
+        var srcLen  = EmitExtractStringLen(seqPtr);
+        var srcData = EmitExtractStringData(seqPtr);
+
+        // Allocate a new char buffer: len+1 bytes (includes the null terminator).
+        var bufBytes = NextTmp();
+        var newBuf   = NextTmp();
+        _funcs.AppendLine($"  {bufBytes} = add i64 {srcLen}, 1");
+        _funcs.AppendLine($"  {newBuf}   = call ptr @malloc(i64 {bufBytes})");
+        _funcs.AppendLine($"  call ptr @memcpy(ptr {newBuf}, ptr {srcData}, i64 {bufBytes})");
+
+        // Build new Seq header with the same len and the newly allocated data buffer.
+        var (newSeq, _) = EmitCreateStringSeq(newBuf, srcLen);
+        return newSeq;
+    }
+
+    // ─── Drop ────────────────────────────────────────────────────────────────
+
+    // Dispatch helper for `drop(s)` in expression position.
+    //
+    // Evaluates the argument (must be a String), frees its memory via EmitDropString,
+    // and returns ("0", Bool) so the call can appear in statement or expression position.
+    // Mirrors EmitDropArrayDispatch in IRArrayCodeGenerator.cs.
+    internal (string val, SuruType type) EmitDropStringDispatch(Expression arg)
+    {
+        var (seqVal, _) = EmitValue(arg);
+        EmitDropString(seqVal);
+        return ("0", SuruType.Bool);
+    }
+
+    // Free the memory backing a %suru.Seq String value.
+    //
+    // Two `free` calls in order:
+    //   1. free(data)   — the heap-owned null-terminated char buffer.
+    //   2. free(seqPtr) — the 16-byte Seq header.
+    //
+    // Because EmitStringLiteralValue always mallocs a fresh char buffer (even for
+    // compile-time string literals), every Seq's data ptr is heap-owned and this
+    // sequence is always safe.  Called from IRArrayCodeGenerator when dropping
+    // an Array<String> element.
+    internal void EmitDropString(string seqPtr)
+    {
+        _externals.AddFree();
+        var dataPtr = EmitExtractStringData(seqPtr);
+        _funcs.AppendLine($"  call void @free(ptr {dataPtr})");
+        _funcs.AppendLine($"  call void @free(ptr {seqPtr})");
+    }
+
     // ─── String ↔ Int64 conversions ──────────────────────────────────────────
 
     // Int64.from(str) → Int64: parse a decimal string to a 64-bit integer via strtol.
