@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5a — Code Refactoring (File Size < 500 Lines)
+
+Split the two largest source files (`IRCodeGenerator.cs` at 1076 lines, `SuruRuntime.cs` at 989 lines) into focused partial-class files. No behavior changes — all 44 tests pass unchanged.
+
+**`IRCodeGenerator` splits** (was 1076 lines → now 452):
+- `IRFunctionCodeGenerator.cs` — `EmitFunction`, `EmitStmt`, `EmitMainWrapper`
+- `IRMatchCodeGenerator.cs` — `EmitMatchAsStatement/Expression`, `PeekType/MatchType/MethodType`, `EmitMatchTestChain`
+- `IRBoxCodeGenerator.cs` — `BoxBool/Int32/Int64/Float64`, `UnboxBool/Int32/Int64/Float64`, `UnboxScalar`, `BoxValue`, type utilities (`SuruTypeFromAnnotation`, `LlvmType`, `RawLlvmType`, `FnReturnSuruType`), `EscapeStringForIR`, `NextTmp`
+- `IRFileIoCodeGenerator.cs` — `EmitArgAt`, `EmitReadFile`, `EmitWriteFile`
+
+**`SuruRuntime` splits** (was 989 lines → now 337): made `static partial class`; each runtime module extracted to its own file:
+- `SuruStringRuntime.cs` — `GenerateStringRuntime()`
+- `SuruArrayRuntime.cs` — `GenerateArrayRuntime()`
+- `SuruStructRuntime.cs` — `GenerateStructRuntime()`
+
+Every `.cs` file in `src/Suru.Compiler/` is now under 500 lines.
+
 ### Stage 12 — Suru Parser written in Suru
 
 Complete recursive-descent parser for the Suru language, written in Suru itself (`tests/fixtures/suru-parser/`). Produces an AST that cross-validates exactly against the C# `AstPrinter` output.
