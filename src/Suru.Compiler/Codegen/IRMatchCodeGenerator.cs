@@ -1,0 +1,202 @@
+using Suru.Compiler.Parse.Ast;
+using Suru.Compiler.Types;
+
+namespace Suru.Compiler.Codegen;
+
+public sealed partial class IRCodeGenerator
+{
+    // ─── Match emission ───────────────────────────────────────────────────────
+
+    private void EmitMatchAsStatement(MatchExpression match)
+    {
+        var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            _funcs.AppendLine($"match_arm_{n}_{i}:");
+            EmitMatchArmBodyAsStatement(patternArms[i].Body);
+            _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        if (wildcardArm != null)
+        {
+            _funcs.AppendLine($"match_wildcard_{n}:");
+            EmitMatchArmBodyAsStatement(wildcardArm.Body);
+            _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        _funcs.AppendLine($"match_merge_{n}:");
+    }
+
+    private void EmitMatchArmBodyAsStatement(Expression body)
+    {
+        switch (body)
+        {
+            case CallExpression { Name: "printLn", Args: [var arg] }:
+                var (v, _) = EmitValue(arg);
+                _runtimeDecls.AddSuruPrintln();
+                _funcs.AppendLine($"  call void @suru_println(ptr {v})");
+                break;
+            default:
+                EmitValue(body);
+                break;
+        }
+    }
+
+    // Match-as-expression: alloca ptr (all values are ptr), store/load ptr.
+    // Critical: result alloca is emitted BEFORE EmitMatchTestChain so it dominates all arm blocks.
+    private (string val, SuruType type) EmitMatchAsExpression(MatchExpression match)
+    {
+        var firstArm   = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
+        var resultType = PeekType(firstArm.Body);
+        var resultPtr  = $"%match_result_{_matchCounter}";
+        _funcs.AppendLine($"  {resultPtr} = alloca ptr");
+
+        var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            _funcs.AppendLine($"match_arm_{n}_{i}:");
+            var (armVal, _) = EmitValue(patternArms[i].Body);
+            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
+            _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        if (wildcardArm != null)
+        {
+            _funcs.AppendLine($"match_wildcard_{n}:");
+            var (armVal, _) = EmitValue(wildcardArm.Body);
+            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
+            _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        _funcs.AppendLine($"match_merge_{n}:");
+        var loadTmp = NextTmp();
+        _funcs.AppendLine($"  {loadTmp} = load ptr, ptr {resultPtr}");
+        return (loadTmp, resultType);
+    }
+
+    private SuruType PeekType(Expression expr) => expr switch
+    {
+        BoolLiteral                   => SuruType.Bool,
+        IntLiteral                    => SuruType.Int64,
+        FloatLiteral                  => SuruType.Float64,
+        StringLiteralExpression       => SuruType.String,
+        ArrayLiteralExpression        => SuruType.Array,
+        StructLiteralExpression       => SuruType.Struct,
+        FieldAccessExpression fa      => fa.ResolvedType ?? SuruType.Struct,
+        CallExpression { Name: "clone", Args: [var carg] } => PeekType(carg),
+        UnaryExpression               => SuruType.Bool,
+        BinaryExpression              => SuruType.Bool,
+        VariableReferenceExpression v =>
+            _vars.TryGetValue(v.Name, out var ve) ? ve.type : _globalVars[v.Name].Type,
+        MatchExpression match         => PeekMatchType(match),
+        MethodCallExpression m        => PeekMethodType(m),
+        CallExpression { Name: "readFile" } => SuruType.String,
+        CallExpression c when _userFunctions.ContainsKey(c.Name)
+                                      => _userFunctions[c.Name].ReturnType,
+        _ => throw new NotSupportedException($"IR codegen: cannot peek type of {expr.GetType().Name}"),
+    };
+
+    private SuruType PeekMatchType(MatchExpression match)
+    {
+        var first = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
+        return PeekType(first.Body);
+    }
+
+    private SuruType PeekMethodType(MethodCallExpression m)
+    {
+        if (m.Receiver is VariableReferenceExpression { Name: var nsName2 } &&
+            _module.Namespaces.Contains(nsName2))
+            return _userFunctions[$"{nsName2}.{m.MethodName}"].ReturnType;
+
+        if (m.Receiver is VariableReferenceExpression { Name: var typeName }
+            && typeName is "Int32" or "Int64" or "Float64" or "Bool" or "String")
+            return SuruTypeFromAnnotation(new TypeAnnotation(typeName));
+
+        // Array methods: no element type tracking; at() returns Struct (generic ptr).
+        if (m.Receiver is VariableReferenceExpression rv2 &&
+            _vars.TryGetValue(rv2.Name, out var rv2Entry) && rv2Entry.type == SuruType.Array)
+        {
+            return m.MethodName switch
+            {
+                "len"   => SuruType.Int64,
+                "at"    => SuruType.Struct,   // element type unknown at compile time
+                "set"   => SuruType.Bool,
+                "add"   => SuruType.Bool,
+                "slice" => SuruType.Array,
+                _ => throw new NotSupportedException($"IR codegen: cannot peek type for Array.{m.MethodName}"),
+            };
+        }
+
+        return m.MethodName switch
+        {
+            "add" or "take" or "multiply" or "split" or "invert" => PeekType(m.Receiver),
+            "lt" or "gt" or "lte" or "gte" or "equals"           => SuruType.Bool,
+            "compare" or "ord" or "len"                           => SuruType.Int64,
+            "toString" or "at" or "append" or "slice"             => SuruType.String,
+            _ => throw new NotSupportedException($"IR codegen: cannot peek type for method '{m.MethodName}'"),
+        };
+    }
+
+    // Match test chain: unbox scalar condition and patterns before icmp/fcmp.
+    private (List<MatchArm> PatternArms, MatchArm? WildcardArm, int N) EmitMatchTestChain(
+        MatchExpression match)
+    {
+        var (condVal, condType) = EmitValue(match.Condition);
+        int n = _matchCounter++;
+
+        var patternArms = match.Arms.Where(a => a.Pattern != null).ToList();
+        var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
+        var missLabel   = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
+
+        // Unbox scalar condition once (String stays as ptr for strcmp dispatch).
+        string rawCond;
+        if (condType == SuruType.String)
+            rawCond = condVal;   // stays as String ptr
+        else
+            rawCond = UnboxScalar(condVal, condType);
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            var cmpTmp = NextTmp();
+
+            if (condType == SuruType.String)
+            {
+                _externals.AddStrcmp();
+                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var condData    = EmitExtractStringData(rawCond);
+                var patternData = EmitExtractStringData(patternVal);
+                var strcmpTmp   = NextTmp();
+                _funcs.AppendLine($"  {strcmpTmp} = call i32 @strcmp(ptr {condData}, ptr {patternData})");
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq i32 {strcmpTmp}, 0");
+            }
+            else if (condType == SuruType.Float64)
+            {
+                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var rawPat = UnboxScalar(patternVal, condType);
+                _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {rawCond}, {rawPat}");
+            }
+            else
+            {
+                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var rawPat = UnboxScalar(patternVal, condType);
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq {RawLlvmType(condType)} {rawCond}, {rawPat}");
+            }
+
+            var nextLabel = (i + 1 < patternArms.Count)
+                ? $"match_test_{n}_{i + 1}"
+                : missLabel;
+
+            _funcs.AppendLine($"  br i1 {cmpTmp}, label %match_arm_{n}_{i}, label %{nextLabel}");
+
+            if (i + 1 < patternArms.Count)
+                _funcs.AppendLine($"match_test_{n}_{i + 1}:");
+        }
+
+        if (patternArms.Count == 0)
+            _funcs.AppendLine($"  br label %{missLabel}");
+
+        return (patternArms, wildcardArm, n);
+    }
+}
