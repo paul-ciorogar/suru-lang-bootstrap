@@ -285,17 +285,16 @@ public sealed class Parser
             return new StringLiteralExpression(token.Text);
         }
 
-        // struct literal: { field TypeAnnotation: expr [, field TypeAnnotation: expr]* }
+        // struct literal: { field: expr [, field: expr]* }
         if (CanConsume(TokenKind.LeftBrace))
         {
-            var fields = new List<(string Name, TypeAnnotation TypeAnnotation, Expression Value)>();
+            var fields = new List<(string Name, Expression Value)>();
             while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
             {
                 var fieldName = Consume(TokenKind.Identifier);
-                var fieldType = ParseTypeAnnotation();
                 Consume(TokenKind.Colon);
                 var fieldValue = ParseExpression();
-                fields.Add((fieldName.Text, fieldType, fieldValue));
+                fields.Add((fieldName.Text, fieldValue));
                 CanConsume(TokenKind.Comma);
             }
             Consume(TokenKind.RightBrace);

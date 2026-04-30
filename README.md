@@ -210,10 +210,12 @@ fn makePoint(x Int64, y Int64) Point {
 
 ### Structs
 
-Create a struct with a `{ field Type: value, ... }` literal. Every field requires a **mandatory type annotation** between the field name and the `:`. Fields are separated by `,` or newlines:
+Declare a named struct type (required before instantiation), then create a value with `{ field: value, ... }`. Fields are separated by `,` or newlines. **No per-field type annotations** — types come from the `type` declaration:
 
 ```suru
-let person Struct: { tall Bool: true, height Int64: 2283 }
+type Person: { tall Bool, height Int64 }
+
+let person Person: { tall: true, height: 2283 }
 ```
 
 Read a field with `.field` (no parentheses). Extract to a typed `let` before using the value:
@@ -236,7 +238,7 @@ printLn(isTall)  // false
 Deep-copy a struct with `clone`:
 
 ```suru
-let copy Struct: clone(person)
+let copy Person: clone(person)
 ```
 
 Free a struct's memory with `drop`:
@@ -245,19 +247,21 @@ Free a struct's memory with `drop`:
 drop(person)
 ```
 
-Pass structs to and from functions using the `Struct` type. Extract fields to typed `let` bindings before using them — the type annotation is the authoritative source when the struct crosses a function boundary:
+Pass structs to and from functions using the named type. Extract fields to typed `let` bindings before using them:
 
 ```suru
-fn makePoint(x Int64, y Int64) Struct {
-    return { x Int64: x, y Int64: y }
+type Point: { x Int64, y Int64 }
+
+fn makePoint(x Int64, y Int64) Point {
+    return { x: x, y: y }
 }
 
-fn getX(p Struct) Int64 {
+fn getX(p Point) Int64 {
     return p.x
 }
 
 fn main(args Array<String>) {
-    let pt Struct: makePoint(3, 4)
+    let pt Point: makePoint(3, 4)
     let px Int64: pt.x
     printLn(px)            // 3
     printLn(getX(pt))      // 3

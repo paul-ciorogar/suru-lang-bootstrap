@@ -57,6 +57,9 @@ public sealed partial class IRCodeGenerator
     // suru_main is always "i64"; all other non-void functions are "ptr".
     private string   _currentFnReturnLlvmType = "i64";
     private SuruType _currentFnReturnSuruType = SuruType.Int64;
+    // Suru type annotation name of the current function's return type (e.g. "Point", "Struct", "void").
+    // Used to thread the declared type into EmitStructLiteral for return-statement struct literals.
+    private string?  _currentFnReturnTypeName;
 
     // Module-level constant globals: name → (LLVM global name, SuruType).
     private readonly Dictionary<string, (string GlobalName, SuruType Type)> _globalVars = new();
@@ -164,7 +167,7 @@ public sealed partial class IRCodeGenerator
         FloatLiteral f             => (BoxFloat64($"0x{BitConverter.DoubleToInt64Bits(f.Value):X16}"), SuruType.Float64),
         StringLiteralExpression s  => EmitStringLiteralValue(s.Value),
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
-        StructLiteralExpression sl => EmitStructLiteral(sl),
+        StructLiteralExpression sl => EmitStructLiteral(sl, null),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
         CallExpression { Name: "clone", Args: [var cloneArg] } => EmitCloneDyn(cloneArg),
         CallExpression { Name: "drop",  Args: [var dropArg]  } => EmitDropDyn(dropArg),

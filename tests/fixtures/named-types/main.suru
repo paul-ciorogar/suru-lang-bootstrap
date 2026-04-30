@@ -6,11 +6,11 @@ type Person: {
 }
 
 fn main(args Array<String>) {
-    let p Point: { x Int64: 2283, y Int64: 2281 }
+    let p Point: { x: 2283, y: 2281 }
     printLn(p.x)
     printLn(p.y)
 
-    let person Person: { name String: "Suru", age Int64: 1 }
+    let person Person: { name: "Suru", age: 1 }
     printLn(person.name)
     printLn(person.age)
 }

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5c — Typed Struct Instantiation (No Field Annotations)
+
+Per-field type annotations in struct literals have been removed. Field types now come from the surrounding `let`/return type annotation, resolved against `type` declarations. The `Struct` keyword remains valid as a type annotation name for this stage.
+
+**Before (old syntax — now a parse error):**
+```suru
+let p Struct: { x Int64: 2283, y Int64: 2281 }
+```
+
+**After (new syntax):**
+```suru
+type Point: { x Int64, y Int64 }
+let p Point: { x: 2283, y: 2281 }
+```
+
+**Changes across all compiler layers:**
+- **AST:** `StructLiteralExpression.Fields` is now `IReadOnlyList<(string Name, Expression Value)>` — the `TypeAnnotation` per-field element is gone.
+- **Parser:** `ParseStructLiteral` no longer calls `ParseTypeAnnotation()` for each field. Grammar is now `{ name: expr [, name: expr]* }`.
+- **AstPrinter:** Struct literal fields now render as `Field [name]` (no type suffix).
+- **Semantic analyzer:**
+  - `PropagateStructMeta` takes a `typeName` string and derives field types from `_module.TypeDeclarations` instead of the literal. Added `_currentFunctionReturnTypeName` field to thread the return type name into `AnalyzeReturnStatement`.
+  - New `ValidateStructLiteralFields` helper: when the variable's type annotation is a named type, validates field names and count against the `TypeDeclaration`; reports errors for unknown field names and wrong field counts.
+- **Codegen:**
+  - `EmitStructLiteral(lit, typeName)` — new `typeName` parameter; looks up field types by name from `_module.TypeDeclarations` when a named type is present; falls back to inferred types from `EmitValue` for `Struct`-typed or anonymous literals.
+  - `IRFunctionCodeGenerator` adds special `LetStatement` and `ReturnStatement` cases that detect struct literals and call `EmitStructLiteral` with the annotation's type name, threading the declared type name through codegen.
+  - Added `_currentFnReturnTypeName` field to `IRCodeGenerator`, set/cleared per function in `EmitFunction`.
+- **Fixtures:** `tests/fixtures/structs/main.suru` and `tests/fixtures/named-types/main.suru` updated — named types declared, all struct literals rewritten.
+- **Tests:** 5 new tests in `IRNamedTypeTests.cs` for Stage 12.5c (parse round-trip, semantic field validation). 17 named-type tests + structs fixture all pass. 49 total tests pass; `IRSuruLexerTests` and `IRSuruParserTests` are temporarily broken (repaired in 12.5d and 12.5e respectively).
+
+---
+
 ### Stage 12.5b — Named Type Declarations
 
 Introduced `type` declarations as a first-class Suru language construct. Named types are a prerequisite for typed struct instantiation (Stage 12.5c) and eventual removal of the `Struct` keyword.

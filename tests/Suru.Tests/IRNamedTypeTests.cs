@@ -105,7 +105,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var src = """
             type Point: { x Int64, y Int64 }
             fn main(args Array<String>) {
-                let p Point: { x Int64: 1, y Int64: 2 }
+                let p Point: { x: 1, y: 2 }
             }
             """;
         var errors = AnalyzeSource(src);
@@ -117,7 +117,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
     {
         var src = """
             fn main(args Array<String>) {
-                let p Unknown: { x Int64: 1 }
+                let p Unknown: { x: 1 }
             }
             """;
         var errors = AnalyzeSource(src);
@@ -148,6 +148,72 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Empty(errors);
+    }
+
+    // ─── Stage 12.5c: Typed struct instantiation (no field annotations) ──────
+
+    [Fact]
+    public void Parse_StructLiteral_NoTypeAnnotation_ProducesCorrectFields()
+    {
+        var module = ParseSource("fn main(args Array<String>) { let s Struct: { x: 1, y: 2 } }");
+        var fn = module.Statements.OfType<FunctionDeclaration>().First();
+        var let = fn.Body.OfType<LetStatement>().First();
+        var sl = Assert.IsType<StructLiteralExpression>(let.Value);
+        Assert.Equal(2, sl.Fields.Count);
+        Assert.Equal("x", sl.Fields[0].Name);
+        Assert.Equal("y", sl.Fields[1].Name);
+    }
+
+    [Fact]
+    public void Semantic_StructLiteralAgainstNamedType_ValidFields_NoError()
+    {
+        var src = """
+            type Point: { x Int64, y Int64 }
+            fn main(args Array<String>) {
+                let p Point: { x: 1, y: 2 }
+            }
+            """;
+        var errors = AnalyzeSource(src);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void Semantic_StructLiteralAgainstNamedType_ExtraField_ReportsError()
+    {
+        var src = """
+            type Point: { x Int64, y Int64 }
+            fn main(args Array<String>) {
+                let p Point: { x: 1, y: 2, z: 3 }
+            }
+            """;
+        var errors = AnalyzeSource(src);
+        Assert.Contains(errors, e => e.Contains("Point") && e.Contains("field"));
+    }
+
+    [Fact]
+    public void Semantic_StructLiteralAgainstNamedType_WrongFieldName_ReportsError()
+    {
+        var src = """
+            type Point: { x Int64, y Int64 }
+            fn main(args Array<String>) {
+                let p Point: { x: 1, z: 2 }
+            }
+            """;
+        var errors = AnalyzeSource(src);
+        Assert.Contains(errors, e => e.Contains("Point") && e.Contains("'z'"));
+    }
+
+    [Fact]
+    public void Semantic_StructLiteralAgainstNamedType_MissingField_ReportsError()
+    {
+        var src = """
+            type Point: { x Int64, y Int64 }
+            fn main(args Array<String>) {
+                let p Point: { x: 1 }
+            }
+            """;
+        var errors = AnalyzeSource(src);
+        Assert.Contains(errors, e => e.Contains("Point") && e.Contains("2 field"));
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

@@ -62,23 +62,44 @@ partial class IRCodeGenerator
 
     // Emit a `{ field1: val1, field2: val2, ... }` struct literal.
     //
+    // typeName is the declared Suru type name (e.g. "Point", "Struct", or null for inline/anonymous).
+    // When typeName matches a type declaration in _module.TypeDeclarations, field types are looked
+    // up by name from the declaration. Otherwise, field types are inferred from EmitValue's returned
+    // SuruType — every value is a tagged pointer so the field_tag is always accurate.
+    //
     // Nodes are built in reverse field order so the head of the list is the first
     // declared field. For each field: malloc(40), store type_tag=4/name/field_tag/val/next.
     // Field values are all ptr (Box for scalars, direct ptr for heap types); stored as
     // ptrtoint(ptr %fieldVal to i64) in the i64 val slot.
-    private (string val, SuruType type) EmitStructLiteral(StructLiteralExpression lit)
+    private (string val, SuruType type) EmitStructLiteral(StructLiteralExpression lit, string? typeName)
     {
         _externals.AddMalloc();
+
+        // Try to resolve field types from the named type declaration.
+        _module.TypeDeclarations.TryGetValue(typeName ?? "", out var typeDecl);
 
         var prevNodePtr = "null";
 
         for (int i = lit.Fields.Count - 1; i >= 0; i--)
         {
-            var (fieldName, fieldTypeAnn, fieldExpr) = lit.Fields[i];
-            var fieldType = SuruTypeFromAnnotation(fieldTypeAnn);
+            var (fieldName, fieldExpr) = lit.Fields[i];
+
+            // Determine field type: from declaration (named type) or infer from EmitValue.
+            SuruType fieldType = SuruType.Struct; // fallback for FieldAccessExpression.ResolvedType
+            if (typeDecl != null)
+            {
+                var declField = typeDecl.Fields.FirstOrDefault(f => f.Field == fieldName);
+                if (declField.Type != null)
+                    fieldType = SuruTypeFromAnnotation(declField.Type);
+            }
+
             if (fieldExpr is FieldAccessExpression { ResolvedType: null } faField)
                 faField.ResolvedType = fieldType;
-            var (fieldVal, _) = EmitValue(fieldExpr);
+            var (fieldVal, inferredType) = EmitValue(fieldExpr);
+
+            // When no type declaration is available, use the inferred type from the value.
+            if (typeDecl == null)
+                fieldType = inferredType;
 
             var nodePtr = NextTmp();
             _funcs.AppendLine($"  {nodePtr} = call ptr @malloc(i64 40)");

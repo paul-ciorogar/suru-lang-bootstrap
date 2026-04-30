@@ -40,6 +40,7 @@ public sealed partial class IRCodeGenerator
             var retLlvmType = fn.ReturnType.Name == "void" ? "void" : "ptr";
             _currentFnReturnLlvmType = retLlvmType;
             _currentFnReturnSuruType = retSuruType;
+            _currentFnReturnTypeName = fn.ReturnType.Name;
 
             // All parameters are `ptr` in the universal tagged-pointer system.
             var paramStr = string.Join(", ", fn.Parameters.Select(p => $"ptr %{p.Name}"));
@@ -69,6 +70,7 @@ public sealed partial class IRCodeGenerator
 
         _funcs.AppendLine("}");
         _funcs.AppendLine();
+        _currentFnReturnTypeName = null;
     }
 
     // ─── Statement emission ──────────────────────────────────────────────────
@@ -121,6 +123,16 @@ public sealed partial class IRCodeGenerator
                 EmitWriteFile(wfPath, wfContent);
                 break;
 
+            // let name NamedType: { fields } — thread the type name into EmitStructLiteral so
+            // field types can be looked up from _module.TypeDeclarations without per-field annotations.
+            case LetStatement { Name: var name, Value: StructLiteralExpression sl, TypeAnnotation: var slAnn }:
+                var (slVal, slType) = EmitStructLiteral(sl, slAnn.Name);
+                var slPtr = $"%{name}.addr";
+                _funcs.AppendLine($"  {slPtr} = alloca ptr");
+                _funcs.AppendLine($"  store ptr {slVal}, ptr {slPtr}");
+                _vars[name] = (slPtr, slType);
+                break;
+
             // let name TypeAnnotation: expr — every alloca is `ptr`.
             case LetStatement { Name: var name, Value: var valExpr, TypeAnnotation: var ann }:
                 if (valExpr is FieldAccessExpression { ResolvedType: null } faLet)
@@ -147,6 +159,13 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  {allocPtr} = alloca ptr");
                 _funcs.AppendLine($"  store ptr {letVal}, ptr {allocPtr}");
                 _vars[name] = (allocPtr, letType);
+                break;
+
+            // return { fields } — thread the declared return type name into EmitStructLiteral.
+            case ReturnStatement { Value: StructLiteralExpression retSl }:
+                var (retSlVal, _) = EmitStructLiteral(retSl, _currentFnReturnTypeName);
+                _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {retSlVal}");
+                _blockOpen = false;
                 break;
 
             // return expr — use _currentFnReturnLlvmType so `ret` matches the definition.

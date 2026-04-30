@@ -12,6 +12,7 @@ public sealed class SemanticAnalyzer
     private readonly HashSet<string> _constants = new();
     private readonly List<string> _errors = [];
     private SuruType? _currentFunctionReturnType = null;
+    private string? _currentFunctionReturnTypeName = null;
     private bool _currentFunctionIsVoid = false;
     private string? _currentFunctionName = null;
     private bool _insideFunction = false;
@@ -169,7 +170,10 @@ public sealed class SemanticAnalyzer
             {
                 _symbols[let.Name] = type.Value;
                 if (type.Value == SuruType.Struct)
-                    PropagateStructMeta(let.Name, let.Value);
+                {
+                    ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
+                    PropagateStructMeta(let.Name, let.Value, let.TypeAnnotation.Name);
+                }
             }
             if (!_insideFunction)
                 _constants.Add(let.Name);
@@ -192,13 +196,15 @@ public sealed class SemanticAnalyzer
                 if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
                     _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
             }
-            if (_currentFunctionName != null && ret.Value is StructLiteralExpression retLit)
+            if (_currentFunctionName != null && ret.Value is StructLiteralExpression
+                && _currentFunctionReturnTypeName != null
+                && _typeDeclarations.TryGetValue(_currentFunctionReturnTypeName, out var retTd))
             {
                 var fields = new List<(string Name, SuruType Type)>();
-                foreach (var (name, typeAnn, _) in retLit.Fields)
+                foreach (var (fname, fieldTypeAnn) in retTd.Fields)
                 {
-                    var t = ResolveTypeAnnotation(typeAnn);
-                    if (t.HasValue) fields.Add((name, t.Value));
+                    var t = ResolveTypeAnnotation(fieldTypeAnn);
+                    if (t.HasValue) fields.Add((fname, t.Value));
                 }
                 if (fields.Count > 0)
                     _functionReturnStructSymbols[_currentFunctionName] = fields;
@@ -224,6 +230,7 @@ public sealed class SemanticAnalyzer
         }
 
         _currentFunctionReturnType = sig.ReturnType;
+        _currentFunctionReturnTypeName = fn.ReturnType.Name;
         _currentFunctionIsVoid = fn.ReturnType.Name == "void";
         _currentFunctionName = fn.Name;
         _insideFunction = true;
@@ -245,26 +252,28 @@ public sealed class SemanticAnalyzer
         foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
         foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
         _currentFunctionReturnType = null;
+        _currentFunctionReturnTypeName = null;
         _currentFunctionIsVoid = false;
         _currentFunctionName = null;
         _insideFunction = false;
     }
 
-    private void PropagateStructMeta(string varName, Expression value)
+    private void PropagateStructMeta(string varName, Expression value, string typeName)
     {
         switch (value)
         {
-            case StructLiteralExpression lit:
+            case StructLiteralExpression:
+                if (_typeDeclarations.TryGetValue(typeName, out var td))
                 {
                     var fields = new List<(string Name, SuruType Type)>();
-                    foreach (var (name, typeAnn, _) in lit.Fields)
+                    foreach (var (fname, fieldTypeAnn) in td.Fields)
                     {
-                        var t = ResolveTypeAnnotation(typeAnn);
-                        if (t.HasValue) fields.Add((name, t.Value));
+                        var t = ResolveTypeAnnotation(fieldTypeAnn);
+                        if (t.HasValue) fields.Add((fname, t.Value));
                     }
                     _structSymbols[varName] = fields;
-                    break;
                 }
+                break;
             case VariableReferenceExpression v when _structSymbols.TryGetValue(v.Name, out var meta):
                 _structSymbols[varName] = new List<(string, SuruType)>(meta);
                 break;
@@ -277,9 +286,23 @@ public sealed class SemanticAnalyzer
                 _structSymbols[varName] = new List<(string, SuruType)>(fnMeta);
                 break;
             case MatchExpression match when match.Arms.Count > 0:
-                PropagateStructMeta(varName, match.Arms[0].Body);
+                PropagateStructMeta(varName, match.Arms[0].Body, typeName);
                 break;
         }
+    }
+
+    // Validates that a struct literal's field names match the declared type (when one exists).
+    private void ValidateStructLiteralFields(Expression value, string typeName)
+    {
+        if (value is not StructLiteralExpression lit) return;
+        if (!_typeDeclarations.TryGetValue(typeName, out var typeDecl)) return;
+
+        var declaredNames = typeDecl.Fields.Select(f => f.Field).ToHashSet();
+        foreach (var (fname, _) in lit.Fields)
+            if (!declaredNames.Contains(fname))
+                _errors.Add($"{_module.SourcePath}: struct '{typeName}' has no field '{fname}'");
+        if (lit.Fields.Count != typeDecl.Fields.Count)
+            _errors.Add($"{_module.SourcePath}: struct '{typeName}' expects {typeDecl.Fields.Count} field(s), got {lit.Fields.Count}");
     }
 
     private void AnalyzeExpression(Expression expr)
@@ -302,7 +325,7 @@ public sealed class SemanticAnalyzer
                 break;
 
             case StructLiteralExpression lit:
-                foreach (var (_, _, fieldVal) in lit.Fields)
+                foreach (var (_, fieldVal) in lit.Fields)
                     AnalyzeExpression(fieldVal);
                 break;
 

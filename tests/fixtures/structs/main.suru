@@ -1,28 +1,35 @@
-fn structFromFunction() Struct {
+type DataStruct: { tall Bool, height Int64 }
+type Named: { name String, height Int64 }
+type Lvl3: { someValue Int64 }
+type Lvl2: { anotherParam Struct }
+type Lvl1: { otherParam Struct }
+type Parent: { someArray Array<Struct> }
+
+fn structFromFunction() Named {
     return {
-        name String: "Suru"
-        height Int64: 2283
+        name: "Suru"
+        height: 2283
     }
 }
 
-fn getHeight(data Struct) Int64 {
+fn getHeight(data Named) Int64 {
     return data.height
 }
 
 fn main(args Array<String>) {
     // basic: field read/write/clone/drop
-    let data Struct: { tall Bool: true, height Int64: 2283 }
+    let data DataStruct: { tall: true, height: 2283 }
     printLn(data.tall)
     printLn(data.height)
     data.tall: false
     printLn(data.tall)
-    let copy Struct: clone(data)
+    let copy DataStruct: clone(data)
     printLn(copy.tall)
     drop(data)
     drop(copy)
 
     // struct returned from function — extract via typed let
-    let suru Struct: structFromFunction()
+    let suru Named: structFromFunction()
     let suruName String: suru.name
     printLn(suruName)
     let suruHeight Int64: suru.height
@@ -30,18 +37,18 @@ fn main(args Array<String>) {
     drop(suru)
 
     // struct passed to function, field returned
-    let tok Struct: { name String: "hello", height Int64: 42 }
+    let tok Named: { name: "hello", height: 42 }
     let h Int64: getHeight(tok)
     printLn(h)
     drop(tok)
 
     // deep chain via let intermediaries:
     // covers struct.someArray.at(i).nested.deeper.value
-    let lvl3 Struct: { someValue Int64: 99 }
-    let lvl2 Struct: { anotherParam Struct: lvl3 }
-    let lvl1 Struct: { otherParam Struct: lvl2 }
+    let lvl3 Lvl3: { someValue: 99 }
+    let lvl2 Lvl2: { anotherParam: lvl3 }
+    let lvl1 Lvl1: { otherParam: lvl2 }
     let someArray Array<Struct>: [lvl1]
-    let parent Struct: { someArray Array<Struct>: someArray }
+    let parent Parent: { someArray: someArray }
 
     let arr Array<Struct>: parent.someArray
     let item Struct: arr.at(0)
