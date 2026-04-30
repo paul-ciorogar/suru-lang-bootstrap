@@ -21,4 +21,10 @@ public sealed class Module
     // Paths are deduplicated: each file appears at most once regardless of how many include
     // chains reach it.
     public IReadOnlyList<string> IncludedSourcePaths { get; init; } = [];
+
+    // Named type declarations indexed by type name (e.g. "Point" → TypeDeclaration).
+    // Populated by the parser from top-level `type` statements and preserved through
+    // include resolution so the semantic analyzer and codegen can look up field layouts.
+    public IReadOnlyDictionary<string, TypeDeclaration> TypeDeclarations { get; init; }
+        = new Dictionary<string, TypeDeclaration>();
 }

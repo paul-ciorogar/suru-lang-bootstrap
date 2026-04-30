@@ -1,0 +1,16 @@
+type Point: { x Int64, y Int64 }
+
+type Person: {
+    name String
+    age Int64
+}
+
+fn main(args Array<String>) {
+    let p Point: { x Int64: 2283, y Int64: 2281 }
+    printLn(p.x)
+    printLn(p.y)
+
+    let person Person: { name String: "Suru", age Int64: 1 }
+    printLn(person.name)
+    printLn(person.age)
+}

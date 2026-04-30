@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5b — Named Type Declarations
+
+Introduced `type` declarations as a first-class Suru language construct. Named types are a prerequisite for typed struct instantiation (Stage 12.5c) and eventual removal of the `Struct` keyword.
+
+**Syntax:**
+```suru
+// inline
+type Point: { x Int64, y Int64 }
+
+// multiline
+type Person: {
+    name String
+    age Int64
+}
+```
+
+**Changes across all compiler layers:**
+- **Lexer:** `type` is now a reserved keyword producing `TokenKind.Type` (not `Identifier`).
+- **AST:** New `TypeDeclaration` node (`Name`, `Fields: (Field, TypeAnnotation)[]`). `Module.TypeDeclarations` dictionary populated by the parser and preserved through include resolution.
+- **Parser:** `ParseTypeDeclaration()` handles inline and multiline field lists (`,` or newline separated). `Module.TypeDeclarations` index built with last-wins semantics (duplicate errors caught by semantic analysis).
+- **Semantic analyzer:** Three-pass analysis — type declarations registered first, then functions, then statements. `ResolveTypeAnnotation` is now an instance method that falls through to `_typeDeclarations` for user-defined names, resolving to `SuruType.Struct`. Duplicate type names reported as errors.
+- **AstPrinter:** `TypeDeclaration` nodes render as `TypeDeclaration [Name]` with `Field [name] Type [type]` children.
+- **Codegen:** `SuruTypeFromAnnotation` and `FnReturnSuruType` are now instance methods; named types map to `SuruType.Struct` via `_module.TypeDeclarations` lookup.
+- **Tests:** 11 new tests in `IRNamedTypeTests.cs` covering lexer, parser, semantic analyzer (unit), and the end-to-end `named-types` fixture. 55 total tests, all passing.
+
+---
+
 ### Stage 12.5a — Code Refactoring (File Size < 500 Lines)
 
 Split the two largest source files (`IRCodeGenerator.cs` at 1076 lines, `SuruRuntime.cs` at 989 lines) into focused partial-class files. No behavior changes — all 44 tests pass unchanged.

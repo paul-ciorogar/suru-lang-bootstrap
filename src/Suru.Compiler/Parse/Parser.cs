@@ -30,13 +30,27 @@ public sealed class Parser
 
         _ = Consume(TokenKind.Eof);
 
-        return new Module { SourcePath = _tokens.SourcePath, Statements = stmts };
+        // Build type declaration index; duplicates are intentionally allowed here —
+        // the semantic analyzer reports the error. Last definition wins in the dict.
+        var typeDecls = new Dictionary<string, TypeDeclaration>();
+        foreach (var td in stmts.OfType<TypeDeclaration>())
+            typeDecls[td.Name] = td;
+
+        return new Module
+        {
+            SourcePath       = _tokens.SourcePath,
+            Statements       = stmts,
+            TypeDeclarations = typeDecls,
+        };
     }
 
     private Statement ParseStatement()
     {
         if (CanConsume(TokenKind.Include))
             return ParseIncludeDirective();
+
+        if (CanConsume(TokenKind.Type))
+            return ParseTypeDeclaration();
 
         if (CanConsume(TokenKind.Fn))
             return ParseFunctionDeclaration();
@@ -98,6 +112,28 @@ public sealed class Parser
                 $"{_tokens.SourcePath}({asToken.Line},{asToken.Column}): expected 'as', got '{asToken.Text}'");
         var nsToken = Consume(TokenKind.Identifier);
         return new IncludeDirective(pathToken.Text, nsToken.Text);
+    }
+
+    // Parses:  type Name: { field Type [, field Type]* }
+    // Fields may be separated by commas or newlines (the lexer discards whitespace,
+    // so newline-separated fields just have no comma token between them).
+    private TypeDeclaration ParseTypeDeclaration()
+    {
+        var nameToken = Consume(TokenKind.Identifier);
+        Consume(TokenKind.Colon);
+        Consume(TokenKind.LeftBrace);
+
+        var fields = new List<(string Field, TypeAnnotation Type)>();
+        while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+        {
+            var fieldName = Consume(TokenKind.Identifier);
+            var fieldType = ParseTypeAnnotation();
+            fields.Add((fieldName.Text, fieldType));
+            CanConsume(TokenKind.Comma); // optional comma between fields
+        }
+
+        Consume(TokenKind.RightBrace);
+        return new TypeDeclaration(nameToken.Text, fields);
     }
 
     private FunctionDeclaration ParseFunctionDeclaration()

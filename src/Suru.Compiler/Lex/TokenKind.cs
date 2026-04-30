@@ -32,4 +32,5 @@ public enum TokenKind
     Include,
     LessThan,
     GreaterThan,
+    Type,
 }

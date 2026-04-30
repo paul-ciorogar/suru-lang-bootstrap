@@ -336,7 +336,18 @@ public class Compiler
             Namespaces           = namespaces,
             ExternalFunctions    = externalFns,
             IncludedSourcePaths  = includedPaths,
+            TypeDeclarations     = BuildTypeDeclarationsDict(mergedStatements),
         };
+    }
+
+    private static Dictionary<string, TypeDeclaration> BuildTypeDeclarationsDict(
+        IEnumerable<Statement> stmts)
+    {
+        // Duplicates are intentionally allowed; the semantic analyzer reports them.
+        var dict = new Dictionary<string, TypeDeclaration>();
+        foreach (var td in stmts.OfType<TypeDeclaration>())
+            dict[td.Name] = td;
+        return dict;
     }
 
     private static string? RunClang(string irPath, string objectPath)

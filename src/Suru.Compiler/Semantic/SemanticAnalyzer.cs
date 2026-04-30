@@ -16,6 +16,7 @@ public sealed class SemanticAnalyzer
     private string? _currentFunctionName = null;
     private bool _insideFunction = false;
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
+    private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -31,10 +32,22 @@ public sealed class SemanticAnalyzer
     private IReadOnlyList<string> _Analyze()
     {
         foreach (var stmt in _module.Statements)
+            if (stmt is TypeDeclaration td) RegisterTypeDeclaration(td);
+        foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration fn) RegisterFunction(fn);
         foreach (var stmt in _module.Statements)
             AnalyzeStatement(stmt);
         return _errors;
+    }
+
+    private void RegisterTypeDeclaration(TypeDeclaration td)
+    {
+        if (_typeDeclarations.ContainsKey(td.Name))
+        {
+            _errors.Add($"{_module.SourcePath}: type '{td.Name}' is already declared");
+            return;
+        }
+        _typeDeclarations[td.Name] = td;
     }
 
     private void RegisterFunction(FunctionDeclaration fn)
@@ -62,7 +75,8 @@ public sealed class SemanticAnalyzer
         _functions[fn.Name] = (paramTypes, returnType);
     }
 
-    private static SuruType? ResolveTypeAnnotation(TypeAnnotation ann) => ann.Name switch
+    // Non-static so it can consult _typeDeclarations for user-defined named types.
+    private SuruType? ResolveTypeAnnotation(TypeAnnotation ann) => ann.Name switch
     {
         "Bool"    => SuruType.Bool,
         "Int32"   => SuruType.Int32,
@@ -71,13 +85,19 @@ public sealed class SemanticAnalyzer
         "Struct"  => SuruType.Struct,
         "Array"   => SuruType.Array,
         "String"  => SuruType.String,
-        _         => null,
+        // Named types declared via `type Foo: { ... }` resolve to SuruType.Struct
+        // at the semantic level — the runtime uses the same linked-list struct layout.
+        _ => _typeDeclarations.ContainsKey(ann.Name) ? SuruType.Struct : null,
     };
 
     private void AnalyzeStatement(Statement stmt)
     {
         switch (stmt)
         {
+            case TypeDeclaration:
+                // Already registered in the pre-pass; nothing more to analyze.
+                break;
+
             case FunctionDeclaration fn:
                 AnalyzeFunctionDeclaration(fn);
                 break;

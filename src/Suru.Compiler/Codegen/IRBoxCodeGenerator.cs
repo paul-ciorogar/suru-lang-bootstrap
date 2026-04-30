@@ -8,7 +8,8 @@ public sealed partial class IRCodeGenerator
 {
     // ─── Type utilities ───────────────────────────────────────────────────────
 
-    private static SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
+    // Non-static so it can consult _module.TypeDeclarations for user-defined named types.
+    private SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
     {
         "Bool"    => SuruType.Bool,
         "Int32"   => SuruType.Int32,
@@ -17,7 +18,10 @@ public sealed partial class IRCodeGenerator
         "String"  => SuruType.String,
         "Array"   => SuruType.Array,
         "Struct"  => SuruType.Struct,
-        _ => throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
+        // Named types declared via `type Foo: { ... }` use the same heap struct layout.
+        _ => _module.TypeDeclarations.ContainsKey(ann.Name)
+            ? SuruType.Struct
+            : throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
     };
 
     // Every Suru value in user .ll is a `ptr` (Box for scalars, direct heap ptr for rest).
@@ -34,7 +38,7 @@ public sealed partial class IRCodeGenerator
         _                => "ptr",
     };
 
-    private static SuruType FnReturnSuruType(FunctionDeclaration fn)
+    private SuruType FnReturnSuruType(FunctionDeclaration fn)
         => fn.ReturnType.Name is "void" ? SuruType.Int64 : SuruTypeFromAnnotation(fn.ReturnType);
 
     // ─── Box / Unbox helpers ──────────────────────────────────────────────────

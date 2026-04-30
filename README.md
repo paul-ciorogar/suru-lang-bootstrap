@@ -43,7 +43,7 @@ fn main(args Array<String>) {
 }
 ```
 
-Available scalar types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`, `Array<T>`.
+Available scalar types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`, `Array<T>`, and any declared named type (e.g. `Point`).
 
 ### Comments
 
@@ -176,6 +176,37 @@ fn fibonacci(n Int64) Int64 {
 
 printLn(fibonacci(10))
 ```
+
+### Named Types
+
+Declare a named struct type with `type Name: { field Type, ... }`. Fields use only a name and a type — no value. Inline and multiline forms are both valid:
+
+```suru
+// inline
+type Point: { x Int64, y Int64 }
+
+// multiline
+type Person: {
+    name String
+    age  Int64
+}
+```
+
+Use the type name in `let` declarations, function parameters, and return types:
+
+```suru
+let p Point: { x Int64: 2283, y Int64: 2281 }
+printLn(p.x)   // 2283
+printLn(p.y)   // 2281
+
+fn makePoint(x Int64, y Int64) Point {
+    return { x Int64: x, y Int64: y }
+}
+```
+
+> Named types resolve to `SuruType.Struct` — they use the same heap-allocated linked-list runtime as anonymous `Struct` values. Duplicate type names are compile-time errors.
+
+---
 
 ### Structs
 

@@ -80,6 +80,12 @@ public static class AstPrinter
                 sb.AppendLine($"{indent}IncludeDirective [\"{inc.Path}\"] as [{inc.NamespaceName}]");
                 break;
 
+            case TypeDeclaration td:
+                sb.AppendLine($"{indent}TypeDeclaration [{td.Name}]");
+                foreach (var (field, type) in td.Fields)
+                    sb.AppendLine($"{indent}  Field [{field}] Type [{type}]");
+                break;
+
             case ExpressionStatement es:
                 sb.AppendLine($"{indent}ExpressionStatement");
                 PrintExpression(sb, indent + "  ", es.Expression);
