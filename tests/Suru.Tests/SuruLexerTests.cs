@@ -12,7 +12,7 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
     //   0=EOF 1=IDENT 2=TRUE 3=FALSE 4=INT 5=FLOAT 6=STRING
     //   7=( 8=) 9=, 10=. 11=: 12={ 13=} 14=[ 15=]
     //   16=let 17=not 18=and 19=or 20=match 21=_ 22=fn 23=return 24=void
-    //   25=- 26=while
+    //   25=- 26=while 27=< 28=> 29=include 30=as
 
     private static string FixturePath(string name)
     {
@@ -35,9 +35,9 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
             "7 ( 1:8\n" +
             "1 args 1:9\n" +
             "1 Array 1:14\n" +
-            "0 < 1:19\n" +
+            "27 < 1:19\n" +
             "1 String 1:20\n" +
-            "0 > 1:26\n" +
+            "28 > 1:26\n" +
             "8 ) 1:27\n" +
             "12 { 1:29\n" +
             "1 printLn 2:5\n" +

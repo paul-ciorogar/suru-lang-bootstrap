@@ -9,8 +9,7 @@ public class StructTests(CompiledFixtures fixtures) : IntegrationTestBase, IDisp
     [Fact]
     public void Struct_FieldReadWriteCloneDrop()
     {
-        // => Assert.Equal("true\n2283\nfalse\nfalse\nSuru\n2283\n", Run(_exe));
-        Assert.Equal("true\n2283\nfalse\nfalse\n", Run(_exe));
+        Assert.Equal("true\n2283\nfalse\nfalse\nSuru\n2283\n42\n99\n", Run(_exe));
         _testPassed = true;
     }
 

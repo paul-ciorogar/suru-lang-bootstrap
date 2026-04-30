@@ -1,0 +1,10 @@
+include "../suru-lexer/suru-lexer.suru" as lexer
+include "suru-parser.suru" as parser
+
+fn main(args Array<String>) {
+    let path String: args.at(1)
+    let source String: readFile(path)
+    let tokens Array<Struct>: lexer.tokenize(source)
+    let ast Struct: parser.parse(tokens)
+    parser.printModule(ast, path)
+}

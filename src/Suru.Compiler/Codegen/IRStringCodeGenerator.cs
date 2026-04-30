@@ -8,9 +8,10 @@ namespace Suru.Compiler.Codegen;
 
 // String IR emission for IRCodeGenerator.
 //
-// Every Suru String value is a `ptr` to a heap-allocated %suru.Seq = { i64 len, ptr data }.
-// `data` points to a null-terminated i8 buffer; `len` holds the character count excluding
-// the null terminator.
+// Every Suru String value is a `ptr` to a heap-allocated
+//   %suru.String = { i64 type_tag=6, i64 len, ptr data }  (24 bytes)
+// type_tag=6 at field 0: any heap ptr can be identified as String at runtime.
+// `data` points to a null-terminated i8 buffer; `len` holds the character count.
 //
 // ── Runtime module ────────────────────────────────────────────────────────────
 //
@@ -25,10 +26,6 @@ namespace Suru.Compiler.Codegen;
 //
 //   EmitStringLiteralValue — interns the raw bytes as a module-local [N x i8] global,
 //     malloc+memcpy's them into a heap buffer, then calls suru_string_create.
-//     The global is module-local so it cannot move to the runtime module.
-//
-//   EmitCreateStringSeq — now delegates to @suru_string_create in the runtime.
-//     Kept as a thin helper for call sites that already have a data ptr and length.
 //
 // ── Layout diagram for `let s String: "hi"` ──────────────────────────────────
 //
@@ -37,32 +34,24 @@ namespace Suru.Compiler.Codegen;
 //   suru_main:
 //     %buf  = malloc 3                   ← heap-owned copy of the 3 raw bytes
 //     memcpy(%buf, @.str_0, 3)
-//     %seq  = call @suru_string_create(%buf, 2)  ← runtime allocates the 16-byte Seq
+//     %seq  = call @suru_string_create(%buf, 2)  ← runtime allocates the 24-byte Seq
 //     store ptr %seq → %s.addr
 partial class IRCodeGenerator
 {
     // ─── String literal ──────────────────────────────────────────────────────
 
-    // Intern the raw bytes as a global constant; malloc+memcpy into a fresh heap buffer;
-    // then call suru_string_create to wrap data+len in a new Seq header.
-    //
-    // The global is module-local (cannot move to the runtime module), but the Seq
-    // allocation itself is delegated to the runtime so the header layout stays
-    // centralised in suru_string.ll.
     private (string val, SuruType type) EmitStringLiteralValue(string text)
     {
         if (!_stringLiterals.TryGetValue(text, out var entry))
         {
             var globalName = $"@.str_{_strCount++}";
-            var byteLen    = CountStringBytes(text) + 1;  // +1 for null terminator
+            var byteLen    = CountStringBytes(text) + 1;
             entry = (globalName, byteLen);
             _stringLiterals[text] = entry;
         }
-        // byteLen includes the null terminator; len stored in the Seq excludes it.
         var charLen   = (entry.byteLen - 1).ToString(CultureInfo.InvariantCulture);
         var byteCount = entry.byteLen.ToString(CultureInfo.InvariantCulture);
 
-        // Heap-allocate a copy of the global bytes so the data ptr is always free-able.
         _externals.AddMemcpy();
         var buf = NextTmp();
         _funcs.AppendLine($"  {buf} = call ptr @malloc(i64 {byteCount})");
@@ -73,34 +62,28 @@ partial class IRCodeGenerator
 
     // ─── Low-level Seq helpers ───────────────────────────────────────────────
     //
-    // These two helpers remain inline because they are used in contexts where a full
-    // function call would be wasteful (printLn, writeFile, string match patterns).
+    // %suru.String layout: { type_tag@0, len@1, data@2 }
+    // These helpers load raw i64/ptr values; callers that need a boxed Suru value
+    // should use EmitStringLen (which boxes the result).
 
-    // Extract the `data` pointer from a %suru.Seq (field index 1).
-    // Returns the SSA name of the loaded ptr value.
     private string EmitExtractStringData(string seqVal)
     {
         var gep  = NextTmp();
         var data = NextTmp();
-        _funcs.AppendLine($"  {gep}  = getelementptr %suru.Seq, ptr {seqVal}, i32 0, i32 1");
+        _funcs.AppendLine($"  {gep}  = getelementptr %suru.String, ptr {seqVal}, i32 0, i32 2");
         _funcs.AppendLine($"  {data} = load ptr, ptr {gep}");
         return data;
     }
 
-    // Extract the `len` field from a %suru.Seq (field index 0).
-    // Returns the SSA name of the loaded i64 value.
     private string EmitExtractStringLen(string seqVal)
     {
         var gep = NextTmp();
         var len = NextTmp();
-        _funcs.AppendLine($"  {gep} = getelementptr %suru.Seq, ptr {seqVal}, i32 0, i32 0");
+        _funcs.AppendLine($"  {gep} = getelementptr %suru.String, ptr {seqVal}, i32 0, i32 1");
         _funcs.AppendLine($"  {len} = load i64, ptr {gep}");
         return len;
     }
 
-    // Call @suru_string_create(data, len) to allocate a new %suru.Seq on the heap.
-    // `dataPtr` — SSA name of the i8* data buffer (must be heap-owned).
-    // `lenVal`  — SSA name or integer literal string for the i64 character count.
     private (string val, SuruType type) EmitCreateStringSeq(string dataPtr, string lenVal)
     {
         _runtimeDecls.AddStringCreate();
@@ -111,11 +94,14 @@ partial class IRCodeGenerator
 
     // ─── String instance methods ─────────────────────────────────────────────
 
-    // .len() → Int64: load the len field inline (2 instructions; no runtime call needed).
+    // .len() → Box(Int64): GEP+load the raw len, then box it.
     private (string val, SuruType type) EmitStringLen(string seqVal)
-        => (EmitExtractStringLen(seqVal), SuruType.Int64);
+    {
+        var raw = EmitExtractStringLen(seqVal);
+        return (BoxInt64(raw), SuruType.Int64);
+    }
 
-    // .append(other) → String: delegate to @suru_string_append in the runtime.
+    // .append(other) → String
     private (string val, SuruType type) EmitStringAppend(string lhsSeqVal, Expression rhsExpr)
     {
         var (rhsSeqVal, _) = EmitValue(rhsExpr);
@@ -125,59 +111,58 @@ partial class IRCodeGenerator
         return (tmp, SuruType.String);
     }
 
-    // .at(i) → String: single-character String at byte index i.
+    // .at(i) → String: unbox idx Box(Int64), then call @suru_string_at.
     private (string val, SuruType type) EmitStringAt(string seqVal, Expression idxExpr)
     {
-        var (idxVal, _) = EmitValue(idxExpr);
+        var (idxBox, _) = EmitValue(idxExpr);
+        var idx = UnboxInt64(idxBox);
         _runtimeDecls.AddStringAt();
         var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_at(ptr {seqVal}, i64 {idxVal})");
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_at(ptr {seqVal}, i64 {idx})");
         return (tmp, SuruType.String);
     }
 
-    // .equals(other) → Bool: byte-exact comparison via strcmp.
+    // .equals(other) → Box(Bool)
     private (string val, SuruType type) EmitStringEquals(string lhsSeqVal, Expression rhsExpr)
     {
         var (rhsSeqVal, _) = EmitValue(rhsExpr);
         _runtimeDecls.AddStringEquals();
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = call i1 @suru_string_equals(ptr {lhsSeqVal}, ptr {rhsSeqVal})");
-        return (tmp, SuruType.Bool);
+        var rawBool = NextTmp();
+        _funcs.AppendLine($"  {rawBool} = call i1 @suru_string_equals(ptr {lhsSeqVal}, ptr {rhsSeqVal})");
+        return (BoxBool(rawBool), SuruType.Bool);
     }
 
-    // .slice(from, to) → String: substring covering bytes [from, to).
+    // .slice(from, to) → String: unbox from/to Box(Int64).
     private (string val, SuruType type) EmitStringSlice(
         string seqVal, Expression fromExpr, Expression toExpr)
     {
-        var (fromVal, _) = EmitValue(fromExpr);
-        var (toVal, _)   = EmitValue(toExpr);
+        var (fromBox, _) = EmitValue(fromExpr);
+        var (toBox, _)   = EmitValue(toExpr);
+        var from = UnboxInt64(fromBox);
+        var to   = UnboxInt64(toBox);
         _runtimeDecls.AddStringSlice();
         var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_slice(ptr {seqVal}, i64 {fromVal}, i64 {toVal})");
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_string_slice(ptr {seqVal}, i64 {from}, i64 {to})");
         return (tmp, SuruType.String);
     }
 
-    // .ord() → Int64: ASCII code of the first byte.
+    // .ord() → Box(Int64): ASCII code of the first byte.
     private (string val, SuruType type) EmitStringOrd(string seqVal)
     {
         _runtimeDecls.AddStringOrd();
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = call i64 @suru_string_ord(ptr {seqVal})");
-        return (tmp, SuruType.Int64);
+        var rawOrd = NextTmp();
+        _funcs.AppendLine($"  {rawOrd} = call i64 @suru_string_ord(ptr {seqVal})");
+        return (BoxInt64(rawOrd), SuruType.Int64);
     }
 
     // ─── Clone ───────────────────────────────────────────────────────────────
 
-    // Dispatch helper for `clone(s)` in expression position.
-    // Evaluates the argument, delegates to @suru_string_clone, returns String.
     internal (string val, SuruType type) EmitCloneStringDispatch(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
         return (EmitCloneString(seqVal), SuruType.String);
     }
 
-    // Emit a call to @suru_string_clone — produces an independent copy of a String.
-    // Also called from IRArrayCodeGenerator when cloning an Array<String> element.
     internal string EmitCloneString(string seqPtr)
     {
         _runtimeDecls.AddStringClone();
@@ -188,17 +173,13 @@ partial class IRCodeGenerator
 
     // ─── Drop ────────────────────────────────────────────────────────────────
 
-    // Dispatch helper for `drop(s)` in expression position.
-    // Returns ("0", Bool) so the call can appear in statement or expression position.
     internal (string val, SuruType type) EmitDropStringDispatch(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
         EmitDropString(seqVal);
-        return ("0", SuruType.Bool);
+        return ("null", SuruType.Bool);
     }
 
-    // Emit a call to @suru_string_drop — frees the char buffer then the Seq header.
-    // Also called from IRArrayCodeGenerator when dropping an Array<String> element.
     internal void EmitDropString(string seqPtr)
     {
         _runtimeDecls.AddStringDrop();
@@ -207,17 +188,18 @@ partial class IRCodeGenerator
 
     // ─── String ↔ Int64 conversions ──────────────────────────────────────────
 
-    // Int64.from(str) → Int64: parse a decimal string via strtol.
+    // Int64.from(str) → Box(Int64): parse a decimal string via strtol, then box.
     private (string val, SuruType type) EmitInt64FromString(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
         _runtimeDecls.AddInt64FromString();
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = call i64 @suru_int64_from_string(ptr {seqVal})");
-        return (tmp, SuruType.Int64);
+        var rawI64 = NextTmp();
+        _funcs.AppendLine($"  {rawI64} = call i64 @suru_int64_from_string(ptr {seqVal})");
+        return (BoxInt64(rawI64), SuruType.Int64);
     }
 
-    // n.toString() → String: format an Int64 as a decimal string via snprintf.
+    // n.toString() → String: format a raw i64 via snprintf.
+    // Caller is responsible for unboxing before passing int64Val.
     private (string val, SuruType type) EmitInt64ToString(string int64Val)
     {
         _runtimeDecls.AddInt64ToString();
@@ -226,7 +208,7 @@ partial class IRCodeGenerator
         return (tmp, SuruType.String);
     }
 
-    // Int64 static method dispatch — mirrors EmitInt32StaticMethod in the main file.
+    // Int64 static method dispatch.
     internal (string val, SuruType type) EmitInt64StaticMethod(
         string methodName, IReadOnlyList<Expression> args) => methodName switch
     {

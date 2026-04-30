@@ -9,93 +9,52 @@ using Suru.Compiler.Types;
 namespace Suru.Compiler.Codegen;
 
 // Emits LLVM IR text (.ll) as a direct replacement for the LLVMSharp-based CodeGenerator.
-// The output is fed to `clang` rather than the LLVM C API, which removes the native binding
-// dependency and makes the generated IR human-readable for debugging.
 //
-// Structure: Emit() drives two passes over the module:
-//   Pass 1 — EmitFunction() calls populate _funcs and set the "need" flags.
-//   Pass 2 — Emit() assembles the final .ll file: module header, globals, extern
-//             declarations (driven by _externals), then the buffered function bodies,
-//             and finally the fixed @main wrapper.
+// Universal tagged-pointer value system:
+//   Every Suru value at runtime is a `ptr` to a heap-allocated value whose FIRST i64
+//   field is always the type_tag (0=Bool 1=Int32 2=Int64 3=Float64 4=Struct 5=Array 6=String).
+//   Scalars (Bool/Int32/Int64/Float64) are wrapped in a %suru.Box = { i64 type_tag, i64 payload }.
+//   String/Array/Struct already carry type_tag at offset 0 in their own headers.
+//   This means `load i64, ptr %anyVal` always gives the type_tag, enabling suru_println/
+//   suru_array_clone_dyn / suru_array_drop_dyn to dispatch without compile-time metadata.
 public sealed partial class IRCodeGenerator
 {
 
     private readonly Module _module;
     private readonly string _sourceName;
 
-    // Accumulates LLVM IR for all function bodies during pass 1.
-    private readonly StringBuilder _funcs = new();
-
-    // Accumulates module-level helper functions (e.g. suru_find_field) that must
-    // appear before user functions in the final .ll output. These are emitted lazily
-    // the first time they are needed and must not be written to _funcs (which is
-    // open inside a function body at the point of first use).
+    private readonly StringBuilder _funcs   = new();
     private readonly StringBuilder _helpers = new();
-
-    // Monotonically increasing counter for SSA temporaries (%t0, %t1, …).
     private int _tmp;
 
-    // Every C runtime symbol used by emitted code is listed here.
-    // _externals is populated lazily; Emit() emits only what is needed.
-    private readonly Externals _externals = new();
-
-    // Suru runtime function declarations (suru_string.ll, suru_array.ll, suru_struct.ll).
-    // Populated lazily; Emit() emits only the declare stubs that are actually needed.
+    private readonly Externals _externals              = new();
     private readonly SuruRuntimeDeclarations _runtimeDecls = new();
+    private BoolStirngGlobals _boolStringGlobals       = new();
 
-    // Format-string and bool-string globals — emitted only if referenced.
-    private BoolStirngGlobals _boolStringGlobals = new();
-
-    // String literal globals: maps source-text → (LLVM global name, byte length with null).
-    // Deduplicates identical literals across the whole module.
     private readonly Dictionary<string, (string name, int byteLen)> _stringLiterals = new();
     private int _strCount;
 
-    // Per-function variable table: Suru name → (alloca ptr SSA name, SuruType).
-    // Reset at the start of each function so names don't leak across functions.
+    // Per-function variable table: name → (alloca ptr SSA name, SuruType). Every alloca is `ptr`.
     private Dictionary<string, (string ptr, SuruType type)> _vars = new();
 
-    // Whether the basic block currently being emitted still needs a terminator.
-    // False after `ret`; true after `exit` (which opens a dead block to absorb
-    // any statements the parser placed after the exit call).
     private bool _blockOpen;
+    private int  _matchCounter;
+    private int  _whileCounter;
 
-    // Monotonically increasing counter for unique match label names (match_arm_N_M,
-    // match_test_N_M, match_wildcard_N, match_merge_N). Incremented per match site.
-    private int _matchCounter;
-
-    // Monotonically increasing counter for unique while-loop label names
-    // (while_cond_N, while_body_N, while_after_N). Incremented per while site.
-    private int _whileCounter;
-
-    // Registered non-main function signatures: name → (params, Suru return type).
-    // Populated by a pre-pass before body emission so EmitValue can resolve
-    // user-defined call sites — including recursive self-calls — without needing
-    // LLVM forward declarations (IR definitions are visible module-wide regardless
-    // of textual order).
     private readonly Dictionary<string, (IReadOnlyList<FunctionParameter> Params, SuruType ReturnType)>
         _userFunctions = new();
 
-    // LLVM return type of the function currently being emitted (e.g. "i64" or "ptr").
-    // Set at the start of EmitFunction and used by the ReturnStatement emitter so that
-    // `ret <type>` matches the function's definition regardless of return type.
-    private string  _currentFnReturnLlvmType  = "i64";
+    // LLVM return type of the function currently being emitted.
+    // suru_main is always "i64"; all other non-void functions are "ptr".
+    private string   _currentFnReturnLlvmType = "i64";
     private SuruType _currentFnReturnSuruType = SuruType.Int64;
 
-    // Element type of each array variable: name → SuruType.
-    // Populated by LetStatement when the RHS produces an Array (literal or slice).
-    // Reset at the start of each function alongside _vars.
-    private Dictionary<string, SuruType> _arrayElementTypes = new();
-
-    // Pending element type emitted by EmitArrayLiteral / EmitArraySlice.
-    // Consumed by the LetStatement handler to record the element type without
-    // having to re-inspect the already-emitted expression.
-    private SuruType? _pendingArrayElemType;
-
-    // Module-level constant globals: Suru name → (LLVM global name "@name", SuruType).
-    // Populated in pass 0 by EmitGlobalConstants(); used by EmitLoad and PeekType as a
-    // fallback when the name is absent from the per-function _vars table.
+    // Module-level constant globals: name → (LLVM global name, SuruType).
     private readonly Dictionary<string, (string GlobalName, SuruType Type)> _globalVars = new();
+
+    // Tracks which Array variables are the argv Seq (built by @main from char**).
+    // argv access goes through EmitArgAt (GEP into char**), not suru_array_at.
+    private HashSet<string> _argvVars = new();
 
     private IRCodeGenerator(Module module, string sourceName)
     {
@@ -110,12 +69,9 @@ public sealed partial class IRCodeGenerator
 
     private string Emit()
     {
-        // @main always calls @malloc to build the argv Seq.
         _externals.AddMalloc();
 
-        // Pass 0: record module-level constants (Bool/Int64/Float64 literals declared
-        // with `let` at the top level). Populates _globalVars so EmitLoad and PeekType
-        // can resolve references to these constants from inside function bodies.
+        // Pass 0: record module-level scalar constants.
         foreach (var stmt in _module.Statements)
             if (stmt is LetStatement { Name: var cName, Value: var cVal } &&
                 cVal is BoolLiteral or IntLiteral or FloatLiteral)
@@ -130,30 +86,28 @@ public sealed partial class IRCodeGenerator
                 _globalVars[cName] = ($"@{cName}", cType);
             }
 
-        // Pre-pass: register all non-main function signatures before emitting any
-        // body. This lets EmitValue resolve user-defined call sites (including
-        // recursive self-calls) without requiring LLVM forward declarations —
-        // LLVM IR definitions are module-wide regardless of textual order.
+        // Pre-pass: register all non-main function signatures.
         foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration { Name: not "main" } fn)
                 _userFunctions[fn.Name] = (fn.Parameters, FnReturnSuruType(fn));
 
-        // Pass 1: emit all function bodies into _funcs (and set flags).
+        // Pass 1: emit all function bodies.
         foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration fn)
                 EmitFunction(fn);
 
-        // Pass 2: assemble the .ll file in the required declaration-before-use order.
+        // Pass 2: assemble the .ll file.
         var sb = new StringBuilder();
         sb.AppendLine($"; ModuleID = '{_sourceName}'");
         sb.AppendLine($"source_filename = \"{_sourceName}\"");
         sb.AppendLine();
-        sb.AppendLine("%suru.Seq   = type { i64, ptr }");        // String: { len, data ptr }
-        sb.AppendLine("%suru.Array = type { i64, i64, ptr }");   // Array:  { len, cap, data ptr }
-        sb.AppendLine("%suru.Field = type { ptr, i32, i64, ptr }");
+        sb.AppendLine("%suru.String = type { i64, i64, ptr }");             // { type_tag=6, len, data }
+        sb.AppendLine("%suru.Array  = type { i64, i64, i64, i64, ptr }");  // { type_tag=5, elem_tag, len, cap, data }
+        sb.AppendLine("%suru.Field  = type { i64, ptr, i32, i64, ptr }");  // { type_tag=4, name, field_tag, val, next }
+        sb.AppendLine("%suru.Box    = type { i64, i64 }");                  // { type_tag, payload }
         sb.AppendLine();
 
-        // Module-level constant globals (from pass 0)
+        // Module-level constant globals — stored as raw LLVM types; boxed on each load.
         foreach (var stmt in _module.Statements)
             if (stmt is LetStatement { Name: var gName, Value: var gVal } &&
                 _globalVars.TryGetValue(gName, out var gEntry))
@@ -169,10 +123,8 @@ public sealed partial class IRCodeGenerator
             }
         if (_globalVars.Count > 0) sb.AppendLine();
 
-        // Format / bool-string globals
         sb.Append(_boolStringGlobals.ToString());
 
-        // String literal globals — one per unique source-text value
         foreach (var (text, (name, byteLen)) in _stringLiterals)
         {
             var escaped = EscapeStringForIR(text);
@@ -180,18 +132,13 @@ public sealed partial class IRCodeGenerator
         }
         sb.AppendLine();
 
-        // External symbol declarations — only what the module actually uses
         sb.Append(_externals.ToString());
-
-        // Suru runtime declares (suru_string/array/struct.ll) — only what is used
         sb.Append(_runtimeDecls.ToString());
         sb.AppendLine();
 
         sb.Append(_helpers);
         sb.Append(_funcs);
 
-        // Only emit the C-ABI @main wrapper when this module defines `fn main`.
-        // Included modules compiled as standalone units have no main entry point.
         var hasMain = _module.Statements.OfType<FunctionDeclaration>().Any(f => f.Name == "main");
         if (hasMain) EmitMainWrapper(sb);
 
@@ -202,82 +149,62 @@ public sealed partial class IRCodeGenerator
 
     private void EmitFunction(FunctionDeclaration fn)
     {
-        // External functions (from include directives) live in their own compiled module.
-        // Emit a `declare` so this module can call them; skip the body entirely — it
-        // belongs to the other .o file and will be resolved by the linker.
         if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
         {
-            var retLlvmType = LlvmType(FnReturnSuruType(fn));
-            var paramTypes  = string.Join(", ", fn.Parameters.Select(
-                p => LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))));
+            // External functions (from include): all params and return are ptr.
+            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : "ptr";
+            var paramTypes  = string.Join(", ", fn.Parameters.Select(_ => "ptr"));
             _funcs.AppendLine($"declare {retLlvmType} @{originalName}({paramTypes})");
             return;
         }
 
-        // Reset per-function state before emitting the body.
         _blockOpen = true;
-        _vars = new();
-        _arrayElementTypes = new();
+        _vars      = new();
+        _argvVars  = new();
 
         if (fn.Name == "main")
         {
-            // The user-defined `main` is compiled as `suru_main` (internal) so the
-            // fixed C-ABI @main wrapper can call it with the already-built argv Seq.
-            // The argv Seq is passed as a raw `ptr` — no typed parameter needed here.
             _currentFnReturnLlvmType = "i64";
+            _currentFnReturnSuruType = SuruType.Int64;
             _funcs.AppendLine("define internal i64 @suru_main(ptr %args) {");
             _funcs.AppendLine("entry:");
-
-            // Register `args` so the body can load it via the standard EmitLoad path.
-            // The Seq was built by @main: { len=argc, data=argv (char**) }.
-            // args.at(i) GEPs into the char** data field — see EmitArgAt.
             _funcs.AppendLine("  %args.addr = alloca ptr");
             _funcs.AppendLine("  store ptr %args, ptr %args.addr");
             _vars["args"] = ("%args.addr", SuruType.Array);
+            _argvVars.Add("args");
         }
         else
         {
-            // Non-main functions: build the LLVM parameter list and return type from
-            // the declared Suru types. The LLVM return type must match the actual type
-            // (e.g. `ptr` for String-returning functions, `i64` for Int64).
-            //
-            // External linkage (no `internal`) is required: with the LLVM module model,
-            // an included module's functions are compiled into their own .o and called
-            // from other .o files. `internal` would give them static linkage, making them
-            // invisible to the linker across compilation units.
-            var retLlvmType = LlvmType(FnReturnSuruType(fn));
-            _currentFnReturnLlvmType  = retLlvmType;
-            _currentFnReturnSuruType  = FnReturnSuruType(fn);
-            var paramStr = string.Join(", ", fn.Parameters.Select(
-                p => $"{LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))} %{p.Name}"));
-            _funcs.AppendLine($"define {retLlvmType} @{fn.Name}({paramStr}) {{");
+            var retSuruType = FnReturnSuruType(fn);
+            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : "ptr";
+            _currentFnReturnLlvmType = retLlvmType;
+            _currentFnReturnSuruType = retSuruType;
+
+            // All parameters are `ptr` in the universal tagged-pointer system.
+            var paramStr = string.Join(", ", fn.Parameters.Select(p => $"ptr %{p.Name}"));
+            _funcs.AppendLine($"define ptr @{fn.Name}({paramStr}) {{");
             _funcs.AppendLine("entry:");
 
-            // Alloca + store each parameter so the body can read them via EmitLoad.
-            // This is the standard LLVM mem2reg pattern: every incoming value gets a
-            // stack slot in the entry block; the optimizer promotes these to SSA
-            // registers. It keeps EmitLoad uniform — all variables go through _vars.
             foreach (var p in fn.Parameters)
             {
                 var pType    = SuruTypeFromAnnotation(p.TypeAnnotation);
-                var llvmT    = LlvmType(pType);
                 var allocPtr = $"%{p.Name}.addr";
-                _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
-                _funcs.AppendLine($"  store {llvmT} %{p.Name}, ptr {allocPtr}");
+                _funcs.AppendLine($"  {allocPtr} = alloca ptr");
+                _funcs.AppendLine($"  store ptr %{p.Name}, ptr {allocPtr}");
                 _vars[p.Name] = (allocPtr, pType);
-                // Array<T> param: record element type from annotation so .at() knows the type.
-                if (pType == SuruType.Array && p.TypeAnnotation.TypeParam is not null)
-                    _arrayElementTypes[p.Name] = SuruTypeFromAnnotation(p.TypeAnnotation.TypeParam);
             }
         }
 
         foreach (var stmt in fn.Body)
             EmitStmt(stmt);
 
-        // If the function body fell off the end without a terminator, close the block.
-        // main gets an implicit `ret i64 0`; other non-void functions get `unreachable`.
         if (_blockOpen)
-            _funcs.AppendLine(fn.Name == "main" ? "  ret i64 0" : "  unreachable");
+        {
+            if (fn.Name == "main")
+                _funcs.AppendLine("  ret i64 0");
+            else
+                _funcs.AppendLine("  ret ptr null");
+        }
 
         _funcs.AppendLine("}");
         _funcs.AppendLine();
@@ -289,160 +216,115 @@ public sealed partial class IRCodeGenerator
     {
         switch (stmt)
         {
-            // ── match expr { ... } used as a statement ─────────────────────
-            // Each arm body is a side-effecting expression (typically printLn).
             case ExpressionStatement { Expression: MatchExpression matchStmt }:
                 EmitMatchAsStatement(matchStmt);
                 break;
 
-            // ── printLn(expr) ──────────────────────────────────────────────
+            // printLn(expr) — dispatch to suru_println which reads type_tag at offset 0.
             case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args: [var arg] } }:
-                var (val, type) = EmitValue(arg);
-                EmitPrintLn(val, type);
+                var (pval, _) = EmitValue(arg);
+                _runtimeDecls.AddSuruPrintln();
+                _funcs.AppendLine($"  call void @suru_println(ptr {pval})");
                 break;
 
-            // ── printError(expr) — writes to stderr via fprintf ────────────
+            // printError(expr) — dispatch to suru_printerror (writes to stderr).
             case ExpressionStatement { Expression: CallExpression { Name: "printError", Args: [var errArg] } }:
-                _boolStringGlobals.AddFmtS();
-                _externals.AddFprintf();
-                _externals.AddStderr();
                 var (errVal, _) = EmitValue(errArg);
-                var stderrFp = NextTmp();
-                // Strings are Seq structs — extract the data ptr before passing to fprintf.
-                var errDataPtr = EmitExtractStringData(errVal);
-                _funcs.AppendLine($"  {stderrFp} = load ptr, ptr @stderr");
-                _funcs.AppendLine($"  call i32 (ptr, ptr, ...) @fprintf(ptr {stderrFp}, ptr @.fmt_s, ptr {errDataPtr})");
+                _runtimeDecls.AddSuruPrintError();
+                _funcs.AppendLine($"  call void @suru_printerror(ptr {errVal})");
                 break;
 
-            // ── exit(code) — Int32 is passed directly; Int64 is truncated ──
+            // exit(code) — unbox the Int64/Int32 Box ptr, trunc to i32, call @exit.
             case ExpressionStatement { Expression: CallExpression { Name: "exit", Args: [var codeExpr] } }:
                 _externals.AddExit();
                 var (codeVal, codeType) = EmitValue(codeExpr);
-                // When the argument is already an i32 (from Int32.from), no conversion
-                // is needed — the value goes straight to @exit. An Int64 still needs
-                // a trunc to match @exit's i32 parameter.
                 string exitArg;
                 if (codeType == SuruType.Int32)
                 {
-                    exitArg = codeVal;
+                    exitArg = UnboxInt32(codeVal);
                 }
                 else
                 {
+                    var rawI64 = UnboxInt64(codeVal);
                     var code32 = NextTmp();
-                    _funcs.AppendLine($"  {code32} = trunc i64 {codeVal} to i32");
+                    _funcs.AppendLine($"  {code32} = trunc i64 {rawI64} to i32");
                     exitArg = code32;
                 }
                 _funcs.AppendLine($"  call void @exit(i32 {exitArg})");
-                // `exit` is `noreturn` but LLVM still needs a basic-block terminator.
-                // Open a dead block so any statements after exit are absorbed cleanly.
                 _funcs.AppendLine("  unreachable");
                 _funcs.AppendLine($"dead_{_tmp}:");
                 _blockOpen = true;
                 break;
 
-            // ── writeFile(path, content) — write a String to a file ───────
             case ExpressionStatement { Expression: CallExpression { Name: "writeFile", Args: [var wfPath, var wfContent] } }:
                 EmitWriteFile(wfPath, wfContent);
                 break;
 
-            // ── let name TypeAnnotation: expr — allocate stack slot ──────────
+            // let name TypeAnnotation: expr — every alloca is `ptr`.
             case LetStatement { Name: var name, Value: var valExpr, TypeAnnotation: var ann }:
-                // Annotation is authoritative: if the RHS is a field access whose type was
-                // not resolved by the semantic analyzer (struct from function boundary),
-                // set it now so EmitFieldAccess uses the right EmitFromI64 conversion.
                 if (valExpr is FieldAccessExpression { ResolvedType: null } faLet)
                     faLet.ResolvedType = SuruTypeFromAnnotation(ann);
                 var (letVal, letType) = EmitValue(valExpr);
-                // Int32 annotation coerces Int64 literals / expressions to i32.
+                // Int32 annotation coerces an Int64 Box to an Int32 Box.
                 if (ann.Name == "Int32" && letType == SuruType.Int64)
                 {
-                    if (valExpr is IntLiteral)
+                    if (valExpr is IntLiteral intLit)
                     {
+                        letVal  = BoxInt32(intLit.Value.ToString(CultureInfo.InvariantCulture));
                         letType = SuruType.Int32;
                     }
                     else
                     {
-                        var truncTmp = NextTmp();
-                        _funcs.AppendLine($"  {truncTmp} = trunc i64 {letVal} to i32");
-                        letVal  = truncTmp;
+                        var rawI = UnboxInt64(letVal);
+                        var i32t = NextTmp();
+                        _funcs.AppendLine($"  {i32t} = trunc i64 {rawI} to i32");
+                        letVal  = BoxInt32(i32t);
                         letType = SuruType.Int32;
                     }
                 }
-                var llvmT    = LlvmType(letType);
                 var allocPtr = $"%{name}.addr";
-                _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
-                _funcs.AppendLine($"  store {llvmT} {letVal}, ptr {allocPtr}");
+                _funcs.AppendLine($"  {allocPtr} = alloca ptr");
+                _funcs.AppendLine($"  store ptr {letVal}, ptr {allocPtr}");
                 _vars[name] = (allocPtr, letType);
-                // Array element type: annotation is authoritative (Array<T>).
-                // Fall back to the pending value emitted by EmitArrayLiteral/EmitArraySlice.
-                if (letType == SuruType.Array)
-                {
-                    if (ann.TypeParam is not null)
-                    {
-                        _arrayElementTypes[name] = SuruTypeFromAnnotation(ann.TypeParam);
-                        _pendingArrayElemType = null;
-                    }
-                    else if (_pendingArrayElemType.HasValue)
-                    {
-                        _arrayElementTypes[name] = _pendingArrayElemType.Value;
-                        _pendingArrayElemType = null;
-                    }
-                }
                 break;
 
-            // ── return expr ────────────────────────────────────────────────
-            // Use _currentFnReturnLlvmType so the `ret` instruction matches the
-            // function's declared return type (e.g. `ret ptr` for String-returning fns).
+            // return expr — use _currentFnReturnLlvmType so `ret` matches the definition.
             case ReturnStatement { Value: var retExpr }:
                 if (retExpr is FieldAccessExpression { ResolvedType: null } faRet)
                     faRet.ResolvedType = _currentFnReturnSuruType;
-                var retVal = retExpr is null ? "0" : EmitValue(retExpr).Item1;
+                var retVal = retExpr is null ? "null" : EmitValue(retExpr).Item1;
                 _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {retVal}");
                 _blockOpen = false;
                 break;
 
-            // ── while cond { body } ────────────────────────────────────────
-            // Emits three labelled basic blocks:
-            //   while_cond_N — evaluate the boolean condition and branch
-            //   while_body_N — execute the loop body; if still open, loop back to cond
-            //   while_after_N — execution continues here when the condition is false
-            //
-            // The unconditional `br label %while_cond_N` before the cond block closes the
-            // preceding block so LLVM sees no fall-through between non-contiguous blocks.
+            // while cond { body } — unbox condition to i1 before branching.
             case WhileStatement { Condition: var whileCond, Body: var whileBody }:
                 var wn = _whileCounter++;
                 _funcs.AppendLine($"  br label %while_cond_{wn}");
                 _funcs.AppendLine($"while_cond_{wn}:");
                 var (condVal2, _) = EmitValue(whileCond);
-                _funcs.AppendLine($"  br i1 {condVal2}, label %while_body_{wn}, label %while_after_{wn}");
+                var condI1 = UnboxBool(condVal2);
+                _funcs.AppendLine($"  br i1 {condI1}, label %while_body_{wn}, label %while_after_{wn}");
                 _funcs.AppendLine($"while_body_{wn}:");
                 foreach (var bodyStmt in whileBody)
                     EmitStmt(bodyStmt);
-                // Only loop back if the body didn't terminate with exit/return.
                 if (_blockOpen)
                     _funcs.AppendLine($"  br label %while_cond_{wn}");
                 _funcs.AppendLine($"while_after_{wn}:");
                 _blockOpen = true;
                 break;
 
-            // ── name: expr — overwrite an existing variable ────────────────
-            // AssignmentStatement stores a new value into the alloca that was created
-            // by the earlier LetStatement for this variable. The declared type (from _vars)
-            // is used as the store width so the alloca and store sizes always agree.
+            // name: expr — store new value (always ptr) into existing alloca.
             case AssignmentStatement { Name: var assignName, Value: var assignExpr }:
                 var (assignVal, _) = EmitValue(assignExpr);
-                var (assignPtr, assignType) = _vars[assignName];
-                _funcs.AppendLine($"  store {LlvmType(assignType)} {assignVal}, ptr {assignPtr}");
+                var (assignPtrAddr, _) = _vars[assignName];
+                _funcs.AppendLine($"  store ptr {assignVal}, ptr {assignPtrAddr}");
                 break;
 
-            // ── receiver.field: value — update a single struct field in-place ──
             case FieldAssignmentStatement fieldAssign:
                 EmitFieldAssignment(fieldAssign);
                 break;
 
-            // ── generic side-effecting expression (e.g. arr.set, arr.add) ───
-            // Evaluated for its side effects; the result value is discarded.
-            // Must come last — all named built-ins are matched by the cases above.
             case ExpressionStatement { Expression: var sideEffectExpr }:
                 EmitValue(sideEffectExpr);
                 break;
@@ -454,118 +336,92 @@ public sealed partial class IRCodeGenerator
 
     // ─── Expression emission ─────────────────────────────────────────────────
 
-    // Returns an SSA value string and its Suru type.
-    // Literals produce inline constants (no instructions emitted).
-    // Variable references and method calls emit instructions to _funcs.
     private (string val, SuruType type) EmitValue(Expression expr) => expr switch
     {
-        BoolLiteral b             => (b.Value ? "1" : "0", SuruType.Bool),
-        // IntLiteral is always Int64 at the AST level; use Int32.from(...) to narrow.
-        IntLiteral i              => (i.Value.ToString(CultureInfo.InvariantCulture), SuruType.Int64),
-        // LLVM requires double constants in hex IEEE-754 form when the value
-        // cannot be represented exactly in decimal — using the hex form always
-        // is safe and avoids rounding surprises.
-        FloatLiteral f            => ($"0x{BitConverter.DoubleToInt64Bits(f.Value):X16}", SuruType.Float64),
+        // Scalar literals are boxed immediately — every value is a `ptr`.
+        BoolLiteral b              => (BoxBool(b.Value ? "1" : "0"), SuruType.Bool),
+        IntLiteral i               => (BoxInt64(i.Value.ToString(CultureInfo.InvariantCulture)), SuruType.Int64),
+        FloatLiteral f             => (BoxFloat64($"0x{BitConverter.DoubleToInt64Bits(f.Value):X16}"), SuruType.Float64),
         StringLiteralExpression s  => EmitStringLiteralValue(s.Value),
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
-        StructLiteralExpression structLit => EmitStructLiteral(structLit),
+        StructLiteralExpression sl => EmitStructLiteral(sl),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
-        // clone(s) for String — new Seq header + new heap-allocated char buffer.
-        CallExpression { Name: "clone", Args: [var cloneStrArg] }
-            when PeekType(cloneStrArg) == SuruType.String
-            => EmitCloneStringDispatch(cloneStrArg),
-        // drop(s) for String — free char buffer, then free Seq header.
-        CallExpression { Name: "drop", Args: [var dropStrArg] }
-            when PeekType(dropStrArg) == SuruType.String
-            => EmitDropStringDispatch(dropStrArg),
-        // clone(x) for Array — deep copy; recurses into String/Struct elements.
-        CallExpression { Name: "clone", Args: [var cloneArrArg] }
-            when PeekType(cloneArrArg) == SuruType.Array
-            => EmitCloneArrayDispatch(cloneArrArg),
-        // drop(x) for Array — frees each element (if pointer type) then the buffer and header.
-        CallExpression { Name: "drop", Args: [var dropArrArg] }
-            when PeekType(dropArrArg) == SuruType.Array
-            => EmitDropArrayDispatch(dropArrArg),
-        // clone(x) for Struct — deep copy via linked-list traversal.
-        CallExpression { Name: "clone", Args: [var cloneArg] }
-            when PeekType(cloneArg) == SuruType.Struct
-            => EmitCloneStructDispatch(cloneArg),
-        // drop(x) for Struct — free all field nodes; result is discarded by caller.
-        CallExpression { Name: "drop", Args: [var dropArg] }
-            when PeekType(dropArg) == SuruType.Struct
-            => EmitDropStructDispatch(dropArg),
-        VariableReferenceExpression v => EmitLoad(v.Name),
-        MethodCallExpression m    => EmitMethodCall(m),
-        // `not x` — boolean NOT. Emits `xor i1 %val, true`.
+        CallExpression { Name: "clone", Args: [var cloneArg] } => EmitCloneDyn(cloneArg),
+        CallExpression { Name: "drop",  Args: [var dropArg]  } => EmitDropDyn(dropArg),
+        VariableReferenceExpression v  => EmitLoad(v.Name),
+        MethodCallExpression m         => EmitMethodCall(m),
         UnaryExpression { Op: UnaryOp.Not } u => EmitBoolNot(u.Operand),
-        // Boolean binary operators: `x and y` → `and i1`, `x or y` → `or i1`.
-        // Both operands are always Bool (enforced by the semantic analyzer).
-        BinaryExpression bin      => EmitBinaryExpr(bin),
-        // Match used as an expression: all arms produce a value collected via alloca.
-        MatchExpression match     => EmitMatchAsExpression(match),
-        // Built-in readFile in expression position (e.g. `let content: readFile(path)`).
+        BinaryExpression bin           => EmitBinaryExpr(bin),
+        MatchExpression match          => EmitMatchAsExpression(match),
         CallExpression { Name: "readFile", Args: [var pathArg] } => EmitReadFile(pathArg),
-        // User-defined function call in expression position (e.g., as an argument to
-        // a method call like `fibonacci(n.take(1)).add(...)`). Built-in calls like
-        // printLn/exit are handled at the statement level in EmitStmt and never appear
-        // here as expressions.
         CallExpression c when _userFunctions.ContainsKey(c.Name) => EmitUserFunctionCall(c),
         _ => throw new NotSupportedException($"IR codegen: unsupported expression {expr.GetType().Name}"),
     };
 
-    // EmitStringLiteralValue is defined in IRStringCodeGenerator.cs (the string partial class).
-    // It interns the raw bytes as a [N x i8] global and wraps them in a heap-allocated
-    // %suru.Seq header so the value is a uniform `ptr` regardless of how it is used.
+    // Dynamic clone/drop: read type_tag at offset 0 and dispatch at runtime.
+    private (string val, SuruType type) EmitCloneDyn(Expression arg)
+    {
+        var (val, _) = EmitValue(arg);
+        _runtimeDecls.AddCloneDyn();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_clone_dyn(ptr {val})");
+        return (tmp, SuruType.Struct);
+    }
 
-    // Emit `xor i1 %val, true` for `not x`. Result type is always Bool.
+    private (string val, SuruType type) EmitDropDyn(Expression arg)
+    {
+        var (val, _) = EmitValue(arg);
+        _runtimeDecls.AddDropDyn();
+        _funcs.AppendLine($"  call void @suru_drop_dyn(ptr {val})");
+        return ("null", SuruType.Bool);
+    }
+
+    // Bool NOT: unbox → xor i1 → rebox.
     private (string val, SuruType type) EmitBoolNot(Expression operand)
     {
         var (v, _) = EmitValue(operand);
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = xor i1 {v}, true");
-        return (tmp, SuruType.Bool);
+        var raw    = UnboxBool(v);
+        var tmp    = NextTmp();
+        _funcs.AppendLine($"  {tmp} = xor i1 {raw}, true");
+        return (BoxBool(tmp), SuruType.Bool);
     }
 
-    // Emit `and i1` or `or i1` for `x and y` / `x or y`. Result type is always Bool.
+    // and/or: unbox both to i1 → op → rebox.
     private (string val, SuruType type) EmitBinaryExpr(BinaryExpression bin)
     {
         var (lv, _) = EmitValue(bin.Left);
         var (rv, _) = EmitValue(bin.Right);
-        var op = bin.Op == BinaryOp.And ? "and" : "or";
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = {op} i1 {lv}, {rv}");
-        return (tmp, SuruType.Bool);
+        var rawL = UnboxBool(lv);
+        var rawR = UnboxBool(rv);
+        var op   = bin.Op == BinaryOp.And ? "and" : "or";
+        var tmp  = NextTmp();
+        _funcs.AppendLine($"  {tmp} = {op} i1 {rawL}, {rawR}");
+        return (BoxBool(tmp), SuruType.Bool);
     }
 
-    // Emit a `load` from the alloca recorded in _vars, or from a module-level global.
+    // Load from a local alloca (always `ptr`) or from a raw global constant (box after load).
     private (string val, SuruType type) EmitLoad(string name)
     {
         if (!_vars.TryGetValue(name, out var entry))
         {
-            // Fall back to module-level constant globals (e.g. TOK_TRUE).
+            // Module-level constant: stored as raw LLVM type (i1/i64/double), box on load.
             var (gName, gType) = _globalVars[name];
-            var gTmp = NextTmp();
-            _funcs.AppendLine($"  {gTmp} = load {LlvmType(gType)}, ptr {gName}");
-            return (gTmp, gType);
+            var rawTmp = NextTmp();
+            _funcs.AppendLine($"  {rawTmp} = load {RawLlvmType(gType)}, ptr {gName}");
+            var boxed = BoxValue(rawTmp, gType);
+            return (boxed, gType);
         }
         var (ptr, type) = entry;
         var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = load {LlvmType(type)}, ptr {ptr}");
+        _funcs.AppendLine($"  {tmp} = load ptr, ptr {ptr}");
         return (tmp, type);
     }
 
-    // Dispatch method calls. Checks in priority order:
-    //   1. Namespace calls — receiver is a namespace alias (from an `include` directive);
-    //      dispatch as a user-defined function call with the qualified name "ns.method".
-    //   2. Static type-name receivers (Int32.from, Int64.from) — must come before
-    //      instance dispatch to avoid evaluating the receiver as a variable.
-    //   3. Instance methods on the evaluated receiver value.
+    // ─── Method call dispatch ────────────────────────────────────────────────
+
     private (string val, SuruType type) EmitMethodCall(MethodCallExpression m)
     {
         // Namespace calls: `lib.fn(args)` where `lib` is an include alias.
-        // The receiver is not a variable — it's a namespace name stored in _module.Namespaces.
-        // Build the qualified name ("lib.fn") and delegate to EmitUserFunctionCall, which
-        // has already registered "lib.fn" in _userFunctions via the pre-pass.
         if (m.Receiver is VariableReferenceExpression { Name: var nsName } &&
             _module.Namespaces.Contains(nsName))
         {
@@ -573,63 +429,51 @@ public sealed partial class IRCodeGenerator
             return EmitUserFunctionCall(new CallExpression(qualifiedName, m.Args));
         }
 
-        // Static methods: receiver is a type name, not a variable.
+        // Static methods on type names.
         if (m.Receiver is VariableReferenceExpression { Name: "Int32" })
             return EmitInt32StaticMethod(m.MethodName, m.Args);
         if (m.Receiver is VariableReferenceExpression { Name: "Int64" })
             return EmitInt64StaticMethod(m.MethodName, m.Args);
 
-        // Instance methods — evaluate the receiver first to obtain its value and type.
         var (recvVal, recvType) = EmitValue(m.Receiver);
 
         // Array instance methods.
-        // Two cases:
-        //   Regular Suru arrays — data is i64[], element type tracked in _arrayElementTypes.
-        //   argv Seq (args in suru_main) — data is char**; element access via EmitArgAt.
-        // The argv Seq is never registered in _arrayElementTypes, so the absence of
-        // metadata is the signal to fall through to EmitArgAt.
+        // argv Seq (args.at(i)) is detected via _argvVars and routes to EmitArgAt.
         if (recvType == SuruType.Array)
         {
-            // Try to find the element type. Prefer the variable-name lookup (most common),
-            // fall back to _pendingArrayElemType (set by EmitArrayLiteral/EmitArraySlice),
-            // then fall back to Int64. This handles array receivers that are not simple
-            // variable references (e.g. field-access chains or function calls).
-            SuruType? resolvedElemType = null;
-            if (m.Receiver is VariableReferenceExpression { Name: var arrName }
-                && _arrayElementTypes.TryGetValue(arrName, out var et))
-                resolvedElemType = et;
-            else if (_pendingArrayElemType.HasValue)
-            {
-                resolvedElemType = _pendingArrayElemType.Value;
-                _pendingArrayElemType = null;
-            }
-
-            if (resolvedElemType.HasValue)
-            {
-                var elemType = resolvedElemType.Value;
+            var isArgv = m.Receiver is VariableReferenceExpression { Name: var an } && _argvVars.Contains(an);
+            if (isArgv)
                 return m.MethodName switch
                 {
-                    "len"   => EmitArrayLen(recvVal),
-                    "at"    => EmitArrayAt(recvVal, elemType, m.Args[0]),
-                    "set"   => EmitArraySet(recvVal, elemType, m.Args[0], m.Args[1]),
-                    "add"   => EmitArrayAdd(recvVal, elemType, m.Args[0]),
-                    "slice" => EmitArraySlice(recvVal, m.Receiver, elemType, m.Args[0], m.Args[1]),
-                    _ => throw new NotSupportedException($"IR codegen: unsupported Array method '{m.MethodName}'"),
+                    "at"  => EmitArgAt(recvVal, m.Args[0]),
+                    "len" => EmitArrayLen(recvVal),
+                    _ => throw new NotSupportedException($"IR codegen: unsupported argv method '{m.MethodName}'"),
                 };
-            }
 
-            // argv Seq: data is char** (not i64[]); only .at(i) is supported.
             return m.MethodName switch
             {
-                "at"  => EmitArgAt(recvVal, m.Args[0]),
-                "len" => EmitArrayLen(recvVal),
-                _ => throw new NotSupportedException($"IR codegen: unsupported argv/untyped Array method '{m.MethodName}'"),
+                "len"   => EmitArrayLen(recvVal),
+                "at"    => EmitArrayAt(recvVal, m.Args[0]),
+                "set"   => EmitArraySet(recvVal, m.Args[0], m.Args[1]),
+                "add"   => EmitArrayAdd(recvVal, m.Args[0]),
+                "slice" => EmitArraySlice(recvVal, m.Args[0], m.Args[1]),
+                _ => throw new NotSupportedException($"IR codegen: unsupported Array method '{m.MethodName}'"),
             };
         }
 
-        // String instance methods — all delegated to IRStringCodeGenerator.cs.
-        // These are checked before the numeric dispatch so string `equals` uses strcmp
-        // rather than the pointer-equality icmp that the numeric path would emit.
+        // Struct-typed values with unknown runtime kind: dispatch on type_tag.
+        // .len() uses suru_dyn_len which branches on tag=5 (Array) vs tag=6 (String).
+        // .at/.set are unambiguously array operations (no string analogue at this level).
+        if (recvType == SuruType.Struct && m.MethodName is "at" or "len" or "set")
+            return m.MethodName switch
+            {
+                "len" => EmitDynLen(recvVal),
+                "at"  => EmitArrayAt(recvVal, m.Args[0]),
+                "set" => EmitArraySet(recvVal, m.Args[0], m.Args[1]),
+                _     => throw new NotSupportedException($"IR codegen: unreachable"),
+            };
+
+        // String instance methods.
         if (recvType == SuruType.String)
             return m.MethodName switch
             {
@@ -642,17 +486,23 @@ public sealed partial class IRCodeGenerator
                 _ => throw new NotSupportedException($"IR codegen: unsupported String method '{m.MethodName}'"),
             };
 
-        // toString() on numeric types — converts the value to a String Seq.
-        // Checked before the general switch because it returns String, not the receiver type.
+        // toString() on Int64 Box: unbox → call suru_int64_to_string.
         if (m.MethodName == "toString" && recvType == SuruType.Int64)
-            return EmitInt64ToString(recvVal);
+        {
+            var rawI64 = UnboxInt64(recvVal);
+            return EmitInt64ToString(rawI64);
+        }
 
-        // invert() is zero-argument (unary negation) — dispatch before the binary-op path.
+        // toString() on unknown Struct-typed value: assume Box(Int64) at runtime.
+        if (m.MethodName == "toString" && recvType == SuruType.Struct)
+        {
+            var rawI64 = UnboxInt64(recvVal);
+            return EmitInt64ToString(rawI64);
+        }
+
         if (m.MethodName == "invert")
             return EmitInvert(recvVal, recvType);
 
-        // compare() returns -1/0/1 (Int64) — dispatched before the generic comparison path
-        // because it returns Int64, not Bool, and has its own emit shape.
         if (m.MethodName == "compare")
             return EmitCompare(recvVal, recvType, m.Args[0]);
 
@@ -662,7 +512,6 @@ public sealed partial class IRCodeGenerator
             "take"     => EmitBinOp("sub",  "fsub", recvVal, recvType, m.Args[0]),
             "multiply" => EmitBinOp("mul",  "fmul", recvVal, recvType, m.Args[0]),
             "split"    => EmitBinOp("sdiv", "fdiv", recvVal, recvType, m.Args[0]),
-            // Comparison methods: icmp for integers, fcmp for floats — all return i1 (Bool).
             "lt"     => EmitCmp("icmp slt", "fcmp olt", recvVal, recvType, m.Args[0]),
             "gt"     => EmitCmp("icmp sgt", "fcmp ogt", recvVal, recvType, m.Args[0]),
             "lte"    => EmitCmp("icmp sle", "fcmp ole", recvVal, recvType, m.Args[0]),
@@ -672,34 +521,14 @@ public sealed partial class IRCodeGenerator
         };
     }
 
-    // Handle Int32 static methods.
     private (string val, SuruType type) EmitInt32StaticMethod(
-        string methodName, IReadOnlyList<Expression> args)
+        string methodName, IReadOnlyList<Expression> args) => methodName switch
     {
-        return methodName switch
-        {
-            "from" => EmitInt32From(args[0]),
-            _ => throw new NotSupportedException($"IR codegen: unknown Int32 static method '{methodName}'"),
-        };
-    }
+        "from" => EmitInt32From(args[0]),
+        _ => throw new NotSupportedException($"IR codegen: unknown Int32 static method '{methodName}'"),
+    };
 
-    // Emit a call to a user-defined function. The parameter LLVM types are read from
-    // the pre-registered _userFunctions signature so the call instruction uses the
-    // same types as the callee's definition. The Suru-level return type is passed
-    // back to the caller so subsequent operations (e.g., .add() on the result)
-    // choose the correct LLVM opcode.
-    //
-    // All user-defined functions are compiled as `i64`-returning LLVM functions;
-    // the Suru type is a logical overlay that lives only in _userFunctions.
-    //
-    // Recursive self-calls work without forward declarations because LLVM IR
-    // definitions are visible module-wide regardless of textual order.
-    //
-    // For local functions, `call.Name` IS the LLVM symbol (e.g. `fibonacci`).
-    // For external (imported) functions, `call.Name` is the Suru qualified name
-    // (e.g. `lib.double`) but the LLVM symbol is the original unqualified name from
-    // the included module's IR (e.g. `@double`). ExternalFunctions maps the qualified
-    // Suru name back to the original so we emit `call @double`, not `call @lib.double`.
+    // User-defined function call: all args are `ptr`, return is `ptr`.
     private (string val, SuruType type) EmitUserFunctionCall(CallExpression call)
     {
         var (paramDefs, returnType) = _userFunctions[call.Name];
@@ -707,80 +536,79 @@ public sealed partial class IRCodeGenerator
         for (int i = 0; i < call.Args.Count; i++)
         {
             var (argVal, _) = EmitValue(call.Args[i]);
-            var llvmT       = LlvmType(SuruTypeFromAnnotation(paramDefs[i].TypeAnnotation));
-            argParts.Add($"{llvmT} {argVal}");
+            argParts.Add($"ptr {argVal}");
         }
-        // Use the original symbol name for external functions; local name for everything else.
-        var llvmName    = _module.ExternalFunctions.TryGetValue(call.Name, out var orig) ? orig : call.Name;
-        var callTmp     = NextTmp();
-        var retLlvmType = LlvmType(returnType);
-        _funcs.AppendLine($"  {callTmp} = call {retLlvmType} @{llvmName}({string.Join(", ", argParts)})");
+        var llvmName = _module.ExternalFunctions.TryGetValue(call.Name, out var orig) ? orig : call.Name;
+        var callTmp  = NextTmp();
+        _funcs.AppendLine($"  {callTmp} = call ptr @{llvmName}({string.Join(", ", argParts)})");
         return (callTmp, returnType);
     }
 
-    // Int32.from(expr): convert an Int64 expression to i32.
-    // Constant-folds when the argument is an IntLiteral — emits an i32 constant
-    // directly with no trunc instruction. For non-literal arguments a `trunc` is emitted.
+    // Int32.from(expr): unbox Int64 → trunc → rebox Int32.
     private (string val, SuruType type) EmitInt32From(Expression arg)
     {
         if (arg is IntLiteral lit)
-            return (lit.Value.ToString(CultureInfo.InvariantCulture), SuruType.Int32);
+            return (BoxInt32(lit.Value.ToString(CultureInfo.InvariantCulture)), SuruType.Int32);
 
         var (val, _) = EmitValue(arg);
-        var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = trunc i64 {val} to i32");
-        return (tmp, SuruType.Int32);
+        var rawI64   = UnboxInt64(val);
+        var i32tmp   = NextTmp();
+        _funcs.AppendLine($"  {i32tmp} = trunc i64 {rawI64} to i32");
+        return (BoxInt32(i32tmp), SuruType.Int32);
     }
 
-    // Emit a binary arithmetic instruction. Uses the int opcode for Int32/Int64,
-    // the float opcode for Float64; result type equals the receiver type.
+    // Arithmetic: unbox → op → rebox same type.
+    // When ltype is Struct (unknown field type assumed to be Int64), treat as Int64.
     private (string val, SuruType type) EmitBinOp(
         string intOp, string floatOp,
         string lval, SuruType ltype, Expression argExpr)
     {
+        var effectiveType = ltype == SuruType.Struct ? SuruType.Int64 : ltype;
         var (rval, _) = EmitValue(argExpr);
-        var tmp = NextTmp();
-        var op  = ltype == SuruType.Float64 ? floatOp : intOp;
-        _funcs.AppendLine($"  {tmp} = {op} {LlvmType(ltype)} {lval}, {rval}");
-        return (tmp, ltype);
+        var rawL   = UnboxScalar(lval, ltype);
+        var rawR   = UnboxScalar(rval, ltype);
+        var op     = effectiveType == SuruType.Float64 ? floatOp : intOp;
+        var result = NextTmp();
+        _funcs.AppendLine($"  {result} = {op} {RawLlvmType(effectiveType)} {rawL}, {rawR}");
+        return (BoxValue(result, effectiveType), effectiveType);
     }
 
-    // Emit unary negation for .invert().
-    // Integer: `sub <T> 0, val` (LLVM has no unary neg instruction).
-    // Float:   `fneg double val`.
+    // Unary negation: unbox → negate → rebox.
+    // When recvType is Struct (unknown field type assumed to be Int64), treat as Int64.
     private (string val, SuruType type) EmitInvert(string recvVal, SuruType recvType)
     {
+        var effectiveType = recvType == SuruType.Struct ? SuruType.Int64 : recvType;
+        var raw = UnboxScalar(recvVal, recvType);
         var tmp = NextTmp();
-        if (recvType == SuruType.Float64)
-            _funcs.AppendLine($"  {tmp} = fneg double {recvVal}");
+        if (effectiveType == SuruType.Float64)
+            _funcs.AppendLine($"  {tmp} = fneg double {raw}");
         else
-            _funcs.AppendLine($"  {tmp} = sub {LlvmType(recvType)} 0, {recvVal}");
-        return (tmp, recvType);
+            _funcs.AppendLine($"  {tmp} = sub {RawLlvmType(effectiveType)} 0, {raw}");
+        return (BoxValue(tmp, effectiveType), effectiveType);
     }
 
-    // Emit a comparison instruction. Uses the integer opcode for Bool/Int32/Int64,
-    // the float opcode for Float64. The result is always i1 → SuruType.Bool.
-    // LLVM ordered float predicates (olt/ogt/ole/oge/oeq) return false when either
-    // operand is NaN, which matches the expected semantics for Suru numeric comparisons.
+    // Comparison: unbox → icmp/fcmp → rebox Bool.
     private (string val, SuruType type) EmitCmp(
         string intOp, string floatOp,
         string lval, SuruType ltype, Expression argExpr)
     {
         var (rval, _) = EmitValue(argExpr);
-        var tmp = NextTmp();
-        var op  = ltype == SuruType.Float64 ? floatOp : intOp;
-        _funcs.AppendLine($"  {tmp} = {op} {LlvmType(ltype)} {lval}, {rval}");
-        return (tmp, SuruType.Bool);
+        var rawL   = UnboxScalar(lval, ltype);
+        var rawR   = UnboxScalar(rval, ltype);
+        var op     = ltype == SuruType.Float64 ? floatOp : intOp;
+        var cmpTmp = NextTmp();
+        _funcs.AppendLine($"  {cmpTmp} = {op} {RawLlvmType(ltype)} {rawL}, {rawR}");
+        return (BoxBool(cmpTmp), SuruType.Bool);
     }
 
-    // Emit .compare(other): returns -1 if receiver < other, 0 if equal, 1 if greater.
-    // Uses a subtract-of-zero-extensions trick: zext(gt) - zext(lt) gives 1, 0, or -1.
-    // This avoids branches and matches the CodeGenerator's LLVMSharp approach exactly.
+    // compare(): returns Box(Int64) with -1/0/1.
     private (string val, SuruType type) EmitCompare(
         string lval, SuruType ltype, Expression argExpr)
     {
         var (rval, _) = EmitValue(argExpr);
-        var llvmT = LlvmType(ltype);
+        var rawL   = UnboxScalar(lval, ltype);
+        var rawR   = UnboxScalar(rval, ltype);
+        var rawT   = RawLlvmType(ltype);
         var gtTmp  = NextTmp();
         var ltTmp  = NextTmp();
         var gtExt  = NextTmp();
@@ -788,25 +616,22 @@ public sealed partial class IRCodeGenerator
         var result = NextTmp();
         if (ltype == SuruType.Float64)
         {
-            _funcs.AppendLine($"  {gtTmp} = fcmp ogt {llvmT} {lval}, {rval}");
-            _funcs.AppendLine($"  {ltTmp} = fcmp olt {llvmT} {lval}, {rval}");
+            _funcs.AppendLine($"  {gtTmp} = fcmp ogt {rawT} {rawL}, {rawR}");
+            _funcs.AppendLine($"  {ltTmp} = fcmp olt {rawT} {rawL}, {rawR}");
         }
         else
         {
-            _funcs.AppendLine($"  {gtTmp} = icmp sgt {llvmT} {lval}, {rval}");
-            _funcs.AppendLine($"  {ltTmp} = icmp slt {llvmT} {lval}, {rval}");
+            _funcs.AppendLine($"  {gtTmp} = icmp sgt {rawT} {rawL}, {rawR}");
+            _funcs.AppendLine($"  {ltTmp} = icmp slt {rawT} {rawL}, {rawR}");
         }
-        // Zero-extend the i1 flags to i64 so we can subtract them.
         _funcs.AppendLine($"  {gtExt} = zext i1 {gtTmp} to i64");
         _funcs.AppendLine($"  {ltExt} = zext i1 {ltTmp} to i64");
         _funcs.AppendLine($"  {result} = sub i64 {gtExt}, {ltExt}");
-        return (result, SuruType.Int64);
+        return (BoxInt64(result), SuruType.Int64);
     }
 
     // ─── Match emission ───────────────────────────────────────────────────────
 
-    // Emit a match used as a statement: each arm body is a side-effecting call
-    // (typically printLn). All arms branch to the shared merge label afterward.
     private void EmitMatchAsStatement(MatchExpression match)
     {
         var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
@@ -828,15 +653,14 @@ public sealed partial class IRCodeGenerator
         _funcs.AppendLine($"match_merge_{n}:");
     }
 
-    // A match arm body used as a statement is expected to be a call expression
-    // (printLn / printError). Any other expression is evaluated for its side effects.
     private void EmitMatchArmBodyAsStatement(Expression body)
     {
         switch (body)
         {
             case CallExpression { Name: "printLn", Args: [var arg] }:
-                var (v, t) = EmitValue(arg);
-                EmitPrintLn(v, t);
+                var (v, _) = EmitValue(arg);
+                _runtimeDecls.AddSuruPrintln();
+                _funcs.AppendLine($"  call void @suru_println(ptr {v})");
                 break;
             default:
                 EmitValue(body);
@@ -844,55 +668,38 @@ public sealed partial class IRCodeGenerator
         }
     }
 
-    // Emit a match used as an expression: all arms produce a value.
-    // Rather than phi nodes (which are harder to emit in text form), we allocate
-    // a result slot upfront, store from each arm, then load after the merge label.
-    // This is semantically equivalent and avoids the phi-placement bookkeeping.
-    //
-    // The result alloca MUST be emitted before EmitMatchTestChain — the test chain
-    // ends with a conditional branch, and any alloca emitted after that branch would
-    // be inside an arm block that does not dominate the other arms. Using an SSA
-    // value outside its dominator is undefined behaviour; clang silently miscompiles
-    // it into a segfault when the non-allocating arm is taken. We use PeekType to
-    // determine the result type without emitting any instructions, so the alloca can
-    // be placed in the block that precedes all branches.
+    // Match-as-expression: alloca ptr (all values are ptr), store/load ptr.
     private (string val, SuruType type) EmitMatchAsExpression(MatchExpression match)
     {
-        // Determine result type before any IR is emitted so we can place the alloca
-        // in the current (pre-branch) block — which dominates all arm blocks.
-        var firstArm = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
+        var firstArm   = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
         var resultType = PeekType(firstArm.Body);
-        var resultPtr  = $"%match_result_{_matchCounter}";  // _matchCounter not yet incremented
-        _funcs.AppendLine($"  {resultPtr} = alloca {LlvmType(resultType)}");
+        var resultPtr  = $"%match_result_{_matchCounter}";
+        _funcs.AppendLine($"  {resultPtr} = alloca ptr");
 
         var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
 
         for (int i = 0; i < patternArms.Count; i++)
         {
             _funcs.AppendLine($"match_arm_{n}_{i}:");
-            var (armVal, armType) = EmitValue(patternArms[i].Body);
-            _funcs.AppendLine($"  store {LlvmType(armType)} {armVal}, ptr {resultPtr}");
+            var (armVal, _) = EmitValue(patternArms[i].Body);
+            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
 
         if (wildcardArm != null)
         {
             _funcs.AppendLine($"match_wildcard_{n}:");
-            var (armVal, armType) = EmitValue(wildcardArm.Body);
-            _funcs.AppendLine($"  store {LlvmType(armType)} {armVal}, ptr {resultPtr}");
+            var (armVal, _) = EmitValue(wildcardArm.Body);
+            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
 
         _funcs.AppendLine($"match_merge_{n}:");
         var loadTmp = NextTmp();
-        _funcs.AppendLine($"  {loadTmp} = load {LlvmType(resultType)}, ptr {resultPtr}");
+        _funcs.AppendLine($"  {loadTmp} = load ptr, ptr {resultPtr}");
         return (loadTmp, resultType);
     }
 
-    // Return the SuruType of an expression without emitting any IR instructions.
-    // Used by EmitMatchAsExpression to determine the result alloca type before
-    // the test chain branches — the alloca must be in a dominating block.
-    // Mirrors the type rules in EmitValue and EmitMethodCall exactly.
     private SuruType PeekType(Expression expr) => expr switch
     {
         BoolLiteral                   => SuruType.Bool,
@@ -902,12 +709,11 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression        => SuruType.Array,
         StructLiteralExpression       => SuruType.Struct,
         FieldAccessExpression fa      => fa.ResolvedType ?? SuruType.Struct,
-        CallExpression { Name: "clone", Args: [var cloneArgPeek] } => PeekType(cloneArgPeek),
-        UnaryExpression                   => SuruType.Bool,
-        BinaryExpression                  => SuruType.Bool,
+        CallExpression { Name: "clone", Args: [var carg] } => PeekType(carg),
+        UnaryExpression               => SuruType.Bool,
+        BinaryExpression              => SuruType.Bool,
         VariableReferenceExpression v =>
-            _vars.TryGetValue(v.Name, out var vEntry) ? vEntry.type
-            : _globalVars[v.Name].Type,
+            _vars.TryGetValue(v.Name, out var ve) ? ve.type : _globalVars[v.Name].Type,
         MatchExpression match         => PeekMatchType(match),
         MethodCallExpression m        => PeekMethodType(m),
         CallExpression { Name: "readFile" } => SuruType.String,
@@ -916,72 +722,48 @@ public sealed partial class IRCodeGenerator
         _ => throw new NotSupportedException($"IR codegen: cannot peek type of {expr.GetType().Name}"),
     };
 
-    // Peek the result type of a match expression — the type of its first arm body,
-    // since all arms must agree (enforced by the semantic analyser).
     private SuruType PeekMatchType(MatchExpression match)
     {
         var first = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
         return PeekType(first.Body);
     }
 
-    // Peek the return type of a method call without emitting IR.
     private SuruType PeekMethodType(MethodCallExpression m)
     {
-        // Namespace calls: receiver is an include alias — return type from _userFunctions.
         if (m.Receiver is VariableReferenceExpression { Name: var nsName2 } &&
             _module.Namespaces.Contains(nsName2))
             return _userFunctions[$"{nsName2}.{m.MethodName}"].ReturnType;
 
-        // Array methods: look up element type from _arrayElementTypes when available.
-        // For the argv Seq (not in _arrayElementTypes), .at() returns String.
-        if (m.Receiver is VariableReferenceExpression rv2 &&
-            _vars.TryGetValue(rv2.Name, out var rv2Entry) && rv2Entry.type == SuruType.Array)
-        {
-            if (_arrayElementTypes.TryGetValue(rv2.Name, out var aet))
-                return m.MethodName switch
-                {
-                    "len"   => SuruType.Int64,
-                    "at"    => aet,
-                    "set"   => SuruType.Bool,
-                    "add"   => SuruType.Bool,
-                    "slice" => SuruType.Array,
-                    _ => throw new NotSupportedException($"IR codegen: cannot peek type for Array method '{m.MethodName}'"),
-                };
-            return m.MethodName == "at" ? SuruType.String  // argv path
-                : throw new NotSupportedException($"IR codegen: cannot peek type for argv method '{m.MethodName}'");
-        }
-
-        // Static methods: receiver is a type name (Int32, Int64, …), not a variable.
-        // Int32.from → Int32; Int64.from → Int64; etc.
         if (m.Receiver is VariableReferenceExpression { Name: var typeName }
             && typeName is "Int32" or "Int64" or "Float64" or "Bool" or "String")
             return SuruTypeFromAnnotation(new TypeAnnotation(typeName));
 
+        // Array methods: no element type tracking; at() returns Struct (generic ptr).
+        if (m.Receiver is VariableReferenceExpression rv2 &&
+            _vars.TryGetValue(rv2.Name, out var rv2Entry) && rv2Entry.type == SuruType.Array)
+        {
+            return m.MethodName switch
+            {
+                "len"   => SuruType.Int64,
+                "at"    => SuruType.Struct,   // element type unknown at compile time
+                "set"   => SuruType.Bool,
+                "add"   => SuruType.Bool,
+                "slice" => SuruType.Array,
+                _ => throw new NotSupportedException($"IR codegen: cannot peek type for Array.{m.MethodName}"),
+            };
+        }
+
         return m.MethodName switch
         {
-            // Arithmetic — result is same type as receiver.
             "add" or "take" or "multiply" or "split" or "invert" => PeekType(m.Receiver),
-            // Comparisons — always Bool (i1). String `equals` also returns Bool even though
-            // its implementation uses strcmp; PeekMethodType doesn't see the receiver type.
             "lt" or "gt" or "lte" or "gte" or "equals"           => SuruType.Bool,
-            // Numeric utilities — always Int64.
             "compare" or "ord" or "len"                           => SuruType.Int64,
-            // String-producing methods (instance and static).
             "toString" or "at" or "append" or "slice"             => SuruType.String,
             _ => throw new NotSupportedException($"IR codegen: cannot peek type for method '{m.MethodName}'"),
         };
     }
 
-    // Build the test-chain: evaluate the match condition, separate pattern arms from
-    // the wildcard arm, then emit a conditional branch for each pattern arm in order.
-    // Each miss falls through to the next test label; the final miss goes to the
-    // wildcard block (if present) or directly to the merge label.
-    //
-    // The caller receives the sorted arm lists and the unique counter `n` so it can
-    // emit the arm bodies under the correct labels (match_arm_N_M / match_wildcard_N).
-    //
-    // String conditions use @strcmp (returns i32); numeric/bool conditions use icmp/fcmp.
-    // IRCodeGenerator strings are raw null-terminated pointers — no Seq header to unpack.
+    // Match test chain: unbox scalar condition and patterns before icmp/fcmp.
     private (List<MatchArm> PatternArms, MatchArm? WildcardArm, int N) EmitMatchTestChain(
         MatchExpression match)
     {
@@ -990,9 +772,14 @@ public sealed partial class IRCodeGenerator
 
         var patternArms = match.Arms.Where(a => a.Pattern != null).ToList();
         var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
+        var missLabel   = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
 
-        // The final "else" target: wildcard block if there is one, otherwise merge.
-        var missLabel = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
+        // Unbox scalar condition once (String stays as ptr for strcmp dispatch).
+        string rawCond;
+        if (condType == SuruType.String)
+            rawCond = condVal;   // stays as String ptr
+        else
+            rawCond = UnboxScalar(condVal, condType);
 
         for (int i = 0; i < patternArms.Count; i++)
         {
@@ -1000,11 +787,9 @@ public sealed partial class IRCodeGenerator
 
             if (condType == SuruType.String)
             {
-                // String pattern matching: extract the data pointer from each Seq, then
-                // call strcmp. Both the condition value and the pattern literal are Seq ptrs.
                 _externals.AddStrcmp();
                 var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-                var condData    = EmitExtractStringData(condVal);
+                var condData    = EmitExtractStringData(rawCond);
                 var patternData = EmitExtractStringData(patternVal);
                 var strcmpTmp   = NextTmp();
                 _funcs.AppendLine($"  {strcmpTmp} = call i32 @strcmp(ptr {condData}, ptr {patternData})");
@@ -1013,101 +798,48 @@ public sealed partial class IRCodeGenerator
             else if (condType == SuruType.Float64)
             {
                 var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-                _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {condVal}, {patternVal}");
+                var rawPat = UnboxScalar(patternVal, condType);
+                _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {rawCond}, {rawPat}");
             }
             else
             {
-                // Bool and Int64 both use icmp eq with their natural LLVM types.
                 var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-                _funcs.AppendLine($"  {cmpTmp} = icmp eq {LlvmType(condType)} {condVal}, {patternVal}");
+                var rawPat = UnboxScalar(patternVal, condType);
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq {RawLlvmType(condType)} {rawCond}, {rawPat}");
             }
 
-            // If this is not the last pattern arm, the "miss" goes to an intermediate
-            // test label so we can chain the next comparison. Otherwise it goes to the
-            // wildcard or merge label.
             var nextLabel = (i + 1 < patternArms.Count)
                 ? $"match_test_{n}_{i + 1}"
                 : missLabel;
 
             _funcs.AppendLine($"  br i1 {cmpTmp}, label %match_arm_{n}_{i}, label %{nextLabel}");
 
-            // Open the next intermediate test block (if needed).
             if (i + 1 < patternArms.Count)
                 _funcs.AppendLine($"match_test_{n}_{i + 1}:");
         }
 
-        // Edge case: no pattern arms at all — jump straight to wildcard/merge.
         if (patternArms.Count == 0)
             _funcs.AppendLine($"  br label %{missLabel}");
 
         return (patternArms, wildcardArm, n);
     }
 
-    // ─── printLn dispatch ────────────────────────────────────────────────────
-
-    private void EmitPrintLn(string val, SuruType type)
-    {
-        switch (type)
-        {
-            case SuruType.Bool:
-                // Bool is an i1; select between the two string constants, then printf %s.
-                _boolStringGlobals.AddFmtS();
-                _boolStringGlobals.AddStrTrue();
-                _boolStringGlobals.AddStrFalse();
-                var sel = NextTmp();
-                _funcs.AppendLine($"  {sel} = select i1 {val}, ptr @.str_true, ptr @.str_false");
-                _funcs.AppendLine($"  call i32 (ptr, ...) @printf(ptr @.fmt_s, ptr {sel})");
-                break;
-
-            case SuruType.Int32:
-                // i32 matches printf's `%d` directly — no extension needed.
-                _boolStringGlobals.AddFmtInt32();
-                _funcs.AppendLine($"  call i32 (ptr, ...) @printf(ptr @.fmt_int32, i32 {val})");
-                break;
-
-            case SuruType.Int64:
-                _boolStringGlobals.AddFmtInt();
-                _funcs.AppendLine($"  call i32 (ptr, ...) @printf(ptr @.fmt_int, i64 {val})");
-                break;
-
-            case SuruType.Float64:
-                _boolStringGlobals.AddFmtFloat();
-                _funcs.AppendLine($"  call i32 (ptr, ...) @printf(ptr @.fmt_float, double {val})");
-                break;
-
-            case SuruType.String:
-                // Strings are %suru.Seq structs — extract the data pointer before printf.
-                _boolStringGlobals.AddFmtS();
-                var strDataPtr = EmitExtractStringData(val);
-                _funcs.AppendLine($"  call i32 (ptr, ...) @printf(ptr @.fmt_s, ptr {strDataPtr})");
-                break;
-
-            default:
-                throw new NotSupportedException($"IR codegen: printLn unsupported type {type}");
-        }
-
-        _externals.AddPrintf();
-    }
-
     // ─── @main wrapper ───────────────────────────────────────────────────────
 
-    // Emits a C-ABI `int main(int argc, char** argv)` that builds a %suru.Seq
-    // wrapping argv, then calls the user's `suru_main` and returns its exit code.
-    //
-    // `suru_main` is `internal` so the linker does not export it as a public C symbol —
-    // only this @main wrapper is the true entry point. The argv array is not converted
-    // element-by-element: the raw `char**` pointer is stored directly in the Seq's data
-    // field and argc is stored as len. Individual elements are accessed at runtime via the
-    // `args.at(i)` built-in, which GEPs into the char** and wraps each char* in a Seq.
+    // Emits a C-ABI `int main(int argc, char** argv)` that builds a %suru.String
+    // wrapping argv (type_tag=6 since it uses the String header layout), then calls
+    // suru_main and returns its exit code.
     private void EmitMainWrapper(StringBuilder sb)
     {
         sb.AppendLine("define i32 @main(i32 %argc, ptr %argv) {");
         sb.AppendLine("entry:");
-        sb.AppendLine("  %seq      = call ptr @malloc(i64 16)");
-        sb.AppendLine("  %len_gep  = getelementptr %suru.Seq, ptr %seq, i32 0, i32 0");
+        sb.AppendLine("  %seq      = call ptr @malloc(i64 24)");
+        sb.AppendLine("  %tag_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 0");
+        sb.AppendLine("  store i64 6, ptr %tag_gep");
+        sb.AppendLine("  %len_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 1");
         sb.AppendLine("  %argc64   = sext i32 %argc to i64");
         sb.AppendLine("  store i64 %argc64, ptr %len_gep");
-        sb.AppendLine("  %data_gep = getelementptr %suru.Seq, ptr %seq, i32 0, i32 1");
+        sb.AppendLine("  %data_gep = getelementptr %suru.String, ptr %seq, i32 0, i32 2");
         sb.AppendLine("  store ptr %argv, ptr %data_gep");
         sb.AppendLine("  %suru_ret = call i64 @suru_main(ptr %seq)");
         sb.AppendLine("  %ret32    = trunc i64 %suru_ret to i32");
@@ -1115,107 +847,15 @@ public sealed partial class IRCodeGenerator
         sb.AppendLine("}");
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────────
-
-    // Map a TypeAnnotation to the corresponding SuruType enum value.
-    // The generic type parameter (e.g. the Struct in Array<Struct>) is handled
-    // separately by the callers that need the element type.
-    private static SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
-    {
-        "Bool"    => SuruType.Bool,
-        "Int32"   => SuruType.Int32,
-        "Int64"   => SuruType.Int64,
-        "Float64" => SuruType.Float64,
-        "String"  => SuruType.String,
-        "Array"   => SuruType.Array,
-        "Struct"  => SuruType.Struct,
-        _ => throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
-    };
-
-    // Map a Suru type to its LLVM IR type keyword.
-    // Both String and Array map to `ptr` — they share the same %suru.Seq = { i64 len, ptr data }
-    // header layout. The distinction is only in how the data pointer is interpreted at runtime.
-    private static string LlvmType(SuruType type) => type switch
-    {
-        SuruType.Bool    => "i1",
-        SuruType.Int32   => "i32",
-        SuruType.Int64   => "i64",
-        SuruType.Float64 => "double",
-        SuruType.String  => "ptr",
-        SuruType.Array   => "ptr",
-        SuruType.Struct  => "ptr",
-        _ => throw new NotSupportedException($"IR: no LLVM type for {type}"),
-    };
-
-    // Convert a Suru source string literal to LLVM IR `c"..."` byte-escape form.
-    // Suru escape sequences (\n \t \\ \") are mapped to their two-digit hex form
-    // (\0A \09 \\ \22) as required by the LLVM IR string syntax.
-    private static string EscapeStringForIR(string source)
-    {
-        var sb = new StringBuilder();
-        for (int i = 0; i < source.Length; i++)
-        {
-            char c = source[i];
-            if (c == '\\' && i + 1 < source.Length)
-            {
-                switch (source[i + 1])
-                {
-                    case 'n':  sb.Append("\\0A"); i++; break;
-                    case 't':  sb.Append("\\09"); i++; break;
-                    case '\\': sb.Append("\\\\"); i++; break;
-                    case '"':  sb.Append("\\22"); i++; break;
-                    default:   sb.Append(c); break;
-                }
-            }
-            else if (c >= 32 && c < 127 && c != '"' && c != '\\')
-            {
-                sb.Append(c);
-            }
-            else
-            {
-                sb.Append($"\\{(int)c:X2}");
-            }
-        }
-        return sb.ToString();
-    }
-
-    // Count the number of actual bytes that a source string will occupy (excluding
-    // null terminator). Suru two-character escape sequences count as one byte each.
-    private static int CountStringBytes(string source)
-    {
-        int count = 0;
-        for (int i = 0; i < source.Length; i++)
-        {
-            if (source[i] == '\\' && i + 1 < source.Length)
-            {
-                char next = source[i + 1];
-                if (next is 'n' or 't' or '\\' or '"') i++;
-            }
-            count++;
-        }
-        return count;
-    }
-
     // ─── Array.at for argv ───────────────────────────────────────────────────
 
     // args.at(i) — extract the i-th element from the argv Seq built by @main.
-    //
-    // The argv Seq's data field is a raw char** (the C argv pointer), not an i64 array.
-    // Element access therefore GEPs into a ptr array rather than an i64 array:
-    //
-    //   %data  = load ptr from Seq.data           → char**
-    //   %slot  = getelementptr ptr, ptr %data, i64 %i   → pointer to char*
-    //   %cstr  = load ptr, ptr %slot              → char* for argv[i]
-    //   %len   = call i64 @strlen(ptr %cstr)      → character count
-    //   return EmitCreateStringSeq(%cstr, %len)   → String Seq wrapping the C string
-    //
-    // The resulting String Seq holds the original char* without copying — the data
-    // lifetime is tied to the process argv, which outlives suru_main.
-    // This is NOT a general Array.at implementation; it works only for the argv Seq.
+    // The index is a Box(Int64) ptr; unbox before GEP.
     private (string val, SuruType type) EmitArgAt(string seqVal, Expression idxExpr)
     {
-        var data    = EmitExtractStringData(seqVal);   // char**
-        var (idx, _) = EmitValue(idxExpr);
+        var data     = EmitExtractStringData(seqVal);   // char**
+        var (idxBox, _) = EmitValue(idxExpr);
+        var idx      = UnboxInt64(idxBox);              // unbox Box(Int64) → i64
 
         var slotPtr = NextTmp();
         var cstrPtr = NextTmp();
@@ -1231,25 +871,6 @@ public sealed partial class IRCodeGenerator
 
     // ─── File I/O built-ins ──────────────────────────────────────────────────
 
-    // readFile(path String) → String
-    //
-    // Opens the file at `path`, reads its full content into a heap buffer, and wraps
-    // the buffer in a %suru.Seq header. Uses the fseek(SEEK_END) + ftell pattern to
-    // determine file size without a second pass.
-    //
-    // Steps:
-    //   fopen(path_data, "r")             → file ptr
-    //   fseek(file, 0, SEEK_END=2)        → move to end
-    //   size = ftell(file)                → byte count
-    //   rewind(file)                      → reset to start
-    //   buf = malloc(size + 1)            → exact-size buffer (+1 for null terminator)
-    //   fread(buf, 1, size, file)         → fill buffer
-    //   buf[size] = '\0'                  → null-terminate
-    //   fclose(file)
-    //   EmitCreateStringSeq(buf, size)    → return String Seq
-    //
-    // The null terminator is needed so the buffer is a valid C string when passed to
-    // fopen in a subsequent readFile call or to strcmp in string comparisons.
     private (string val, SuruType type) EmitReadFile(Expression pathArg)
     {
         var (pathSeq, _) = EmitValue(pathArg);
@@ -1278,7 +899,6 @@ public sealed partial class IRCodeGenerator
         _externals.AddFread();
         _funcs.AppendLine($"  call i64 @fread(ptr {buf}, i64 1, i64 {size}, ptr {file})");
 
-        // Null-terminate so the buffer is a valid C string.
         var nullSlot = NextTmp();
         _funcs.AppendLine($"  {nullSlot} = getelementptr i8, ptr {buf}, i64 {size}");
         _funcs.AppendLine($"  store i8 0, ptr {nullSlot}");
@@ -1289,10 +909,6 @@ public sealed partial class IRCodeGenerator
         return EmitCreateStringSeq(buf, size);
     }
 
-    // writeFile(path String, content String) — write content to a file (statement only).
-    //
-    // Opens the file at `path` in write mode (truncates existing content), writes the
-    // full content buffer in one fwrite call, then closes the file.
     private void EmitWriteFile(Expression pathArg, Expression contentArg)
     {
         var (pathSeq, _)    = EmitValue(pathArg);
@@ -1313,11 +929,148 @@ public sealed partial class IRCodeGenerator
         _funcs.AppendLine($"  call i32 @fclose(ptr {file})");
     }
 
-    // Return the Suru return type of a function declaration.
-    // `void` and absent return types are treated as Int64 — void functions are called
-    // for side effects and any notional return value is discarded.
+    // ─── Type utilities ───────────────────────────────────────────────────────
+
+    private static SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
+    {
+        "Bool"    => SuruType.Bool,
+        "Int32"   => SuruType.Int32,
+        "Int64"   => SuruType.Int64,
+        "Float64" => SuruType.Float64,
+        "String"  => SuruType.String,
+        "Array"   => SuruType.Array,
+        "Struct"  => SuruType.Struct,
+        _ => throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
+    };
+
+    // Every Suru value in user .ll is a `ptr` (Box for scalars, direct heap ptr for rest).
+    private static string LlvmType(SuruType _) => "ptr";
+
+    // Raw LLVM type for scalar operations (box/unbox calls, global constant loads, arithmetic).
+    private static string RawLlvmType(SuruType type) => type switch
+    {
+        SuruType.Bool    => "i1",
+        SuruType.Int32   => "i32",
+        SuruType.Int64   => "i64",
+        SuruType.Float64 => "double",
+        SuruType.Struct  => "i64",   // unknown struct fields unbox as i64 (see UnboxScalar)
+        _                => "ptr",
+    };
+
     private static SuruType FnReturnSuruType(FunctionDeclaration fn)
         => fn.ReturnType.Name is "void" ? SuruType.Int64 : SuruTypeFromAnnotation(fn.ReturnType);
+
+    // ─── Box / Unbox helpers ──────────────────────────────────────────────────
+
+    private string BoxBool(string i1val)
+    {
+        _runtimeDecls.AddBoxBool();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_box_bool(i1 {i1val})");
+        return tmp;
+    }
+
+    private string BoxInt32(string i32val)
+    {
+        _runtimeDecls.AddBoxInt32();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_box_int32(i32 {i32val})");
+        return tmp;
+    }
+
+    private string BoxInt64(string i64val)
+    {
+        _runtimeDecls.AddBoxInt64();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_box_int64(i64 {i64val})");
+        return tmp;
+    }
+
+    private string BoxFloat64(string doubleval)
+    {
+        _runtimeDecls.AddBoxFloat64();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_box_float64(double {doubleval})");
+        return tmp;
+    }
+
+    private string BoxValue(string rawVal, SuruType type) => type switch
+    {
+        SuruType.Bool    => BoxBool(rawVal),
+        SuruType.Int32   => BoxInt32(rawVal),
+        SuruType.Int64   => BoxInt64(rawVal),
+        SuruType.Float64 => BoxFloat64(rawVal),
+        _                => rawVal,   // String/Array/Struct already carry type_tag
+    };
+
+    private string UnboxBool(string ptrval)
+    {
+        _runtimeDecls.AddUnboxBool();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i1 @suru_unbox_bool(ptr {ptrval})");
+        return tmp;
+    }
+
+    private string UnboxInt32(string ptrval)
+    {
+        _runtimeDecls.AddUnboxInt32();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i32 @suru_unbox_int32(ptr {ptrval})");
+        return tmp;
+    }
+
+    private string UnboxInt64(string ptrval)
+    {
+        _runtimeDecls.AddUnboxInt64();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call i64 @suru_unbox_int64(ptr {ptrval})");
+        return tmp;
+    }
+
+    private string UnboxFloat64(string ptrval)
+    {
+        _runtimeDecls.AddUnboxFloat64();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call double @suru_unbox_float64(ptr {ptrval})");
+        return tmp;
+    }
+
+    // Unbox a scalar value to its raw LLVM type for arithmetic/comparison.
+    // For Struct-typed values (dynamic unknown type), assume Int64 at runtime.
+    private string UnboxScalar(string ptrval, SuruType type) => type switch
+    {
+        SuruType.Bool    => UnboxBool(ptrval),
+        SuruType.Int32   => UnboxInt32(ptrval),
+        SuruType.Int64   => UnboxInt64(ptrval),
+        SuruType.Float64 => UnboxFloat64(ptrval),
+        SuruType.Struct  => UnboxInt64(ptrval),   // assume Box(Int64) at runtime
+        _                => throw new NotSupportedException($"IR codegen: cannot unbox {type}"),
+    };
+
+    // ─── String utilities ─────────────────────────────────────────────────────
+
+    // Escape a C# string (post-Suru-lexer, fully unescaped) for use as an LLVM IR
+    // string constant.  LLVM's only escape form is \XX (hex), so we hex-escape every
+    // non-printable byte and the two special chars (`"` and `\`).  The Suru lexer has
+    // already converted escape sequences (e.g. `\n` in source → 0x0A in memory), so we
+    // must NOT re-interpret `\n` here — a backslash followed by `n` is two literal bytes.
+    private static string EscapeStringForIR(string source)
+    {
+        var sb = new StringBuilder();
+        foreach (char c in source)
+        {
+            if (c >= 32 && c < 127 && c != '"' && c != '\\')
+                sb.Append(c);
+            else
+                sb.Append($"\\{(int)c:X2}");
+        }
+        return sb.ToString();
+    }
+
+    // Each C# char maps to one byte (Suru strings are ASCII).
+    // The Suru lexer has already unescaped all escape sequences, so there are no
+    // multi-char escape tokens here — each char in the C# string is a real byte.
+    private static int CountStringBytes(string source) => source.Length;
 
     private string NextTmp() => $"%t{_tmp++}";
 }

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12 — Suru Parser written in Suru
+
+Complete recursive-descent parser for the Suru language, written in Suru itself (`tests/fixtures/suru-parser/`). Produces an AST that cross-validates exactly against the C# `AstPrinter` output.
+
+- **`suru-parser.suru`** (881 lines) — full recursive-descent parser + AST pretty-printer: token stream management (`currentToken`, `advance`, `consume`, `consumeIf`), expression hierarchy (`parseOrExpr` → `parseAndExpr` → `parseNotExpr` → `parsePostfixChain` → `parsePrimary`), all statement forms (`include`, `fn`, `while`, `return`, `let`, assignment, field-assignment, expression-statement), type annotation parsing (simple and generic `Array<T>`), match arm patterns (literals, negative numbers, wildcard, variable references), and a `printModule` pretty-printer that mirrors `AstPrinter.cs` output exactly.
+- **`main.suru`** — entry point: lexes a `.suru` source file via the Stage-9 suru-lexer, runs the Suru parser, and prints the AST.
+- **`IRSuruParserTests.cs`** — three integration tests: (1) cross-validates on the `print` fixture; (2) cross-validates on `suru-lexer.suru` (the Stage-12 milestone: a substantial real-world Suru file); (3) validates the parser can parse its own source (>500 lines of output, well-formed).
+- All 44 tests pass.
+
+### Universal Tagged-Pointer Value System
+
+Complete overhaul of the runtime value representation. Every Suru value at the LLVM level is now a `ptr` to a heap-allocated object whose **first i64 field is always the type_tag**. This eliminates compile-time metadata dictionaries that were silently producing wrong results when type information was lost across function boundaries.
+
+**Unified type_tag enum** (matches C# `SuruType` ordinals): 0=Bool 1=Int32 2=Int64 3=Float64 4=Struct 5=Array 6=String
+
+- **New `%suru.Box`** (`suru_box.ll`, new) — 16-byte scalar heap wrapper: `{ i64 type_tag, i64 payload }`. Every `Bool`, `Int32`, `Int64`, `Float64` value is heap-allocated in a Box at the point it is produced (literal, arithmetic result, comparison result, etc.) and unboxed only at the point it is consumed (arithmetic operand, condition branch, syscall arg). Functions: `suru_box_bool/int32/int64/float64`, `suru_unbox_bool/int32/int64/float64`, `suru_box_clone`, `suru_println` (dispatches to stdout by type_tag), `suru_printerror` (same, to stderr).
+
+- **`%suru.String`** (`suru_string.ll`) — type_tag field added at offset 0 (TYPE_STRING changed 1→6). Layout: `{ i64 type_tag=6, i64 len, ptr data }` (24 bytes).
+
+- **`%suru.Array`** (`suru_array.ll`) — type_tag field added at offset 0 (TYPE_ARRAY=5). Layout: `{ i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }` (40 bytes). `elem_tag` now stores the full SuruType ordinal (not the old 0=scalar/1=ptr binary). `suru_array_at` returns `ptr` (inttoptr of raw i64); `suru_array_add/set` take `ptr` (ptrtoint to store). New `suru_array_clone_dyn` / `suru_array_drop_dyn` read each element's type_tag at runtime and dispatch clone/drop — no compile-time element-type metadata needed. Removed: `suru_array_clone/drop_scalar/string/struct`.
+
+- **`%suru.Field`** (`suru_struct.ll`) — TYPE_STRUCT changed 0→4; field_tag now uses the unified enum. Layout: `{ i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }` (40 bytes). `suru_struct_clone` propagates type_tag from source; `suru_struct_drop` unchanged.
+
+- **`IRCodeGenerator.cs`** — all LLVM values are `ptr`; all allocas are `alloca ptr`. Box helpers (`BoxBool`, `BoxInt32`, `BoxInt64`, `BoxFloat64`, `BoxValue`, `UnboxBool`…`UnboxFloat64`, `UnboxScalar`) replace the old type-dispatch emit paths. Literals box on creation; arithmetic unboxes operands, computes, reboxes result. `printLn`/`printError` emit a single `call void @suru_println/printerror(ptr %val)` — runtime dispatches. Removed `_arrayElementTypes`, `_pendingArrayElemType`; added `_argvVars HashSet<string>` to identify the argv Seq. `EmitMainWrapper` stores `type_tag=6` (String) in the argv Seq header.
+
+- **`IRArrayCodeGenerator.cs`** — GEP indices updated (len@2, cap@3, data@4). `EmitArrayLiteral` mallocs 40 bytes, stores type_tag=5 and full-ordinal elem_tag. `EmitArrayLen` boxes result. `EmitArrayAt` unboxes idx, returns ptr directly. `EmitArraySet`/`EmitArrayAdd` take ptr values. `EmitCloneArrayDispatch`/`EmitDropArrayDispatch` call `suru_array_clone_dyn`/`suru_array_drop_dyn`. `EmitToI64`/`EmitFromI64` simplified to `ptrtoint`/`inttoptr` (all values are ptr).
+
+- **`IRStructCodeGenerator.cs`** — stores `type_tag=4` (not 0) at field 0. field_tag uses `(int)fieldType` (unified enum). Field values stored/loaded as ptrtoint/inttoptr.
+
+- **`IRStringCodeGenerator.cs`** — `EmitStringLen`, `EmitStringOrd`, `EmitInt64FromString` box their raw i64 results. `EmitStringAt` / `EmitStringSlice` unbox index args. `EmitStringEquals` boxes the i1 result.
+
+- **`SemanticAnalyzer.cs`** — removed 6 array metadata fields (`_arrayElementTypes`, `_functionArrayParamMeta`, `_functionReturnArrayMeta`, `_arrayStructElementTypes`, `_functionReturnArrayStructSymbols`, `_functionArrayStructParamMeta`) and `PropagateArrayMeta`. `_structSymbols` and `_functionReturnStructSymbols` retained (needed for `fa.ResolvedType` which drives unboxing type in `EmitFieldAccess`).
+
+- **`SuruRuntimeDeclarations.cs`** — updated declares: `suru_array_at` returns `ptr`, `suru_array_add/set` take `ptr`. Added box/unbox/print declares. Removed static clone/drop variant declares.
+
+- **`Compiler.cs`** — four runtime modules linked: `suru_box`, `suru_string`, `suru_array`, `suru_struct`.
+
 ### Match on Variables and Constants
 
 Match arm patterns now accept any identifier in addition to literals. The named variable (local or module-level constant) is loaded at runtime and compared against the match condition using the same `icmp`/`fcmp`/`strcmp` logic as literal patterns — no codegen changes were needed.

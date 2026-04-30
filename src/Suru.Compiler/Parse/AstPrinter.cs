@@ -98,7 +98,7 @@ public static class AstPrinter
         switch (expr)
         {
             case BoolLiteral b:
-                sb.AppendLine($"{indent}BoolLiteral [{b.Value}]");
+                sb.AppendLine($"{indent}BoolLiteral [{b.Value.ToString().ToLower()}]");
                 break;
 
             case IntLiteral i:
@@ -147,7 +147,7 @@ public static class AstPrinter
                 sb.AppendLine($"{indent}StructLiteral [{st.Fields.Count} fields]");
                 foreach (var (name, typeAnn, val) in st.Fields)
                 {
-                    sb.AppendLine($"{indent}  Field [{name} {typeAnn.Name}]");
+                    sb.AppendLine($"{indent}  Field [{name} {typeAnn}]");
                     PrintExpression(sb, indent + "    ", val);
                 }
                 break;

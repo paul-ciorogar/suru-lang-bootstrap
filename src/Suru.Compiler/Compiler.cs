@@ -77,10 +77,6 @@ public class Compiler
         if (parseErrors.Count > 0)
             return CompilationResult<string>.Fail(parseErrors);
 
-        var semanticErrors = SemanticAnalyzer.Analyze(module!);
-        if (semanticErrors.Count > 0)
-            return CompilationResult<string>.Fail(semanticErrors);
-
         var ir = IRCodeGenerator.Generate(module!, Path.GetFileName(_sourcePath));
         return CompilationResult<string>.Ok(ir);
     }
@@ -113,10 +109,6 @@ public class Compiler
         var (module, parseErrors) = ParseAndResolve();
         if (parseErrors.Count > 0)
             return CompilationResult.Fail(parseErrors);
-
-        var semanticErrors = SemanticAnalyzer.Analyze(module!);
-        if (semanticErrors.Count > 0)
-            return CompilationResult.Fail(semanticErrors);
 
         var objectPaths = new List<string>();
 
@@ -154,9 +146,10 @@ public class Compiler
             objectPaths.Add(inclObjPath);
         }
 
-        // Step 3: generate and compile the three Suru runtime modules.
+        // Step 3: generate and compile the four Suru runtime modules.
         var runtimes = new[]
         {
+            ("suru_box",    SuruRuntime.GenerateBoxRuntime()),
             ("suru_string", SuruRuntime.GenerateStringRuntime()),
             ("suru_array",  SuruRuntime.GenerateArrayRuntime()),
             ("suru_struct", SuruRuntime.GenerateStructRuntime()),
@@ -242,8 +235,11 @@ public class Compiler
     //
     // visitedPaths guards against circular includes; it accumulates across the recursive
     // calls so a file can't be included twice anywhere in the include graph.
-    private static Module ResolveIncludes(Module module, string baseDir, HashSet<string> visitedPaths)
+    private static Module ResolveIncludes(
+        Module module, string baseDir, HashSet<string> visitedPaths, HashSet<string>? beingResolved = null)
     {
+        beingResolved ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var directives = module.Statements.OfType<IncludeDirective>().ToList();
         if (directives.Count == 0) return module;
 
@@ -272,16 +268,28 @@ public class Compiler
             var fullPath = Path.GetFullPath(Path.Combine(baseDir, directive.Path));
             if (!File.Exists(fullPath))
                 throw new Exception($"Include file not found: {fullPath}");
-            if (visitedPaths.Contains(fullPath))
+
+            // True circular include: currently on the resolution call stack.
+            if (beingResolved.Contains(fullPath))
                 throw new Exception($"Circular include detected: {fullPath}");
 
+            // Diamond include: already fully resolved by a sibling branch.
+            // Register the namespace alias but skip re-merging the content.
+            if (visitedPaths.Contains(fullPath))
+            {
+                namespaces.Add(directive.NamespaceName);
+                continue;
+            }
+
+            beingResolved.Add(fullPath);
             visitedPaths.Add(fullPath);
 
             var source         = File.ReadAllText(fullPath);
             var includedModule = Parser.Parse(new Tokens(new Lexer(source), fullPath));
 
             var includedDir = Path.GetDirectoryName(fullPath)!;
-            includedModule  = ResolveIncludes(includedModule, includedDir, visitedPaths);
+            includedModule  = ResolveIncludes(includedModule, includedDir, visitedPaths, beingResolved);
+            beingResolved.Remove(fullPath);
 
             // Collect this file and its transitive includes as separate compilation units.
             if (seenPaths.Add(fullPath))

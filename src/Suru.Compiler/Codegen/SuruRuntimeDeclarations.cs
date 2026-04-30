@@ -4,7 +4,7 @@ namespace Suru.Compiler.Codegen;
 
 // Tracks Suru runtime function declarations needed by an emitted user module.
 //
-// The runtime functions live in suru_string.ll, suru_array.ll, and suru_struct.ll —
+// The runtime functions live in suru_box.ll, suru_string.ll, suru_array.ll, and suru_struct.ll —
 // each compiled to its own .o and linked with every Suru program. The user's .ll
 // only needs `declare` stubs so the call instructions typecheck; the linker resolves
 // the symbols at link time.
@@ -16,6 +16,12 @@ internal sealed class SuruRuntimeDeclarations
 {
     private readonly StringBuilder _sb = new();
 
+    // ─── Box runtime (suru_box.ll) ────────────────────────────────────────────
+    private bool _boxBool, _boxInt32, _boxInt64, _boxFloat64;
+    private bool _unboxBool, _unboxInt32, _unboxInt64, _unboxFloat64;
+    private bool _boxClone;
+    private bool _suruPrintln, _suruPrintError;
+
     // ─── String runtime (suru_string.ll) ─────────────────────────────────────
     private bool _stringCreate, _stringClone, _stringDrop;
     private bool _stringAppend, _stringAt, _stringEquals, _stringSlice, _stringOrd;
@@ -23,17 +29,96 @@ internal sealed class SuruRuntimeDeclarations
 
     // ─── Array runtime (suru_array.ll) ───────────────────────────────────────
     private bool _arrayAt, _arraySet, _arrayAdd, _arraySlice;
-    private bool _arrayCloneScalar, _arrayCloneString, _arrayCloneStruct;
-    private bool _arrayDropScalar, _arrayDropString, _arrayDropStruct;
+    private bool _arrayCloneDyn, _arrayDropDyn;
 
     // ─── Struct runtime (suru_struct.ll) ─────────────────────────────────────
     private bool _findField, _structClone, _structDrop;
+    private bool _cloneDyn, _dropDyn;
+    private bool _dynLen;
 
     public override string ToString() => _sb.ToString();
 
+    // ─── Box ─────────────────────────────────────────────────────────────────
+
+    internal void AddBoxBool()
+    {
+        if (_boxBool) return;
+        _sb.AppendLine("declare ptr  @suru_box_bool(i1)");
+        _boxBool = true;
+    }
+
+    internal void AddBoxInt32()
+    {
+        if (_boxInt32) return;
+        _sb.AppendLine("declare ptr  @suru_box_int32(i32)");
+        _boxInt32 = true;
+    }
+
+    internal void AddBoxInt64()
+    {
+        if (_boxInt64) return;
+        _sb.AppendLine("declare ptr  @suru_box_int64(i64)");
+        _boxInt64 = true;
+    }
+
+    internal void AddBoxFloat64()
+    {
+        if (_boxFloat64) return;
+        _sb.AppendLine("declare ptr  @suru_box_float64(double)");
+        _boxFloat64 = true;
+    }
+
+    internal void AddUnboxBool()
+    {
+        if (_unboxBool) return;
+        _sb.AppendLine("declare i1   @suru_unbox_bool(ptr)");
+        _unboxBool = true;
+    }
+
+    internal void AddUnboxInt32()
+    {
+        if (_unboxInt32) return;
+        _sb.AppendLine("declare i32  @suru_unbox_int32(ptr)");
+        _unboxInt32 = true;
+    }
+
+    internal void AddUnboxInt64()
+    {
+        if (_unboxInt64) return;
+        _sb.AppendLine("declare i64  @suru_unbox_int64(ptr)");
+        _unboxInt64 = true;
+    }
+
+    internal void AddUnboxFloat64()
+    {
+        if (_unboxFloat64) return;
+        _sb.AppendLine("declare double @suru_unbox_float64(ptr)");
+        _unboxFloat64 = true;
+    }
+
+    internal void AddBoxClone()
+    {
+        if (_boxClone) return;
+        _sb.AppendLine("declare ptr  @suru_box_clone(ptr)");
+        _boxClone = true;
+    }
+
+    internal void AddSuruPrintln()
+    {
+        if (_suruPrintln) return;
+        _sb.AppendLine("declare void @suru_println(ptr)");
+        _suruPrintln = true;
+    }
+
+    internal void AddSuruPrintError()
+    {
+        if (_suruPrintError) return;
+        _sb.AppendLine("declare void @suru_printerror(ptr)");
+        _suruPrintError = true;
+    }
+
     // ─── String ──────────────────────────────────────────────────────────────
 
-    // Allocate a new %suru.Seq header and store the given data ptr and length.
     internal void AddStringCreate()
     {
         if (_stringCreate) return;
@@ -41,7 +126,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringCreate = true;
     }
 
-    // Produce an independent copy of a String (new Seq header + new heap char buffer).
     internal void AddStringClone()
     {
         if (_stringClone) return;
@@ -49,7 +133,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringClone = true;
     }
 
-    // Free the char buffer and then the Seq header.
     internal void AddStringDrop()
     {
         if (_stringDrop) return;
@@ -57,7 +140,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringDrop = true;
     }
 
-    // Concatenate two Strings into a new heap-allocated String.
     internal void AddStringAppend()
     {
         if (_stringAppend) return;
@@ -65,7 +147,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringAppend = true;
     }
 
-    // Return a single-character String at byte index i.
     internal void AddStringAt()
     {
         if (_stringAt) return;
@@ -73,7 +154,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringAt = true;
     }
 
-    // Byte-exact comparison via strcmp; returns i1.
     internal void AddStringEquals()
     {
         if (_stringEquals) return;
@@ -81,7 +161,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringEquals = true;
     }
 
-    // Return the substring covering bytes [from, to).
     internal void AddStringSlice()
     {
         if (_stringSlice) return;
@@ -89,7 +168,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringSlice = true;
     }
 
-    // Return the ASCII code of the first byte as i64.
     internal void AddStringOrd()
     {
         if (_stringOrd) return;
@@ -97,7 +175,6 @@ internal sealed class SuruRuntimeDeclarations
         _stringOrd = true;
     }
 
-    // Parse a decimal string to i64 via strtol.
     internal void AddInt64FromString()
     {
         if (_int64FromString) return;
@@ -105,7 +182,6 @@ internal sealed class SuruRuntimeDeclarations
         _int64FromString = true;
     }
 
-    // Format an i64 as a decimal String via snprintf.
     internal void AddInt64ToString()
     {
         if (_int64ToString) return;
@@ -115,27 +191,27 @@ internal sealed class SuruRuntimeDeclarations
 
     // ─── Array ───────────────────────────────────────────────────────────────
 
-    // Load the raw i64 at element index idx; caller applies FromI64 for the element type.
+    // Load element at idx; returns ptr (Box for scalars, direct ptr for heap types).
     internal void AddArrayAt()
     {
         if (_arrayAt) return;
-        _sb.AppendLine("declare i64  @suru_array_at(ptr, i64)");
+        _sb.AppendLine("declare ptr  @suru_array_at(ptr, i64)");
         _arrayAt = true;
     }
 
-    // Store a raw i64 at element index idx; caller applies ToI64 before calling.
+    // Store val (ptr) at element index idx.
     internal void AddArraySet()
     {
         if (_arraySet) return;
-        _sb.AppendLine("declare void @suru_array_set(ptr, i64, i64)");
+        _sb.AppendLine("declare void @suru_array_set(ptr, i64, ptr)");
         _arraySet = true;
     }
 
-    // Append a raw i64 to the array, growing the data buffer when needed.
+    // Append val (ptr) to the array, growing the data buffer when needed.
     internal void AddArrayAdd()
     {
         if (_arrayAdd) return;
-        _sb.AppendLine("declare void @suru_array_add(ptr, i64)");
+        _sb.AppendLine("declare void @suru_array_add(ptr, ptr)");
         _arrayAdd = true;
     }
 
@@ -147,57 +223,24 @@ internal sealed class SuruRuntimeDeclarations
         _arraySlice = true;
     }
 
-    // Bitwise memcpy of the data buffer — for scalar element types (Int64, Float64, Bool).
-    internal void AddArrayCloneScalar()
+    // Clone array with dynamic dispatch on each element's type_tag at offset 0.
+    internal void AddArrayCloneDyn()
     {
-        if (_arrayCloneScalar) return;
-        _sb.AppendLine("declare ptr  @suru_array_clone_scalar(ptr)");
-        _arrayCloneScalar = true;
+        if (_arrayCloneDyn) return;
+        _sb.AppendLine("declare ptr  @suru_array_clone_dyn(ptr)");
+        _arrayCloneDyn = true;
     }
 
-    // Clone each String element via suru_string_clone.
-    internal void AddArrayCloneString()
+    // Drop array with dynamic dispatch on each element's type_tag at offset 0.
+    internal void AddArrayDropDyn()
     {
-        if (_arrayCloneString) return;
-        _sb.AppendLine("declare ptr  @suru_array_clone_string(ptr)");
-        _arrayCloneString = true;
-    }
-
-    // Clone each Struct element via suru_struct_clone.
-    internal void AddArrayCloneStruct()
-    {
-        if (_arrayCloneStruct) return;
-        _sb.AppendLine("declare ptr  @suru_array_clone_struct(ptr)");
-        _arrayCloneStruct = true;
-    }
-
-    // Free the data buffer and the %suru.Array header — for scalar element types.
-    internal void AddArrayDropScalar()
-    {
-        if (_arrayDropScalar) return;
-        _sb.AppendLine("declare void @suru_array_drop_scalar(ptr)");
-        _arrayDropScalar = true;
-    }
-
-    // Drop each String element via suru_string_drop, then free the buffer and header.
-    internal void AddArrayDropString()
-    {
-        if (_arrayDropString) return;
-        _sb.AppendLine("declare void @suru_array_drop_string(ptr)");
-        _arrayDropString = true;
-    }
-
-    // Drop each Struct element via suru_struct_drop, then free the buffer and header.
-    internal void AddArrayDropStruct()
-    {
-        if (_arrayDropStruct) return;
-        _sb.AppendLine("declare void @suru_array_drop_struct(ptr)");
-        _arrayDropStruct = true;
+        if (_arrayDropDyn) return;
+        _sb.AppendLine("declare void @suru_array_drop_dyn(ptr)");
+        _arrayDropDyn = true;
     }
 
     // ─── Struct ──────────────────────────────────────────────────────────────
 
-    // Walk the linked list via strcmp and return the matching field node ptr.
     internal void AddFindField()
     {
         if (_findField) return;
@@ -205,7 +248,6 @@ internal sealed class SuruRuntimeDeclarations
         _findField = true;
     }
 
-    // Deep-copy a struct field-node linked list.
     internal void AddStructClone()
     {
         if (_structClone) return;
@@ -213,11 +255,31 @@ internal sealed class SuruRuntimeDeclarations
         _structClone = true;
     }
 
-    // Free all field nodes in a struct linked list.
     internal void AddStructDrop()
     {
         if (_structDrop) return;
         _sb.AppendLine("declare void @suru_struct_drop(ptr)");
         _structDrop = true;
+    }
+
+    internal void AddCloneDyn()
+    {
+        if (_cloneDyn) return;
+        _sb.AppendLine("declare ptr  @suru_clone_dyn(ptr)");
+        _cloneDyn = true;
+    }
+
+    internal void AddDropDyn()
+    {
+        if (_dropDyn) return;
+        _sb.AppendLine("declare void @suru_drop_dyn(ptr)");
+        _dropDyn = true;
+    }
+
+    internal void AddDynLen()
+    {
+        if (_dynLen) return;
+        _sb.AppendLine("declare i64  @suru_dyn_len(ptr)");
+        _dynLen = true;
     }
 }

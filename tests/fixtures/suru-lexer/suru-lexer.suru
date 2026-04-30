@@ -245,14 +245,3 @@ fn tokenize(source String) Array<Struct> {
     tokens.add(makeToken(TOK_EOF, "", line, col))
     return tokens
 }
-
-fn main(args Array<String>) {
-    let source String: readFile(args.at(1))
-    let tokens Array<Struct>: tokenize(source)
-    let i Int64: 0
-    while i.lt(tokens.len()) {
-        let tok Struct: tokens.at(i)
-        printLn(tok.kind.toString().append(" ").append(tok.text).append(" ").append(tok.line.toString()).append(":").append(tok.col.toString()))
-        i: i.add(1)
-    }
-}

@@ -234,7 +234,7 @@ fn main(args Array<String>) {
 }
 ```
 
-> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { ptr name, i32 tag, i64 val, ptr next }`). The mandatory field type annotation drives the runtime tag (0=Bool, 1=Int64, 2=Float64, 3=pointer) stored in each node.
+> **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }`). The `field_tag` uses the unified type enum (0=Bool, 1=Int32, 2=Int64, 3=Float64, 4=Struct, 5=Array, 6=String); field values are stored as `ptrtoint(ptr)`. `type_tag=4` at offset 0 identifies the node as a Struct to runtime inspection.
 
 ### Arrays
 
@@ -468,3 +468,31 @@ Runs the full front-end pipeline (lex → parse → semantic analysis → IR cod
 ```bash
 dotnet run --project src/Suru.CLI -- ir examples/hello.suru
 ```
+
+## Self-Hosting Progress
+
+Suru is being implemented in stages toward compiling its own source. Each stage is validated by running the Suru-compiled tool against real inputs and cross-checking against the C# reference implementation.
+
+| Stage | What | Status |
+|---|---|---|
+| 1–8 | Core language: Hello World → structs, arrays, strings, file I/O, while, comparisons | ✅ Complete |
+| 9 | **Lexer in Suru** (`tests/fixtures/suru-lexer/`) — tokenises Suru source; cross-validated against C# lexer | ✅ Complete |
+| 10–11 | Language convenience: mandatory type annotations, constants, `include`, negative literals, `printError` | ✅ Complete |
+| 12 | **Parser in Suru** (`tests/fixtures/suru-parser/`) — recursive-descent parser; cross-validated against C# parser | ✅ Complete |
+| 13 | Semantic Analyzer in Suru | ⬜ Planned |
+| 14 | Code Generator in Suru | ⬜ Planned |
+| 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |
+
+### Stage 12 — Suru Parser
+
+`tests/fixtures/suru-parser/suru-parser.suru` is a complete recursive-descent parser written in Suru. It accepts a token array (produced by the Stage-9 suru-lexer) and returns a Suru struct representing the AST, then pretty-prints it in the same indented-tree format as the C# `AstPrinter`.
+
+```bash
+# Compile the suru-parser fixture
+dotnet run --project src/Suru.CLI -- build tests/fixtures/suru-parser/main.suru
+
+# Parse a .suru file and print its AST
+./tests/fixtures/suru-parser/build/main path/to/file.suru
+```
+
+Cross-validation tests in `IRSuruParserTests.cs` compare the Suru parser's output byte-for-byte against `AstPrinter.Print()` from the C# compiler on the same input files.
