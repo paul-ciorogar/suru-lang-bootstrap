@@ -83,7 +83,6 @@ public sealed class SemanticAnalyzer
         "Int32"   => SuruType.Int32,
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
-        "Struct"  => SuruType.Struct,
         "Array"   => SuruType.Array,
         "String"  => SuruType.String,
         // Named types declared via `type Foo: { ... }` resolve to SuruType.Struct

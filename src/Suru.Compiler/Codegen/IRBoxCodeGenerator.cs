@@ -17,7 +17,6 @@ public sealed partial class IRCodeGenerator
         "Float64" => SuruType.Float64,
         "String"  => SuruType.String,
         "Array"   => SuruType.Array,
-        "Struct"  => SuruType.Struct,
         // Named types declared via `type Foo: { ... }` use the same heap struct layout.
         _ => _module.TypeDeclarations.ContainsKey(ann.Name)
             ? SuruType.Struct

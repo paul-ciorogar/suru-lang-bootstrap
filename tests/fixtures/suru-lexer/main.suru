@@ -29,6 +29,12 @@ let TOK_LT Int64:        27
 let TOK_GT Int64:        28
 let TOK_INCLUDE Int64:   29
 let TOK_AS Int64:        30
+let TOK_TYPE Int64:      31
+
+type Token: { kind Int64, text String, line Int64, col Int64 }
+type TextPos: { text String, pos Int64 }
+type TokenWithState: { token Token, pos Int64, line Int64, col Int64 }
+type LexState: { pos Int64, line Int64, col Int64 }
 
 fn isDigit(ch String) Bool {
     let c Int64: ch.ord()
@@ -50,54 +56,55 @@ fn isWhitespace(ch String) Bool {
     return ch.equals(" ") or ch.equals("\n") or ch.equals("\t")
 }
 
-fn makeToken(kind Int64, text String, line Int64, col Int64) Struct {
-    return { kind Int64: kind, text String: text, line Int64: line, col Int64: col }
+fn makeToken(kind Int64, text String, line Int64, col Int64) Token {
+    return { kind: kind, text: text, line: line, col: col }
 }
 
 fn keywordKind(text String) Int64 {
     return match text {
-        "true":   TOK_TRUE
-        "false":  TOK_FALSE
-        "let":    TOK_LET
-        "not":    TOK_NOT
-        "and":    TOK_AND
-        "or":     TOK_OR
-        "match":  TOK_MATCH
-        "_":      TOK_WILDCARD
-        "fn":     TOK_FN
-        "return": TOK_RETURN
-        "void":   TOK_VOID
+        "true":    TOK_TRUE
+        "false":   TOK_FALSE
+        "let":     TOK_LET
+        "not":     TOK_NOT
+        "and":     TOK_AND
+        "or":      TOK_OR
+        "match":   TOK_MATCH
+        "_":       TOK_WILDCARD
+        "fn":      TOK_FN
+        "return":  TOK_RETURN
+        "void":    TOK_VOID
         "while":   TOK_WHILE
         "include": TOK_INCLUDE
         "as":      TOK_AS
+        "type":    TOK_TYPE
         _:         TOK_IDENT
     }
 }
 
-fn readIdent(source String, pos Int64) Struct {
+fn readIdent(source String, pos Int64) TextPos {
     let text String: ""
     while pos.lt(source.len()) and isLetterDigitUnderscore(source.at(pos)) {
         text: text.append(source.at(pos))
         pos: pos.add(1)
     }
-    return { text String: text, pos Int64: pos }
+    return { text: text, pos: pos }
 }
 
-fn readIdentOrKeyword(source String, pos Int64, line Int64, col Int64) Struct {
+fn readIdentOrKeyword(source String, pos Int64, line Int64, col Int64) TokenWithState {
     let startCol Int64: col
-    let r Struct: readIdent(source, pos)
+    let r TextPos: readIdent(source, pos)
     let kind Int64: keywordKind(r.text)
-    let tok Struct: makeToken(kind, r.text, line, startCol)
-    return { token Struct: tok, pos Int64: r.pos, line Int64: line, col Int64: col.add(r.text.len()) }
+    let tok Token: makeToken(kind, r.text, line, startCol)
+    return { token: tok, pos: r.pos, line: line, col: col.add(r.text.len()) }
 }
 
-fn readDigits(source String, pos Int64) Struct {
+fn readDigits(source String, pos Int64) TextPos {
     let text String: ""
     while pos.lt(source.len()) and isDigit(source.at(pos)) {
         text: text.append(source.at(pos))
         pos: pos.add(1)
     }
-    return { text String: text, pos Int64: pos }
+    return { text: text, pos: pos }
 }
 
 fn checkFloat(source String, pos Int64) Bool {
@@ -105,22 +112,22 @@ fn checkFloat(source String, pos Int64) Bool {
     return pos.lt(source.len()) and source.at(pos).equals(".") and next.lt(source.len()) and isDigit(source.at(next))
 }
 
-fn makeFloatToken(intText String, source String, pos Int64, line Int64, startCol Int64, col Int64) Struct {
+fn makeFloatToken(intText String, source String, pos Int64, line Int64, startCol Int64, col Int64) TokenWithState {
     pos: pos.add(1)
     col: col.add(1)
-    let r2 Struct: readDigits(source, pos)
-    let tok Struct: makeToken(TOK_FLOAT, intText.append(".").append(r2.text), line, startCol)
-    return { token Struct: tok, pos Int64: r2.pos, line Int64: line, col Int64: col.add(r2.text.len()) }
+    let r2 TextPos: readDigits(source, pos)
+    let tok Token: makeToken(TOK_FLOAT, intText.append(".").append(r2.text), line, startCol)
+    return { token: tok, pos: r2.pos, line: line, col: col.add(r2.text.len()) }
 }
 
-fn makeIntToken(intText String, pos Int64, line Int64, startCol Int64, col Int64) Struct {
-    let tok Struct: makeToken(TOK_INT, intText, line, startCol)
-    return { token Struct: tok, pos Int64: pos, line Int64: line, col Int64: col }
+fn makeIntToken(intText String, pos Int64, line Int64, startCol Int64, col Int64) TokenWithState {
+    let tok Token: makeToken(TOK_INT, intText, line, startCol)
+    return { token: tok, pos: pos, line: line, col: col }
 }
 
-fn readNumber(source String, pos Int64, line Int64, col Int64) Struct {
+fn readNumber(source String, pos Int64, line Int64, col Int64) TokenWithState {
     let startCol Int64: col
-    let r Struct: readDigits(source, pos)
+    let r TextPos: readDigits(source, pos)
     let intText String: r.text
     pos: r.pos
     col: col.add(intText.len())
@@ -140,7 +147,7 @@ fn escapeChar(esc String) String {
     }
 }
 
-fn readString(source String, pos Int64, line Int64, col Int64) Struct {
+fn readString(source String, pos Int64, line Int64, col Int64) TokenWithState {
     let startCol Int64: col
     pos: pos.add(1)
     col: col.add(1)
@@ -156,8 +163,8 @@ fn readString(source String, pos Int64, line Int64, col Int64) Struct {
     let advanced Int64: match pos.lt(source.len()) { true: 1, _: 0 }
     pos: pos.add(advanced)
     col: col.add(advanced)
-    let tok Struct: makeToken(TOK_STRING, text, line, startCol)
-    return { token Struct: tok, pos Int64: pos, line Int64: line, col Int64: col }
+    let tok Token: makeToken(TOK_STRING, text, line, startCol)
+    return { token: tok, pos: pos, line: line, col: col }
 }
 
 fn singleCharKind(ch String) Int64 {
@@ -178,38 +185,38 @@ fn singleCharKind(ch String) Int64 {
     }
 }
 
-fn processSingleChar(tokens Array<Struct>, ch String, pos Int64, line Int64, col Int64) Struct {
+fn processSingleChar(tokens Array<Token>, ch String, pos Int64, line Int64, col Int64) LexState {
     let kind Int64: singleCharKind(ch)
     tokens.add(makeToken(kind, ch, line, col))
-    return { pos Int64: pos.add(1), line Int64: line, col Int64: col.add(1) }
+    return { pos: pos.add(1), line: line, col: col.add(1) }
 }
 
-fn processStringToken(source String, tokens Array<Struct>, pos Int64, line Int64, col Int64) Struct {
-    let r Struct: readString(source, pos, line, col)
+fn processStringToken(source String, tokens Array<Token>, pos Int64, line Int64, col Int64) LexState {
+    let r TokenWithState: readString(source, pos, line, col)
     tokens.add(r.token)
-    return { pos Int64: r.pos, line Int64: r.line, col Int64: r.col }
+    return { pos: r.pos, line: r.line, col: r.col }
 }
 
-fn processNumberToken(source String, tokens Array<Struct>, pos Int64, line Int64, col Int64) Struct {
-    let r Struct: readNumber(source, pos, line, col)
+fn processNumberToken(source String, tokens Array<Token>, pos Int64, line Int64, col Int64) LexState {
+    let r TokenWithState: readNumber(source, pos, line, col)
     tokens.add(r.token)
-    return { pos Int64: r.pos, line Int64: r.line, col Int64: r.col }
+    return { pos: r.pos, line: r.line, col: r.col }
 }
 
-fn processIdentToken(source String, tokens Array<Struct>, pos Int64, line Int64, col Int64) Struct {
-    let r Struct: readIdentOrKeyword(source, pos, line, col)
+fn processIdentToken(source String, tokens Array<Token>, pos Int64, line Int64, col Int64) LexState {
+    let r TokenWithState: readIdentOrKeyword(source, pos, line, col)
     tokens.add(r.token)
-    return { pos Int64: r.pos, line Int64: r.line, col Int64: r.col }
+    return { pos: r.pos, line: r.line, col: r.col }
 }
 
-fn processSymbolOrString(source String, tokens Array<Struct>, ch String, pos Int64, line Int64, col Int64) Struct {
+fn processSymbolOrString(source String, tokens Array<Token>, ch String, pos Int64, line Int64, col Int64) LexState {
     return match ch.equals("\"") {
         true: processStringToken(source, tokens, pos, line, col)
         _:    processSingleChar(tokens, ch, pos, line, col)
     }
 }
 
-fn processNonWhitespace(source String, tokens Array<Struct>, ch String, pos Int64, line Int64, col Int64) Struct {
+fn processNonWhitespace(source String, tokens Array<Token>, ch String, pos Int64, line Int64, col Int64) LexState {
     return match isLetter(ch) or ch.equals("_") {
         true: processIdentToken(source, tokens, pos, line, col)
         _: match isDigit(ch) {
@@ -219,21 +226,21 @@ fn processNonWhitespace(source String, tokens Array<Struct>, ch String, pos Int6
     }
 }
 
-fn advanceWhitespace(ch String, pos Int64, line Int64, col Int64) Struct {
+fn advanceWhitespace(ch String, pos Int64, line Int64, col Int64) LexState {
     let newLine Int64: match ch.equals("\n") { true: line.add(1), _: line }
     let newCol Int64: match ch.equals("\n") { true: 1, _: col.add(1) }
-    return { pos Int64: pos.add(1), line Int64: newLine, col Int64: newCol }
+    return { pos: pos.add(1), line: newLine, col: newCol }
 }
 
-fn tokenize(source String) Array<Struct> {
-    let tokens Array<Struct>: []
+fn tokenize(source String) Array<Token> {
+    let tokens Array<Token>: []
     let pos Int64: 0
     let line Int64: 1
     let col Int64: 1
 
     while pos.lt(source.len()) {
         let ch String: source.at(pos)
-        let st Struct: match isWhitespace(ch) {
+        let st LexState: match isWhitespace(ch) {
             true: advanceWhitespace(ch, pos, line, col)
             _:    processNonWhitespace(source, tokens, ch, pos, line, col)
         }
@@ -248,10 +255,10 @@ fn tokenize(source String) Array<Struct> {
 
 fn main(args Array<String>) {
     let source String: readFile(args.at(1))
-    let tokens Array<Struct>: tokenize(source)
+    let tokens Array<Token>: tokenize(source)
     let i Int64: 0
     while i.lt(tokens.len()) {
-        let tok Struct: tokens.at(i)
+        let tok Token: tokens.at(i)
         printLn(tok.kind.toString().append(" ").append(tok.text).append(" ").append(tok.line.toString()).append(":").append(tok.col.toString()))
         i: i.add(1)
     }

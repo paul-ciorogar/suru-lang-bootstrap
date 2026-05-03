@@ -1,9 +1,9 @@
 type DataStruct: { tall Bool, height Int64 }
 type Named: { name String, height Int64 }
 type Lvl3: { someValue Int64 }
-type Lvl2: { anotherParam Struct }
-type Lvl1: { otherParam Struct }
-type Parent: { someArray Array<Struct> }
+type Lvl2: { anotherParam Lvl3 }
+type Lvl1: { otherParam Lvl2 }
+type Parent: { someArray Array<Lvl1> }
 
 fn structFromFunction() Named {
     return {
@@ -47,13 +47,13 @@ fn main(args Array<String>) {
     let lvl3 Lvl3: { someValue: 99 }
     let lvl2 Lvl2: { anotherParam: lvl3 }
     let lvl1 Lvl1: { otherParam: lvl2 }
-    let someArray Array<Struct>: [lvl1]
+    let someArray Array<Lvl1>: [lvl1]
     let parent Parent: { someArray: someArray }
 
-    let arr Array<Struct>: parent.someArray
-    let item Struct: arr.at(0)
-    let l1 Struct: item.otherParam
-    let l2 Struct: l1.anotherParam
+    let arr Array<Lvl1>: parent.someArray
+    let item Lvl1: arr.at(0)
+    let l1 Lvl2: item.otherParam
+    let l2 Lvl3: l1.anotherParam
     let deepVal Int64: l2.someValue
     printLn(deepVal)
 }

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5d — Remove `Struct` Keyword + Update suru-lexer Fixture
+
+The `Struct` keyword is now a compile-time error. All struct values must use a named type declared with `type`. The suru-lexer fixture has been fully updated with named types, new struct literal syntax, and `TOK_TYPE` support.
+
+**Breaking change:** `let x Struct: { ... }` is no longer valid. Use a named type: `type Foo: { ... }` then `let x Foo: { ... }`.
+
+**Changes:**
+- **Semantic:** Removed `"Struct" => SuruType.Struct` from `ResolveTypeAnnotation`. Any use of `Struct` as a type annotation now reports "unknown type 'Struct'".
+- **Codegen:** Removed `"Struct" => SuruType.Struct` from `SuruTypeFromAnnotation` in `IRBoxCodeGenerator`. Any use of `Struct` in codegen now throws `NotSupportedException`.
+- **suru-lexer fixture:** Rewrote `suru-lexer.suru` and `main.suru` with four named type declarations (`Token`, `TextPos`, `TokenWithState`, `LexState`), updated all 37+ function signatures and local variable annotations, and removed per-field type annotations from all struct literals (completing the Stage 12.5c syntax transition for this fixture). Added `TOK_TYPE = 31` constant and `"type": TOK_TYPE` arm to `keywordKind` so the Suru lexer correctly identifies the `type` keyword.
+- **structs fixture:** Updated `tests/fixtures/structs/main.suru` — replaced `Struct` field types and `Array<Struct>` with specific named types (`Lvl1`, `Lvl2`, `Lvl3`, `Array<Lvl1>`).
+- **Tests:** 57 tests pass; `IRSuruParserTests` (3 tests) remain broken pending Stage 12.5e.
+
+---
+
 ### Stage 12.5c — Typed Struct Instantiation (No Field Annotations)
 
 Per-field type annotations in struct literals have been removed. Field types now come from the surrounding `let`/return type annotation, resolved against `type` declarations. The `Struct` keyword remains valid as a type annotation name for this stage.
