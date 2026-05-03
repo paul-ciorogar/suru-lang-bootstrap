@@ -43,7 +43,7 @@ fn main(args Array<String>) {
 }
 ```
 
-Available scalar types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`, `Array<T>`, and any declared named type (e.g. `Point`).
+Available types: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Array<T>`, and any declared named type (e.g. `Point`). The `Struct` keyword is no longer valid — every struct value must use a named type.
 
 ### Comments
 
@@ -195,16 +195,16 @@ type Person: {
 Use the type name in `let` declarations, function parameters, and return types:
 
 ```suru
-let p Point: { x Int64: 2283, y Int64: 2281 }
+let p Point: { x: 2283, y: 2281 }
 printLn(p.x)   // 2283
 printLn(p.y)   // 2281
 
 fn makePoint(x Int64, y Int64) Point {
-    return { x Int64: x, y Int64: y }
+    return { x: x, y: y }
 }
 ```
 
-> Named types resolve to `SuruType.Struct` — they use the same heap-allocated linked-list runtime as anonymous `Struct` values. Duplicate type names are compile-time errors.
+> Named types resolve to `SuruType.Struct` at the semantic layer — they use the same heap-allocated linked-list runtime representation. Duplicate type names are compile-time errors.
 
 ---
 
@@ -278,10 +278,9 @@ Create an array with `[e1, e2, ...]`. The element type is specified with the `Ar
 ```suru
 let nums Array<Int64>: [10, 20, 30]
 let words Array<String>: ["hello", "world"]
-let items Array<Struct>: []
 ```
 
-The type parameter `T` can be any Suru type: `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Struct`.
+The type parameter `T` can be any Suru type: `Bool`, `Int32`, `Int64`, `Float64`, `String`, or any named type (e.g. `Array<Token>`).
 
 | Method | Description | Example |
 |---|---|---|
@@ -304,8 +303,10 @@ printLn(part.len())      // 2
 Pass arrays to and from functions using the `Array<T>` type:
 
 ```suru
-fn tokenize(source String) Array<Struct> {
-    let tokens Array<Struct>: []
+type Token: { kind Int64, text String, line Int64, col Int64 }
+
+fn tokenize(source String) Array<Token> {
+    let tokens Array<Token>: []
     // ... build tokens ...
     return tokens
 }
@@ -423,8 +424,9 @@ fn double(n Int64) Int64 {
 
 - The path is relative to the file that contains the `include`.
 - All functions from the included file become available as `ns.fn(args)`.
+- Named types (`type` declarations) from the included file are available by name in the importing module — no need to re-declare them. Re-declaring an imported type is a compile error.
+- Scalar constants (`let NAME Type: literal`) from the included file are also available in the importing module.
 - Circular includes are detected and reported as a compile error.
-- Only functions are imported — constants and top-level statements from the included file are not exported to the importing module.
 - Each `.suru` file is compiled to its own object file; the linker resolves cross-module references. The `ns.` prefix is a Suru language concept only — LLVM call sites use the original unqualified function name.
 - Include chains are transitive: if `main.suru` includes `a.suru` which includes `b.suru`, all three are compiled to separate objects and linked together.
 

@@ -1,0 +1,7 @@
+include "lib.suru" as lib
+
+fn main(args Array<String>) {
+    let p Point: lib.makePoint(10, 20)
+    printLn(p.x)
+    printLn(p.y)
+}

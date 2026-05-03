@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5e — Update suru-parser Fixture
+
+The `suru-parser.suru` fixture is fully updated to use named types — no `Struct` keyword remains in any `.suru` source file in the repository. The Suru parser now also handles `type` declarations, enabling cross-validation against the Suru lexer source (which contains named type declarations added in Stage 12.5d).
+
+**Changes:**
+- **suru-parser fixture:** Added 12 named type declarations at the top of `suru-parser.suru` (`Parser`, `AstNode`, `Param`, `MatchArm`, `AstModule`, `ParseResult`, `TypeAnnResult`, `RetTypeResult`, `ArgsResult`, `ArmResult`, `PatResult`, `StmtResult`). Updated all ~50 function signatures and ~20 `Array<Struct>` references. Stripped per-field type annotations from all struct literals, completing the Stage 12.5c syntax transition for this fixture.
+- **`parsePrimaryStruct` fixed:** Removed type-annotation parsing from struct literal fields — the parser now correctly handles the Stage 12.5c `{ field: value }` syntax (no `field Type: value` per-field annotations).
+- **`printExprStructLit` fixed:** Changed output from `Field [name typeName]` to `Field [name]` to match the C# `AstPrinter` format exactly.
+- **`parseTypeDeclaration` added:** New function (`TOK_TYPE → NODE_TYPE_DECL`) so the Suru parser recognises and prints `type` declarations in the same format as the C# `AstPrinter` (`TypeDeclaration [Name]` / `Field [field] Type [type]`).
+- **`main.suru` updated:** `Array<Struct>` → `Array<Token>`, `Struct` → `AstModule`.
+- **Tests:** All 61 tests pass; `IRSuruParserTests` (3 tests) all green for the first time.
+
+---
+
 ### Stage 12.5d — Remove `Struct` Keyword + Update suru-lexer Fixture
 
 The `Struct` keyword is now a compile-time error. All struct values must use a named type declared with `type`. The suru-lexer fixture has been fully updated with named types, new struct literal syntax, and `TOK_TYPE` support.

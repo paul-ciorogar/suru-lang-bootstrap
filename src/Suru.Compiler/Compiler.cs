@@ -257,11 +257,17 @@ public class Compiler
         foreach (var s in module.Statements)
             if (s is LetStatement ls) seenConstantNames.Add(ls.Name);
 
+        // Track type names already in the main module so included types don't shadow them
+        // and diamond includes don't produce duplicates that trigger "already declared" errors.
+        var seenTypeNames = new HashSet<string>(
+            module.Statements.OfType<TypeDeclaration>().Select(td => td.Name));
+
         // Collect constants from all included files (deduplicated) so that included
         // function bodies can reference them during semantic analysis of the merged module.
         // These are inserted before function declarations to ensure they're in _symbols
         // before AnalyzeFunctionDeclaration re-injects constants at function entry.
         var includedConstants = new List<Statement>();
+        var includedTypes     = new List<Statement>();
 
         foreach (var directive in directives)
         {
@@ -322,12 +328,19 @@ public class Compiler
                     if (constant.Value is BoolLiteral or IntLiteral or FloatLiteral)
                         includedConstants.Add(stmt);
                 }
+                else if (stmt is TypeDeclaration typeDecl && seenTypeNames.Add(typeDecl.Name))
+                {
+                    // Type declarations produce no LLVM IR — they're purely compile-time
+                    // metadata. Merging them lets the importing file use the type name in
+                    // annotations, struct literals, and function signatures without redefining it.
+                    includedTypes.Add(typeDecl);
+                }
             }
         }
 
-        // Prepend constants so they precede all function declarations in the merged list,
-        // ensuring SemanticAnalyzer sees them before analyzing any function body.
-        mergedStatements.InsertRange(0, includedConstants);
+        // Prepend types then constants so both precede all function declarations in the merged
+        // list — SemanticAnalyzer's first pass registers types before it enters any function body.
+        mergedStatements.InsertRange(0, includedTypes.Concat(includedConstants));
 
         return new Module
         {

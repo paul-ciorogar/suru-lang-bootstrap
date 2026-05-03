@@ -1,0 +1,5 @@
+type Point: { x Int64, y Int64 }
+
+fn makePoint(x Int64, y Int64) Point {
+    return { x: x, y: y }
+}
