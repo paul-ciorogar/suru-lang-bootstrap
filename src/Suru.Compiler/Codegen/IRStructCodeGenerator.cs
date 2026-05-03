@@ -141,10 +141,8 @@ partial class IRCodeGenerator
 
     // .field — load a field value from a struct.
     //
-    // Calls suru_find_field to locate the node, loads the raw i64 from slot [3],
-    // then applies inttoptr to get back the original ptr. The ptr is a Box for scalars
-    // or a direct heap ptr for String/Array/Struct. fa.ResolvedType is returned as the
-    // compile-time type so callers can unbox correctly (e.g. UnboxInt64 for Int64 fields).
+    // Calls suru_find_field, loads the i64 val slot, applies inttoptr to get the box ptr,
+    // then unboxes to a raw scalar if fa.ResolvedType is a scalar type.
     private (string val, SuruType type) EmitFieldAccess(FieldAccessExpression fa)
     {
         var (headPtr, _) = EmitValue(fa.Receiver);
@@ -156,8 +154,14 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  {raw}    = load i64, ptr {valGep}");
 
         var fieldType = fa.ResolvedType ?? SuruType.Struct;
-        var result    = EmitFromI64(raw, fieldType);
-        return (result, fieldType);
+        var boxPtr    = EmitFromI64(raw, fieldType);
+        if (IsScalar(fieldType))
+        {
+            // Field was stored as ptrtoint(box_ptr); unbox to get the raw scalar.
+            var rawScalar = UnboxScalar(boxPtr, fieldType);
+            return (rawScalar, fieldType);
+        }
+        return (boxPtr, fieldType);
     }
 
     // receiver.field: value — update a field's stored i64 in-place.

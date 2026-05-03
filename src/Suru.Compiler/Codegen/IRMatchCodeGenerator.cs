@@ -33,9 +33,10 @@ public sealed partial class IRCodeGenerator
         switch (body)
         {
             case CallExpression { Name: "printLn", Args: [var arg] }:
-                var (v, _) = EmitValue(arg);
+                var (v, vt) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();
-                _funcs.AppendLine($"  call void @suru_println(ptr {v})");
+                var printP = IsScalar(vt) ? BoxValue(v, vt) : v;
+                _funcs.AppendLine($"  call void @suru_println(ptr {printP})");
                 break;
             default:
                 EmitValue(body);
@@ -43,14 +44,15 @@ public sealed partial class IRCodeGenerator
         }
     }
 
-    // Match-as-expression: alloca ptr (all values are ptr), store/load ptr.
+    // Match-as-expression: alloca uses the raw LLVM type of the result (scalar or ptr).
     // Critical: result alloca is emitted BEFORE EmitMatchTestChain so it dominates all arm blocks.
     private (string val, SuruType type) EmitMatchAsExpression(MatchExpression match)
     {
-        var firstArm   = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
-        var resultType = PeekType(firstArm.Body);
-        var resultPtr  = $"%match_result_{_matchCounter}";
-        _funcs.AppendLine($"  {resultPtr} = alloca ptr");
+        var firstArm    = match.Arms.FirstOrDefault(a => a.Pattern != null) ?? match.Arms[0];
+        var resultType  = PeekType(firstArm.Body);
+        var resultLlvmT = LlvmType(resultType);
+        var resultPtr   = $"%match_result_{_matchCounter}";
+        _funcs.AppendLine($"  {resultPtr} = alloca {resultLlvmT}");
 
         var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
 
@@ -58,7 +60,7 @@ public sealed partial class IRCodeGenerator
         {
             _funcs.AppendLine($"match_arm_{n}_{i}:");
             var (armVal, _) = EmitValue(patternArms[i].Body);
-            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
+            _funcs.AppendLine($"  store {resultLlvmT} {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
 
@@ -66,13 +68,13 @@ public sealed partial class IRCodeGenerator
         {
             _funcs.AppendLine($"match_wildcard_{n}:");
             var (armVal, _) = EmitValue(wildcardArm.Body);
-            _funcs.AppendLine($"  store ptr {armVal}, ptr {resultPtr}");
+            _funcs.AppendLine($"  store {resultLlvmT} {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
 
         _funcs.AppendLine($"match_merge_{n}:");
         var loadTmp = NextTmp();
-        _funcs.AppendLine($"  {loadTmp} = load ptr, ptr {resultPtr}");
+        _funcs.AppendLine($"  {loadTmp} = load {resultLlvmT}, ptr {resultPtr}");
         return (loadTmp, resultType);
     }
 
@@ -139,7 +141,8 @@ public sealed partial class IRCodeGenerator
         };
     }
 
-    // Match test chain: unbox scalar condition and patterns before icmp/fcmp.
+    // Match test chain: scalars arrive as raw values from EmitValue — no UnboxScalar needed
+    // for known scalar types. Struct-typed conditions (dynamic) still need unboxing.
     private (List<MatchArm> PatternArms, MatchArm? WildcardArm, int N) EmitMatchTestChain(
         MatchExpression match)
     {
@@ -150,12 +153,14 @@ public sealed partial class IRCodeGenerator
         var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
         var missLabel   = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
 
-        // Unbox scalar condition once (String stays as ptr for strcmp dispatch).
+        // Known scalars are already raw; Struct is a box ptr that must be unboxed.
         string rawCond;
         if (condType == SuruType.String)
-            rawCond = condVal;   // stays as String ptr
+            rawCond = condVal;
+        else if (IsScalar(condType))
+            rawCond = condVal;   // already raw i64/i1/double
         else
-            rawCond = UnboxScalar(condVal, condType);
+            rawCond = UnboxInt64(condVal);   // Struct → unbox as i64
 
         for (int i = 0; i < patternArms.Count; i++)
         {
@@ -174,14 +179,21 @@ public sealed partial class IRCodeGenerator
             else if (condType == SuruType.Float64)
             {
                 var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-                var rawPat = UnboxScalar(patternVal, condType);
-                _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {rawCond}, {rawPat}");
+                // FloatLiteral and Float64 var refs are already raw double.
+                _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {rawCond}, {patternVal}");
+            }
+            else if (condType == SuruType.Struct)
+            {
+                // Struct-typed condition treated as i64; patterns are Int64 literals (raw i64).
+                var (patternVal, patType) = EmitValue(patternArms[i].Pattern!);
+                var rawPat = IsScalar(patType) ? patternVal : UnboxInt64(patternVal);
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq i64 {rawCond}, {rawPat}");
             }
             else
             {
+                // Bool/Int32/Int64: both sides are already raw.
                 var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
-                var rawPat = UnboxScalar(patternVal, condType);
-                _funcs.AppendLine($"  {cmpTmp} = icmp eq {RawLlvmType(condType)} {rawCond}, {rawPat}");
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq {LlvmType(condType)} {rawCond}, {patternVal}");
             }
 
             var nextLabel = (i + 1 < patternArms.Count)

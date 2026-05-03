@@ -141,66 +141,66 @@ partial class IRCodeGenerator
 
     // ─── Array instance methods ──────────────────────────────────────────────
 
-    // .len() → Box(Int64): GEP+load the len field, then box the raw i64.
+    // .len() → raw i64: GEP+load the len field directly.
     private (string val, SuruType type) EmitArrayLen(string arrVal)
     {
         var raw = EmitExtractArrayLen(arrVal);
-        return (BoxInt64(raw), SuruType.Int64);
+        return (raw, SuruType.Int64);
     }
 
     // .len() on a value of unknown compile-time kind (Struct default).
-    // Calls @suru_dyn_len which reads type_tag at offset 0 and dispatches:
-    //   tag=5 (Array) → Array.len field (offset 16)
-    //   tag=6 (String) → String.len field (offset 8)
+    // Calls @suru_dyn_len which reads type_tag at offset 0 and dispatches.
     private (string val, SuruType type) EmitDynLen(string val)
     {
         _runtimeDecls.AddDynLen();
         var raw = NextTmp();
         _funcs.AppendLine($"  {raw} = call i64 @suru_dyn_len(ptr {val})");
-        return (BoxInt64(raw), SuruType.Int64);
+        return (raw, SuruType.Int64);
     }
 
-    // .at(i) → ptr: unbox idx Box(Int64), call @suru_array_at which returns ptr directly.
-    // The returned ptr is a Box for scalars or a direct heap ptr for String/Array/Struct.
+    // .at(i) → ptr (box for scalars, heap ptr for non-scalars). idx is raw i64 or Struct ptr.
+    // Element type unknown at compile time; LetStatement annotation-guided unboxing handles it.
     private (string val, SuruType type) EmitArrayAt(string arrVal, Expression idxExpr)
     {
-        var (idxBox, _) = EmitValue(idxExpr);
-        var idx = UnboxInt64(idxBox);
+        var (idxVal, idxType) = EmitValue(idxExpr);
+        var idx = IsScalar(idxType) ? idxVal : UnboxInt64(idxVal);
         _runtimeDecls.AddArrayAt();
         var result = NextTmp();
         _funcs.AppendLine($"  {result} = call ptr @suru_array_at(ptr {arrVal}, i64 {idx})");
         return (result, SuruType.Struct);   // element type unknown at compile time
     }
 
-    // .set(val, i) — unbox idx Box(Int64), pass val as ptr to @suru_array_set.
+    // .set(val, i) — box scalar val at boundary; idx is raw i64 or Struct ptr.
     private (string val, SuruType type) EmitArraySet(
         string arrVal, Expression valExpr, Expression idxExpr)
     {
-        var (val, _)    = EmitValue(valExpr);
-        var (idxBox, _) = EmitValue(idxExpr);
-        var idx = UnboxInt64(idxBox);
+        var (elemVal, elemType) = EmitValue(valExpr);
+        var (idxVal, idxType)   = EmitValue(idxExpr);
+        var boxedElem = IsScalar(elemType) ? BoxValue(elemVal, elemType) : elemVal;
+        var idx       = IsScalar(idxType)  ? idxVal : UnboxInt64(idxVal);
         _runtimeDecls.AddArraySet();
-        _funcs.AppendLine($"  call void @suru_array_set(ptr {arrVal}, i64 {idx}, ptr {val})");
-        return ("null", SuruType.Bool);
+        _funcs.AppendLine($"  call void @suru_array_set(ptr {arrVal}, i64 {idx}, ptr {boxedElem})");
+        return ("0", SuruType.Bool);
     }
 
-    // .add(v) — pass val as ptr to @suru_array_add which grows the header in-place.
+    // .add(v) — box scalar val at boundary before passing to runtime.
     private (string val, SuruType type) EmitArrayAdd(string arrVal, Expression valExpr)
     {
-        var (val, _) = EmitValue(valExpr);
+        var (elemVal, elemType) = EmitValue(valExpr);
+        var boxedElem = IsScalar(elemType) ? BoxValue(elemVal, elemType) : elemVal;
         _runtimeDecls.AddArrayAdd();
-        _funcs.AppendLine($"  call void @suru_array_add(ptr {arrVal}, ptr {val})");
-        return ("null", SuruType.Bool);
+        _funcs.AppendLine($"  call void @suru_array_add(ptr {arrVal}, ptr {boxedElem})");
+        return ("0", SuruType.Bool);
     }
 
-    // .slice(from, to) → Array: unbox from/to Box(Int64), call @suru_array_slice.
+    // .slice(from, to) → Array: from/to are raw i64 or Struct ptr.
     private (string val, SuruType type) EmitArraySlice(
         string arrVal, Expression fromExpr, Expression toExpr)
     {
-        var (fromBox, _) = EmitValue(fromExpr);
-        var (toBox, _)   = EmitValue(toExpr);
-        var from = UnboxInt64(fromBox);
-        var to   = UnboxInt64(toBox);
+        var (fromVal, fromType) = EmitValue(fromExpr);
+        var (toVal, toType)     = EmitValue(toExpr);
+        var from = IsScalar(fromType) ? fromVal : UnboxInt64(fromVal);
+        var to   = IsScalar(toType)   ? toVal   : UnboxInt64(toVal);
         _runtimeDecls.AddArraySlice();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_array_slice(ptr {arrVal}, i64 {from}, i64 {to})");
@@ -232,19 +232,22 @@ partial class IRCodeGenerator
 
     // ─── Element type conversion ─────────────────────────────────────────────
     //
-    // With the universal tagged-pointer system, all Suru values are `ptr` (Box ptrs
-    // for scalars, direct heap ptrs for String/Array/Struct). Storage in the i64[]
-    // data buffer uses ptrtoint/inttoptr — no type-specific dispatch needed.
+    // Array/struct data buffers store values as ptrtoint(ptr) → i64. Since scalars
+    // are now raw values (not ptr), EmitToI64 boxes them first before ptrtoint.
+    // EmitFromI64 still returns a ptr (box ptr for scalars); callers unbox if needed.
 
-    // Store a ptr value as i64 in the data buffer (ptrtoint for any ptr type).
+    // Convert a Suru value to i64 for storage in an array/struct data buffer.
+    // Scalars are boxed first (boundary point) before ptrtoint.
     private string EmitToI64(string val, SuruType type)
     {
+        var ptrVal = IsScalar(type) ? BoxValue(val, type) : val;
         var tmp = NextTmp();
-        _funcs.AppendLine($"  {tmp} = ptrtoint ptr {val} to i64");
+        _funcs.AppendLine($"  {tmp} = ptrtoint ptr {ptrVal} to i64");
         return tmp;
     }
 
-    // Restore a ptr value from the raw i64 stored in the data buffer (inttoptr).
+    // Restore a ptr from the raw i64 stored in a data buffer (inttoptr).
+    // Callers that need a scalar must unbox the returned ptr.
     private string EmitFromI64(string raw, SuruType type)
     {
         var tmp = NextTmp();

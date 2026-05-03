@@ -12,9 +12,11 @@ public sealed partial class IRCodeGenerator
     {
         if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
         {
-            // External functions (from include): all params and return are ptr.
-            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : "ptr";
-            var paramTypes  = string.Join(", ", fn.Parameters.Select(_ => "ptr"));
+            // External functions (from include): use raw types for scalars.
+            var retSuruType = FnReturnSuruType(fn);
+            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : LlvmType(retSuruType);
+            var paramTypes  = string.Join(", ", fn.Parameters.Select(p =>
+                LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))));
             _funcs.AppendLine($"declare {retLlvmType} @{originalName}({paramTypes})");
             return;
         }
@@ -37,22 +39,27 @@ public sealed partial class IRCodeGenerator
         else
         {
             var retSuruType = FnReturnSuruType(fn);
-            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : "ptr";
+            var retLlvmType = LlvmType(retSuruType);
             _currentFnReturnLlvmType = retLlvmType;
             _currentFnReturnSuruType = retSuruType;
             _currentFnReturnTypeName = fn.ReturnType.Name;
 
-            // All parameters are `ptr` in the universal tagged-pointer system.
-            var paramStr = string.Join(", ", fn.Parameters.Select(p => $"ptr %{p.Name}"));
-            _funcs.AppendLine($"define ptr @{fn.Name}({paramStr}) {{");
+            // Scalar params use raw LLVM types; non-scalars remain ptr.
+            var paramStr = string.Join(", ", fn.Parameters.Select(p =>
+            {
+                var pType = SuruTypeFromAnnotation(p.TypeAnnotation);
+                return $"{LlvmType(pType)} %{p.Name}";
+            }));
+            _funcs.AppendLine($"define {retLlvmType} @{fn.Name}({paramStr}) {{");
             _funcs.AppendLine("entry:");
 
             foreach (var p in fn.Parameters)
             {
                 var pType    = SuruTypeFromAnnotation(p.TypeAnnotation);
+                var llvmT    = LlvmType(pType);
                 var allocPtr = $"%{p.Name}.addr";
-                _funcs.AppendLine($"  {allocPtr} = alloca ptr");
-                _funcs.AppendLine($"  store ptr %{p.Name}, ptr {allocPtr}");
+                _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
+                _funcs.AppendLine($"  store {llvmT} %{p.Name}, ptr {allocPtr}");
                 _vars[p.Name] = (allocPtr, pType);
             }
         }
@@ -65,7 +72,7 @@ public sealed partial class IRCodeGenerator
             if (fn.Name == "main")
                 _funcs.AppendLine("  ret i64 0");
             else
-                _funcs.AppendLine("  ret ptr null");
+                _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {DefaultReturnValue(_currentFnReturnSuruType)}");
         }
 
         _funcs.AppendLine("}");
@@ -84,30 +91,40 @@ public sealed partial class IRCodeGenerator
                 break;
 
             // printLn(expr) — dispatch to suru_println which reads type_tag at offset 0.
+            // Scalars must be boxed before passing since the runtime dispatches by type_tag.
             case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args: [var arg] } }:
-                var (pval, _) = EmitValue(arg);
+                var (pval, ptype) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();
-                _funcs.AppendLine($"  call void @suru_println(ptr {pval})");
+                var printPtr = IsScalar(ptype) ? BoxValue(pval, ptype) : pval;
+                _funcs.AppendLine($"  call void @suru_println(ptr {printPtr})");
                 break;
 
             // printError(expr) — dispatch to suru_printerror (writes to stderr).
             case ExpressionStatement { Expression: CallExpression { Name: "printError", Args: [var errArg] } }:
-                var (errVal, _) = EmitValue(errArg);
+                var (errVal, errType) = EmitValue(errArg);
                 _runtimeDecls.AddSuruPrintError();
-                _funcs.AppendLine($"  call void @suru_printerror(ptr {errVal})");
+                var errPtr = IsScalar(errType) ? BoxValue(errVal, errType) : errVal;
+                _funcs.AppendLine($"  call void @suru_printerror(ptr {errPtr})");
                 break;
 
-            // exit(code) — unbox the Int64/Int32 Box ptr, trunc to i32, call @exit.
+            // exit(code) — code is already a raw i32 or i64; trunc to i32 if needed.
             case ExpressionStatement { Expression: CallExpression { Name: "exit", Args: [var codeExpr] } }:
                 _externals.AddExit();
                 var (codeVal, codeType) = EmitValue(codeExpr);
                 string exitArg;
                 if (codeType == SuruType.Int32)
                 {
-                    exitArg = UnboxInt32(codeVal);
+                    exitArg = codeVal;   // already raw i32
+                }
+                else if (IsScalar(codeType))
+                {
+                    var code32 = NextTmp();
+                    _funcs.AppendLine($"  {code32} = trunc i64 {codeVal} to i32");
+                    exitArg = code32;
                 }
                 else
                 {
+                    // Dynamic (Struct box ptr) — unbox first.
                     var rawI64 = UnboxInt64(codeVal);
                     var code32 = NextTmp();
                     _funcs.AppendLine($"  {code32} = trunc i64 {rawI64} to i32");
@@ -123,8 +140,7 @@ public sealed partial class IRCodeGenerator
                 EmitWriteFile(wfPath, wfContent);
                 break;
 
-            // let name NamedType: { fields } — thread the type name into EmitStructLiteral so
-            // field types can be looked up from _module.TypeDeclarations without per-field annotations.
+            // let name NamedType: { fields } — thread type name into EmitStructLiteral.
             case LetStatement { Name: var name, Value: StructLiteralExpression sl, TypeAnnotation: var slAnn }:
                 var (slVal, slType) = EmitStructLiteral(sl, slAnn.Name);
                 var slPtr = $"%{name}.addr";
@@ -133,31 +149,38 @@ public sealed partial class IRCodeGenerator
                 _vars[name] = (slPtr, slType);
                 break;
 
-            // let name TypeAnnotation: expr — every alloca is `ptr`.
+            // let name TypeAnnotation: expr — scalars use raw alloca types.
             case LetStatement { Name: var name, Value: var valExpr, TypeAnnotation: var ann }:
+                var annType = SuruTypeFromAnnotation(ann);
                 if (valExpr is FieldAccessExpression { ResolvedType: null } faLet)
-                    faLet.ResolvedType = SuruTypeFromAnnotation(ann);
+                    faLet.ResolvedType = annType;
                 var (letVal, letType) = EmitValue(valExpr);
-                // Int32 annotation coerces an Int64 Box to an Int32 Box.
+                // Annotation-guided coercion: e.g. `let x Int64: arr.at(0)` returns (ptr, Struct).
+                if (IsScalar(annType) && letType == SuruType.Struct)
+                {
+                    letVal  = UnboxScalar(letVal, annType);
+                    letType = annType;
+                }
+                // Int32 annotation coerces raw i64 to raw i32.
                 if (ann.Name == "Int32" && letType == SuruType.Int64)
                 {
                     if (valExpr is IntLiteral intLit)
                     {
-                        letVal  = BoxInt32(intLit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        letVal  = intLit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
                         letType = SuruType.Int32;
                     }
                     else
                     {
-                        var rawI = UnboxInt64(letVal);
                         var i32t = NextTmp();
-                        _funcs.AppendLine($"  {i32t} = trunc i64 {rawI} to i32");
-                        letVal  = BoxInt32(i32t);
+                        _funcs.AppendLine($"  {i32t} = trunc i64 {letVal} to i32");
+                        letVal  = i32t;
                         letType = SuruType.Int32;
                     }
                 }
+                var llvmT    = LlvmType(letType);
                 var allocPtr = $"%{name}.addr";
-                _funcs.AppendLine($"  {allocPtr} = alloca ptr");
-                _funcs.AppendLine($"  store ptr {letVal}, ptr {allocPtr}");
+                _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
+                _funcs.AppendLine($"  store {llvmT} {letVal}, ptr {allocPtr}");
                 _vars[name] = (allocPtr, letType);
                 break;
 
@@ -168,22 +191,34 @@ public sealed partial class IRCodeGenerator
                 _blockOpen = false;
                 break;
 
-            // return expr — use _currentFnReturnLlvmType so `ret` matches the definition.
+            // return expr — coerce dynamic ptr to raw scalar if function declares scalar return.
             case ReturnStatement { Value: var retExpr }:
                 if (retExpr is FieldAccessExpression { ResolvedType: null } faRet)
                     faRet.ResolvedType = _currentFnReturnSuruType;
-                var retVal = retExpr is null ? "null" : EmitValue(retExpr).Item1;
+                string retVal;
+                if (retExpr is null)
+                {
+                    retVal = DefaultReturnValue(_currentFnReturnSuruType);
+                }
+                else
+                {
+                    var (rv, rvType) = EmitValue(retExpr);
+                    // If function returns scalar but expression returned a dynamic Struct ptr, unbox.
+                    retVal = IsScalar(_currentFnReturnSuruType) && !IsScalar(rvType)
+                        ? UnboxScalar(rv, _currentFnReturnSuruType)
+                        : rv;
+                }
                 _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {retVal}");
                 _blockOpen = false;
                 break;
 
-            // while cond { body } — unbox condition to i1 before branching.
+            // while cond { body } — condition is already raw i1 for Bool expressions.
             case WhileStatement { Condition: var whileCond, Body: var whileBody }:
                 var wn = _whileCounter++;
                 _funcs.AppendLine($"  br label %while_cond_{wn}");
                 _funcs.AppendLine($"while_cond_{wn}:");
-                var (condVal2, _) = EmitValue(whileCond);
-                var condI1 = UnboxBool(condVal2);
+                var (condVal2, condType2) = EmitValue(whileCond);
+                var condI1 = IsScalar(condType2) ? condVal2 : UnboxBool(condVal2);
                 _funcs.AppendLine($"  br i1 {condI1}, label %while_body_{wn}, label %while_after_{wn}");
                 _funcs.AppendLine($"while_body_{wn}:");
                 foreach (var bodyStmt in whileBody)
@@ -194,11 +229,16 @@ public sealed partial class IRCodeGenerator
                 _blockOpen = true;
                 break;
 
-            // name: expr — store new value (always ptr) into existing alloca.
+            // name: expr — store new value into existing alloca (raw type for scalars).
             case AssignmentStatement { Name: var assignName, Value: var assignExpr }:
-                var (assignVal, _) = EmitValue(assignExpr);
-                var (assignPtrAddr, _) = _vars[assignName];
-                _funcs.AppendLine($"  store ptr {assignVal}, ptr {assignPtrAddr}");
+                var (assignPtrAddr, assignVarType) = _vars[assignName];
+                var (assignVal, assignExprType)    = EmitValue(assignExpr);
+                // If var is scalar but expr returned a dynamic ptr (Struct), unbox first.
+                var storeVal  = IsScalar(assignVarType) && !IsScalar(assignExprType)
+                    ? UnboxScalar(assignVal, assignVarType)
+                    : assignVal;
+                var storeLlvmT = LlvmType(assignVarType);
+                _funcs.AppendLine($"  store {storeLlvmT} {storeVal}, ptr {assignPtrAddr}");
                 break;
 
             case FieldAssignmentStatement fieldAssign:

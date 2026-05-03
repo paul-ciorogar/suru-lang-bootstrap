@@ -23,10 +23,25 @@ public sealed partial class IRCodeGenerator
             : throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
     };
 
-    // Every Suru value in user .ll is a `ptr` (Box for scalars, direct heap ptr for rest).
-    private static string LlvmType(SuruType _) => "ptr";
+    // Scalars use their raw LLVM type; heap types remain `ptr`.
+    // Scalars (Bool/Int32/Int64/Float64) are stored as raw LLVM types in local vars,
+    // function params, and returns. Box calls are made only at three boundary points:
+    // printLn/printError, array element store/load, and struct field store/load.
+    private static string LlvmType(SuruType type) => type switch
+    {
+        SuruType.Bool    => "i1",
+        SuruType.Int32   => "i32",
+        SuruType.Int64   => "i64",
+        SuruType.Float64 => "double",
+        _                => "ptr",
+    };
 
-    // Raw LLVM type for scalar operations (box/unbox calls, global constant loads, arithmetic).
+    // True for the four scalar types that use raw LLVM types (not ptr).
+    private static bool IsScalar(SuruType t) =>
+        t is SuruType.Bool or SuruType.Int32 or SuruType.Int64 or SuruType.Float64;
+
+    // Raw LLVM type for arithmetic/comparison operands.
+    // Struct is treated as i64 (unknown field assumed to be box-of-Int64 at runtime).
     private static string RawLlvmType(SuruType type) => type switch
     {
         SuruType.Bool    => "i1",
@@ -37,8 +52,9 @@ public sealed partial class IRCodeGenerator
         _                => "ptr",
     };
 
+    // Void functions map to SuruType.Struct so LlvmType → "ptr" and implicit return is `ret ptr null`.
     private SuruType FnReturnSuruType(FunctionDeclaration fn)
-        => fn.ReturnType.Name is "void" ? SuruType.Int64 : SuruTypeFromAnnotation(fn.ReturnType);
+        => fn.ReturnType.Name is "void" ? SuruType.Struct : SuruTypeFromAnnotation(fn.ReturnType);
 
     // ─── Box / Unbox helpers ──────────────────────────────────────────────────
 
@@ -151,6 +167,16 @@ public sealed partial class IRCodeGenerator
     // The Suru lexer has already unescaped all escape sequences, so there are no
     // multi-char escape tokens here — each char in the C# string is a real byte.
     private static int CountStringBytes(string source) => source.Length;
+
+    // Default zero-value constant for use in implicit returns.
+    private static string DefaultReturnValue(SuruType type) => type switch
+    {
+        SuruType.Bool    => "0",
+        SuruType.Int32   => "0",
+        SuruType.Int64   => "0",
+        SuruType.Float64 => "0.0",
+        _                => "null",
+    };
 
     private string NextTmp() => $"%t{_tmp++}";
 }

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5f — Remove Scalar Boxing
+
+Scalars (Bool, Int32, Int64, Float64) are now stored as raw LLVM types (`i1`, `i32`, `i64`, `double`) in local variables, function parameters, and return values. No heap allocation for scalar literals or arithmetic results.
+
+**Changes:**
+- **`LlvmType()`** now returns raw LLVM types for scalars (`i1`/`i32`/`i64`/`double`) instead of always `ptr`.
+- **`IsScalar()`** new helper predicate distinguishing the four scalar types from heap types.
+- **`EmitValue` for literals** returns raw constants (e.g., `("42", Int64)` not a box ptr).
+- **`EmitLoad`** returns raw values for scalar local vars and global constants.
+- **Alloca pattern** uses `alloca i64` / `alloca i1` / etc. for scalar local variables.
+- **Function params/returns** use raw LLVM types for scalars; void functions remain `ptr`.
+- **`FnReturnSuruType`** maps void → `SuruType.Struct` (previously `SuruType.Int64`) to naturally resolve to `"ptr"` via `LlvmType`.
+- **Arithmetic/comparison/logical ops** (`EmitBinOp`, `EmitCmp`, `EmitCompare`, `EmitInvert`, `EmitBoolNot`, `EmitBinaryExpr`) operate directly on raw values — no unbox before, no rebox after.
+- **Print boundary boxing:** `printLn`/`printError` box scalar args before calling the runtime (`suru_println`/`suru_printerror` still take `ptr`).
+- **Array boundary boxing:** `EmitArrayAdd`/`EmitArraySet` box scalar elements; `EmitArrayAt` returns `ptr` (unboxed via annotation-guided coercion at let/assignment/return sites).
+- **Struct boundary boxing:** `EmitStructLiteral`/`EmitFieldAssignment` box scalars via `EmitToI64`; `EmitFieldAccess` unboxes scalar results when `fa.ResolvedType` is scalar.
+- **Match expressions:** `EmitMatchAsExpression` result alloca uses `alloca {LlvmType(resultType)}`; `EmitMatchTestChain` uses raw values directly — no `UnboxScalar` for known scalar conditions/patterns.
+- **String/Array methods returning scalars** (`len`, `ord`, `equals`, `Int64.from`) return raw values; index args (`at`, `slice`) accept raw i64.
+- **Annotation-guided coercion** added to `LetStatement`, `AssignmentStatement`, and `ReturnStatement` to handle dynamic `(ptr, SuruType.Struct)` results when the declared type is scalar.
+- **`clone(scalar)`** is a no-op (returns raw value); **`drop(scalar)`** is a no-op.
+- **`DefaultReturnValue()`** new helper for implicit function returns.
+- All 61 tests pass; no heap allocations for scalar literals or arithmetic.
+
 ### Stage 12.5e — Update suru-parser Fixture
 
 The `suru-parser.suru` fixture is fully updated to use named types — no `Struct` keyword remains in any `.suru` source file in the repository. The Suru parser now also handles `type` declarations, enabling cross-validation against the Suru lexer source (which contains named type declarations added in Stage 12.5d).

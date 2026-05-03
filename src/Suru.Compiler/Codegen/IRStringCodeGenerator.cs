@@ -94,11 +94,11 @@ partial class IRCodeGenerator
 
     // ─── String instance methods ─────────────────────────────────────────────
 
-    // .len() → Box(Int64): GEP+load the raw len, then box it.
+    // .len() → raw i64: GEP+load the len field directly.
     private (string val, SuruType type) EmitStringLen(string seqVal)
     {
         var raw = EmitExtractStringLen(seqVal);
-        return (BoxInt64(raw), SuruType.Int64);
+        return (raw, SuruType.Int64);
     }
 
     // .append(other) → String
@@ -111,48 +111,48 @@ partial class IRCodeGenerator
         return (tmp, SuruType.String);
     }
 
-    // .at(i) → String: unbox idx Box(Int64), then call @suru_string_at.
+    // .at(i) → String: idx is raw i64 (or Struct ptr if dynamic).
     private (string val, SuruType type) EmitStringAt(string seqVal, Expression idxExpr)
     {
-        var (idxBox, _) = EmitValue(idxExpr);
-        var idx = UnboxInt64(idxBox);
+        var (idxVal, idxType) = EmitValue(idxExpr);
+        var idx = IsScalar(idxType) ? idxVal : UnboxInt64(idxVal);
         _runtimeDecls.AddStringAt();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_string_at(ptr {seqVal}, i64 {idx})");
         return (tmp, SuruType.String);
     }
 
-    // .equals(other) → Box(Bool)
+    // .equals(other) → raw i1 Bool.
     private (string val, SuruType type) EmitStringEquals(string lhsSeqVal, Expression rhsExpr)
     {
         var (rhsSeqVal, _) = EmitValue(rhsExpr);
         _runtimeDecls.AddStringEquals();
         var rawBool = NextTmp();
         _funcs.AppendLine($"  {rawBool} = call i1 @suru_string_equals(ptr {lhsSeqVal}, ptr {rhsSeqVal})");
-        return (BoxBool(rawBool), SuruType.Bool);
+        return (rawBool, SuruType.Bool);
     }
 
-    // .slice(from, to) → String: unbox from/to Box(Int64).
+    // .slice(from, to) → String: from/to are raw i64 (or Struct ptr if dynamic).
     private (string val, SuruType type) EmitStringSlice(
         string seqVal, Expression fromExpr, Expression toExpr)
     {
-        var (fromBox, _) = EmitValue(fromExpr);
-        var (toBox, _)   = EmitValue(toExpr);
-        var from = UnboxInt64(fromBox);
-        var to   = UnboxInt64(toBox);
+        var (fromVal, fromType) = EmitValue(fromExpr);
+        var (toVal, toType)     = EmitValue(toExpr);
+        var from = IsScalar(fromType) ? fromVal : UnboxInt64(fromVal);
+        var to   = IsScalar(toType)   ? toVal   : UnboxInt64(toVal);
         _runtimeDecls.AddStringSlice();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_string_slice(ptr {seqVal}, i64 {from}, i64 {to})");
         return (tmp, SuruType.String);
     }
 
-    // .ord() → Box(Int64): ASCII code of the first byte.
+    // .ord() → raw i64: ASCII code of the first byte.
     private (string val, SuruType type) EmitStringOrd(string seqVal)
     {
         _runtimeDecls.AddStringOrd();
         var rawOrd = NextTmp();
         _funcs.AppendLine($"  {rawOrd} = call i64 @suru_string_ord(ptr {seqVal})");
-        return (BoxInt64(rawOrd), SuruType.Int64);
+        return (rawOrd, SuruType.Int64);
     }
 
     // ─── Clone ───────────────────────────────────────────────────────────────
@@ -188,14 +188,14 @@ partial class IRCodeGenerator
 
     // ─── String ↔ Int64 conversions ──────────────────────────────────────────
 
-    // Int64.from(str) → Box(Int64): parse a decimal string via strtol, then box.
+    // Int64.from(str) → raw i64: parse a decimal string via strtol.
     private (string val, SuruType type) EmitInt64FromString(Expression arg)
     {
         var (seqVal, _) = EmitValue(arg);
         _runtimeDecls.AddInt64FromString();
         var rawI64 = NextTmp();
         _funcs.AppendLine($"  {rawI64} = call i64 @suru_int64_from_string(ptr {seqVal})");
-        return (BoxInt64(rawI64), SuruType.Int64);
+        return (rawI64, SuruType.Int64);
     }
 
     // n.toString() → String: format a raw i64 via snprintf.

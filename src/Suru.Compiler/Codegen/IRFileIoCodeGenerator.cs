@@ -8,12 +8,12 @@ public sealed partial class IRCodeGenerator
     // ─── Array.at for argv ───────────────────────────────────────────────────
 
     // args.at(i) — extract the i-th element from the argv Seq built by @main.
-    // The index is a Box(Int64) ptr; unbox before GEP.
+    // Index is raw i64 for scalar expressions, or a box ptr for dynamic values.
     private (string val, SuruType type) EmitArgAt(string seqVal, Expression idxExpr)
     {
-        var data     = EmitExtractStringData(seqVal);   // char**
-        var (idxBox, _) = EmitValue(idxExpr);
-        var idx      = UnboxInt64(idxBox);              // unbox Box(Int64) → i64
+        var data                = EmitExtractStringData(seqVal);   // char**
+        var (idxVal, idxType)   = EmitValue(idxExpr);
+        var idx                 = IsScalar(idxType) ? idxVal : UnboxInt64(idxVal);
 
         var slotPtr = NextTmp();
         var cstrPtr = NextTmp();
