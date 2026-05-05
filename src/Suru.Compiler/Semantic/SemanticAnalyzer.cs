@@ -6,8 +6,14 @@ namespace Suru.Compiler.Semantic;
 public sealed class SemanticAnalyzer
 {
     private readonly Module _module;
-    private readonly Dictionary<string, SuruType> _symbols = new();
-    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _structSymbols = new();
+
+    // Scope stack: index 0 (bottom) = module scope, top = innermost block.
+    // Each frame maps variable name → SuruType. LookupSymbol walks top→bottom.
+    private readonly Stack<Dictionary<string, SuruType>> _scopes = new();
+
+    // Parallel stack for struct field metadata (name → field list).
+    private readonly Stack<Dictionary<string, List<(string Name, SuruType Type)>>> _structScopes = new();
+
     private readonly Dictionary<string, (IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)> _functions = new();
     private readonly HashSet<string> _constants = new();
     private readonly List<string> _errors = [];
@@ -15,7 +21,6 @@ public sealed class SemanticAnalyzer
     private string? _currentFunctionReturnTypeName = null;
     private bool _currentFunctionIsVoid = false;
     private string? _currentFunctionName = null;
-    private bool _insideFunction = false;
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
     private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
 
@@ -32,14 +37,57 @@ public sealed class SemanticAnalyzer
 
     private IReadOnlyList<string> _Analyze()
     {
+        PushScope(); // module scope — lives for the entire analysis pass
         foreach (var stmt in _module.Statements)
             if (stmt is TypeDeclaration td) RegisterTypeDeclaration(td);
         foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration fn) RegisterFunction(fn);
         foreach (var stmt in _module.Statements)
             AnalyzeStatement(stmt);
+        PopScope();
         return _errors;
     }
+
+    // ─── Scope helpers ───────────────────────────────────────────────────────
+
+    private void PushScope()
+    {
+        _scopes.Push(new Dictionary<string, SuruType>());
+        _structScopes.Push(new Dictionary<string, List<(string Name, SuruType Type)>>());
+    }
+
+    private void PopScope()
+    {
+        _scopes.Pop();
+        _structScopes.Pop();
+    }
+
+    // Walks the scope stack from innermost to outermost.
+    private SuruType? LookupSymbol(string name)
+    {
+        foreach (var scope in _scopes)
+            if (scope.TryGetValue(name, out var t)) return t;
+        return null;
+    }
+
+    // Only checks the current (innermost) scope — used for duplicate-declaration detection.
+    private bool ExistsInCurrentScope(string name) =>
+        _scopes.Count > 0 && _scopes.Peek().ContainsKey(name);
+
+    private void DeclareSymbol(string name, SuruType type) =>
+        _scopes.Peek()[name] = type;
+
+    private List<(string Name, SuruType Type)>? LookupStructMeta(string name)
+    {
+        foreach (var scope in _structScopes)
+            if (scope.TryGetValue(name, out var meta)) return meta;
+        return null;
+    }
+
+    private void DeclareStructMeta(string name, List<(string Name, SuruType Type)> meta) =>
+        _structScopes.Peek()[name] = meta;
+
+    // ─── Pre-pass registrations ───────────────────────────────────────────────
 
     private void RegisterTypeDeclaration(TypeDeclaration td)
     {
@@ -90,6 +138,8 @@ public sealed class SemanticAnalyzer
         _ => _typeDeclarations.ContainsKey(ann.Name) ? SuruType.Struct : null,
     };
 
+    // ─── Statement analysis ───────────────────────────────────────────────────
+
     private void AnalyzeStatement(Statement stmt)
     {
         switch (stmt)
@@ -134,15 +184,17 @@ public sealed class SemanticAnalyzer
         var condType = InferType(whileStmt.Condition);
         if (condType.HasValue && condType.Value != SuruType.Bool)
             _errors.Add($"{_module.SourcePath}: while condition must be Bool, got {condType.Value}");
+        PushScope();
         foreach (var bodyStmt in whileStmt.Body)
             AnalyzeStatement(bodyStmt);
+        PopScope();
     }
 
     private void AnalyzeAssignmentStatement(AssignmentStatement assign)
     {
         if (_constants.Contains(assign.Name))
             _errors.Add($"{_module.SourcePath}: cannot reassign constant '{assign.Name}'");
-        else if (!_symbols.ContainsKey(assign.Name))
+        else if (LookupSymbol(assign.Name) is null)
             _errors.Add($"{_module.SourcePath}: undefined variable '{assign.Name}'");
         AnalyzeExpression(assign.Value);
     }
@@ -151,13 +203,14 @@ public sealed class SemanticAnalyzer
     {
         AnalyzeExpression(fieldAssign.Value);
         if (fieldAssign.Receiver is VariableReferenceExpression rv &&
-            !_symbols.ContainsKey(rv.Name))
+            LookupSymbol(rv.Name) is null)
             _errors.Add($"{_module.SourcePath}: undefined variable '{rv.Name}'");
     }
 
     private void AnalyzeLetStatement(LetStatement let)
     {
-        if (_symbols.ContainsKey(let.Name))
+        // Duplicate check is scoped to the current block — shadowing an outer scope is allowed.
+        if (ExistsInCurrentScope(let.Name))
             _errors.Add($"{_module.SourcePath}: variable '{let.Name}' is already declared");
         else
         {
@@ -167,14 +220,15 @@ public sealed class SemanticAnalyzer
                 _errors.Add($"{_module.SourcePath}: unknown type '{let.TypeAnnotation}' for variable '{let.Name}'");
             else
             {
-                _symbols[let.Name] = type.Value;
+                DeclareSymbol(let.Name, type.Value);
                 if (type.Value == SuruType.Struct)
                 {
                     ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
                     PropagateStructMeta(let.Name, let.Value, let.TypeAnnotation.Name);
                 }
             }
-            if (!_insideFunction)
+            // Module-scope lets (stack depth == 1) are constants — reassignment is forbidden.
+            if (_scopes.Count == 1)
                 _constants.Add(let.Name);
         }
     }
@@ -213,48 +267,47 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeFunctionDeclaration(FunctionDeclaration fn)
     {
-        var outerSymbols = new Dictionary<string, SuruType>(_symbols);
-        var outerStructSymbols = new Dictionary<string, List<(string, SuruType)>>(_structSymbols);
-        _symbols.Clear();
-        _structSymbols.Clear();
-        foreach (var kv in outerSymbols)
-            if (_constants.Contains(kv.Key))
-                _symbols[kv.Key] = kv.Value;
+        // Each function gets a fresh scope frame; the module scope stays below it on the
+        // stack, so module-level constants remain visible through LookupSymbol.
+        PushScope();
 
-        if (_functions.TryGetValue(fn.Name, out var sig))
-        {
-            for (int i = 0; i < fn.Parameters.Count; i++)
-                if (i < sig.ParamTypes.Count)
-                    _symbols[fn.Parameters[i].Name] = sig.ParamTypes[i];
-        }
+        _functions.TryGetValue(fn.Name, out var sig);
+        for (int i = 0; i < fn.Parameters.Count; i++)
+            if (i < sig.ParamTypes.Count)
+                DeclareSymbol(fn.Parameters[i].Name, sig.ParamTypes[i]);
 
-        _currentFunctionReturnType = sig.ReturnType;
+        _currentFunctionReturnType    = sig.ReturnType;
         _currentFunctionReturnTypeName = fn.ReturnType.Name;
-        _currentFunctionIsVoid = fn.ReturnType.Name == "void";
-        _currentFunctionName = fn.Name;
-        _insideFunction = true;
+        _currentFunctionIsVoid        = fn.ReturnType.Name == "void";
+        _currentFunctionName          = fn.Name;
 
-        bool hasReturn = false;
+        // Conservative reachability: treat any return/exit anywhere in the body as
+        // satisfying the non-void return requirement. Full CFG analysis is out of scope.
+        bool hasReturn = CheckHasReturn(fn.Body);
         foreach (var bodyStmt in fn.Body)
-        {
             AnalyzeStatement(bodyStmt);
-            if (bodyStmt is ReturnStatement) hasReturn = true;
-            if (bodyStmt is ExpressionStatement { Expression: CallExpression { Name: "exit" } })
-                hasReturn = true;
-        }
 
         if (!_currentFunctionIsVoid && !hasReturn && fn.Name != "main")
             _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
-        _symbols.Clear();
-        _structSymbols.Clear();
-        foreach (var kv in outerSymbols) _symbols[kv.Key] = kv.Value;
-        foreach (var kv in outerStructSymbols) _structSymbols[kv.Key] = kv.Value;
-        _currentFunctionReturnType = null;
+        PopScope();
+        _currentFunctionReturnType     = null;
         _currentFunctionReturnTypeName = null;
-        _currentFunctionIsVoid = false;
-        _currentFunctionName = null;
-        _insideFunction = false;
+        _currentFunctionIsVoid         = false;
+        _currentFunctionName           = null;
+    }
+
+    // Returns true if any reachable statement in stmts is a return or exit.
+    // Recurses into while bodies; match arm bodies are expressions so they can't contain returns.
+    private bool CheckHasReturn(IReadOnlyList<Statement> stmts)
+    {
+        foreach (var stmt in stmts)
+        {
+            if (stmt is ReturnStatement) return true;
+            if (stmt is ExpressionStatement { Expression: CallExpression { Name: "exit" } }) return true;
+            if (stmt is WhileStatement ws && CheckHasReturn(ws.Body)) return true;
+        }
+        return false;
     }
 
     private void PropagateStructMeta(string varName, Expression value, string typeName)
@@ -270,19 +323,19 @@ public sealed class SemanticAnalyzer
                         var t = ResolveTypeAnnotation(fieldTypeAnn);
                         if (t.HasValue) fields.Add((fname, t.Value));
                     }
-                    _structSymbols[varName] = fields;
+                    DeclareStructMeta(varName, fields);
                 }
                 break;
-            case VariableReferenceExpression v when _structSymbols.TryGetValue(v.Name, out var meta):
-                _structSymbols[varName] = new List<(string, SuruType)>(meta);
+            case VariableReferenceExpression v when LookupStructMeta(v.Name) is { } meta:
+                DeclareStructMeta(varName, new List<(string, SuruType)>(meta));
                 break;
             case CallExpression { Name: "clone", Args.Count: 1 } call
                 when call.Args[0] is VariableReferenceExpression src
-                  && _structSymbols.TryGetValue(src.Name, out var srcMeta):
-                _structSymbols[varName] = new List<(string, SuruType)>(srcMeta);
+                  && LookupStructMeta(src.Name) is { } srcMeta:
+                DeclareStructMeta(varName, new List<(string, SuruType)>(srcMeta));
                 break;
             case CallExpression call when _functionReturnStructSymbols.TryGetValue(call.Name, out var fnMeta):
-                _structSymbols[varName] = new List<(string, SuruType)>(fnMeta);
+                DeclareStructMeta(varName, new List<(string, SuruType)>(fnMeta));
                 break;
             case MatchExpression match when match.Arms.Count > 0:
                 PropagateStructMeta(varName, match.Arms[0].Body, typeName);
@@ -304,13 +357,15 @@ public sealed class SemanticAnalyzer
             _errors.Add($"{_module.SourcePath}: struct '{typeName}' expects {typeDecl.Fields.Count} field(s), got {lit.Fields.Count}");
     }
 
+    // ─── Expression analysis ──────────────────────────────────────────────────
+
     private void AnalyzeExpression(Expression expr)
     {
         switch (expr)
         {
             case VariableReferenceExpression varRef:
                 if (varRef.Name is not ("Int32" or "Int64" or "Float64" or "Bool")
-                    && !_symbols.ContainsKey(varRef.Name)
+                    && LookupSymbol(varRef.Name) is null
                     && !_module.Namespaces.Contains(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
                 break;
@@ -449,6 +504,8 @@ public sealed class SemanticAnalyzer
         }
     }
 
+    // ─── Type inference ───────────────────────────────────────────────────────
+
     private SuruType? InferType(Expression expr) => expr switch
     {
         BoolLiteral                => SuruType.Bool,
@@ -458,10 +515,10 @@ public sealed class SemanticAnalyzer
         ArrayLiteralExpression     => SuruType.Array,
         StringLiteralExpression    => SuruType.String,
         FieldAccessExpression fa when fa.Receiver is VariableReferenceExpression fv
-            && _structSymbols.TryGetValue(fv.Name, out var fields)
+            && LookupStructMeta(fv.Name) is { } fields
             => fields.FirstOrDefault(f => f.Name == fa.FieldName) is var field && field.Name != null
                 ? field.Type : null,
-        VariableReferenceExpression v => _symbols.TryGetValue(v.Name, out var t) ? t : null,
+        VariableReferenceExpression v => LookupSymbol(v.Name),
         MethodCallExpression { MethodName: "compare" } => SuruType.Int64,
         MethodCallExpression { MethodName: "equals" or "lt" or "gt" or "lte" or "gte" } => SuruType.Bool,
         MethodCallExpression { MethodName: "len" or "ord" } => SuruType.Int64,

@@ -40,6 +40,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var tokens = Lexer.Tokenize("type Point: { x Int64 }").ToList();
         Assert.Equal(TokenKind.Type, tokens[0].Kind);
         Assert.Equal("type", tokens[0].Text);
+        _testPassed = true;
     }
 
     [Fact]
@@ -49,6 +50,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var tokens = Lexer.Tokenize("type").ToList();
         Assert.Equal(TokenKind.Type, tokens[0].Kind);
         Assert.NotEqual(TokenKind.Identifier, tokens[0].Kind);
+        _testPassed = true;
     }
 
     // ─── Parser unit tests ───────────────────────────────────────────────────
@@ -64,6 +66,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         Assert.Equal("Int64", td.Fields[0].Type.Name);
         Assert.Equal("y", td.Fields[1].Field);
         Assert.Equal("Int64", td.Fields[1].Type.Name);
+        _testPassed = true;
     }
 
     [Fact]
@@ -78,6 +81,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         Assert.Equal("String", td.Fields[0].Type.Name);
         Assert.Equal("age", td.Fields[1].Field);
         Assert.Equal("Int64", td.Fields[1].Type.Name);
+        _testPassed = true;
     }
 
     [Fact]
@@ -86,6 +90,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var module = ParseSource("type Point: { x Int64, y Int64 }\nfn main(args Array<String>) { }");
         Assert.True(module.TypeDeclarations.ContainsKey("Point"));
         Assert.Equal(2, module.TypeDeclarations["Point"].Fields.Count);
+        _testPassed = true;
     }
 
     [Fact]
@@ -95,6 +100,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         var td = module.Statements.OfType<TypeDeclaration>().First();
         Assert.Equal("Array", td.Fields[0].Type.Name);
         Assert.Equal("Int64", td.Fields[0].Type.TypeParam!.Name);
+        _testPassed = true;
     }
 
     // ─── Semantic unit tests ─────────────────────────────────────────────────
@@ -110,6 +116,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Empty(errors);
+        _testPassed = true;
     }
 
     [Fact]
@@ -122,6 +129,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Contains(errors, e => e.Contains("Unknown"));
+        _testPassed = true;
     }
 
     [Fact]
@@ -134,6 +142,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Contains(errors, e => e.Contains("Point") && e.Contains("already declared"));
+        _testPassed = true;
     }
 
     [Fact]
@@ -148,6 +157,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Empty(errors);
+        _testPassed = true;
     }
 
     // ─── Stage 12.5c: Typed struct instantiation (no field annotations) ──────
@@ -162,6 +172,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         Assert.Equal(2, sl.Fields.Count);
         Assert.Equal("x", sl.Fields[0].Name);
         Assert.Equal("y", sl.Fields[1].Name);
+        _testPassed = true;
     }
 
     [Fact]
@@ -175,6 +186,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Empty(errors);
+        _testPassed = true;
     }
 
     [Fact]
@@ -188,6 +200,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Contains(errors, e => e.Contains("Point") && e.Contains("field"));
+        _testPassed = true;
     }
 
     [Fact]
@@ -201,6 +214,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Contains(errors, e => e.Contains("Point") && e.Contains("'z'"));
+        _testPassed = true;
     }
 
     [Fact]
@@ -214,6 +228,7 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             """;
         var errors = AnalyzeSource(src);
         Assert.Contains(errors, e => e.Contains("Point") && e.Contains("2 field"));
+        _testPassed = true;
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

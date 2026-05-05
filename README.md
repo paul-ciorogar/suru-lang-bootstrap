@@ -516,6 +516,7 @@ Suru is being implemented in stages toward compiling its own source. Each stage 
 | 9 | **Lexer in Suru** (`tests/fixtures/suru-lexer/`) — tokenises Suru source; cross-validated against C# lexer | ✅ Complete |
 | 10–11 | Language convenience: mandatory type annotations, constants, `include`, negative literals, `printError` | ✅ Complete |
 | 12 | **Parser in Suru** (`tests/fixtures/suru-parser/`) — recursive-descent parser; cross-validated against C# parser | ✅ Complete |
+| 12.5g | **Semantic analysis re-enabled** — block-level scope stack; semantic errors on every compile path | ✅ Complete |
 | 13 | Semantic Analyzer in Suru | ⬜ Planned |
 | 14 | Code Generator in Suru | ⬜ Planned |
 | 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |

@@ -216,6 +216,10 @@ public class Compiler
             return (null, [$"Include resolution failed: {ex.Message}"]);
         }
 
+        var semanticErrors = SemanticAnalyzer.Analyze(module);
+        if (semanticErrors.Count > 0)
+            return (null, semanticErrors);
+
         return (module, []);
     }
 

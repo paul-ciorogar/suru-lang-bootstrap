@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 12.5g — Re-enable & Fix Semantic Analysis
+
+`SemanticAnalyzer.Analyze()` is now called on every compile path. Invalid programs are rejected before codegen with meaningful error messages.
+
+**Changes:**
+- **`Compiler.ParseAndResolve()`** — calls `SemanticAnalyzer.Analyze(module)` after include resolution; propagates errors through `CompilationResult.Fail` so both `GenerateIr()` and `CompileIR()` surface semantic errors.
+- **Block-level scope stack** — `_symbols` and `_structSymbols` (flat dicts) replaced by `_scopes: Stack<Dictionary<string, SuruType>>` and `_structScopes: Stack<Dictionary<string, List<…>>>`. Scope helpers: `PushScope`/`PopScope`, `LookupSymbol` (walks top→bottom), `ExistsInCurrentScope` (current frame only), `DeclareSymbol`, `LookupStructMeta`, `DeclareStructMeta`.
+- **`AnalyzeWhileStatement`** — pushes a fresh scope before the body and pops after; `let` names reused across sequential while loops no longer trigger false "already declared" errors.
+- **`AnalyzeFunctionDeclaration`** — replaced save/clear/restore pattern with push/pop; module-scope constants remain visible inside functions via natural stack traversal — no explicit re-injection needed. Removed `_insideFunction` field; module scope detected by `_scopes.Count == 1`.
+- **`CheckHasReturn`** — new helper that recurses into `while` bodies; a `return` or `exit` anywhere in the function (including inside nested loops) satisfies the non-void return requirement.
+- **`SemanticAnalyzerTests.cs`** — 15 new unit tests: undefined variable, constant reassignment, unknown type, duplicate type, duplicate function, missing return, sequential while reuse (block scoping), return inside while, exit inside while, module constants visible in functions.
+- All 76 tests pass.
+
+---
+
 ### Stage 12.5f — Remove Scalar Boxing
 
 Scalars (Bool, Int32, Int64, Float64) are now stored as raw LLVM types (`i1`, `i32`, `i64`, `double`) in local variables, function parameters, and return values. No heap allocation for scalar literals or arithmetic results.
