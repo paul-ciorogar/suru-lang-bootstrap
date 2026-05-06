@@ -12,7 +12,6 @@ public sealed partial class IRCodeGenerator
     {
         if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
         {
-            // External functions (from include): use raw types for scalars.
             var retSuruType = FnReturnSuruType(fn);
             var retLlvmType = fn.ReturnType.Name == "void" ? "void" : LlvmType(retSuruType);
             var paramTypes  = string.Join(", ", fn.Parameters.Select(p =>
@@ -21,10 +20,9 @@ public sealed partial class IRCodeGenerator
             return;
         }
 
-        _blockOpen          = true;
-        _vars               = new();
-        _argvVars           = new();
-        _arrayElementTypes  = new();
+        _blockOpen = true;
+        _vars      = new();
+        _argvVars  = new();
 
         if (fn.Name == "main")
         {
@@ -34,18 +32,17 @@ public sealed partial class IRCodeGenerator
             _funcs.AppendLine("entry:");
             _funcs.AppendLine("  %args.addr = alloca ptr");
             _funcs.AppendLine("  store ptr %args, ptr %args.addr");
-            _vars["args"] = ("%args.addr", SuruType.Array);
+            _vars["args"] = ("%args.addr", new SuruType.ArrayType(SuruType.String));
             _argvVars.Add("args");
         }
         else
         {
             var retSuruType = FnReturnSuruType(fn);
-            var retLlvmType = LlvmType(retSuruType);
+            var retLlvmType = retSuruType is SuruType.VoidType ? "ptr" : LlvmType(retSuruType);
             _currentFnReturnLlvmType = retLlvmType;
             _currentFnReturnSuruType = retSuruType;
             _currentFnReturnTypeName = fn.ReturnType.Name;
 
-            // Scalar params use raw LLVM types; non-scalars remain ptr.
             var paramStr = string.Join(", ", fn.Parameters.Select(p =>
             {
                 var pType = SuruTypeFromAnnotation(p.TypeAnnotation);
@@ -62,8 +59,6 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
                 _funcs.AppendLine($"  store {llvmT} %{p.Name}, ptr {allocPtr}");
                 _vars[p.Name] = (allocPtr, pType);
-                if (pType == SuruType.Array && p.TypeAnnotation.TypeParam is { } tp)
-                    _arrayElementTypes[p.Name] = SuruTypeFromAnnotation(tp);
             }
         }
 
@@ -93,8 +88,6 @@ public sealed partial class IRCodeGenerator
                 EmitMatchAsStatement(matchStmt);
                 break;
 
-            // printLn(expr) — dispatch to suru_println which reads type_tag at offset 0.
-            // Scalars must be boxed before passing since the runtime dispatches by type_tag.
             case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args: [var arg] } }:
                 var (pval, ptype) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();
@@ -102,7 +95,6 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  call void @suru_println(ptr {printPtr})");
                 break;
 
-            // printError(expr) — dispatch to suru_printerror (writes to stderr).
             case ExpressionStatement { Expression: CallExpression { Name: "printError", Args: [var errArg] } }:
                 var (errVal, errType) = EmitValue(errArg);
                 _runtimeDecls.AddSuruPrintError();
@@ -110,14 +102,13 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  call void @suru_printerror(ptr {errPtr})");
                 break;
 
-            // exit(code) — code is already a raw i32 or i64; trunc to i32 if needed.
             case ExpressionStatement { Expression: CallExpression { Name: "exit", Args: [var codeExpr] } }:
                 _externals.AddExit();
                 var (codeVal, codeType) = EmitValue(codeExpr);
                 string exitArg;
-                if (codeType == SuruType.Int32)
+                if (codeType is SuruType.Int32Type)
                 {
-                    exitArg = codeVal;   // already raw i32
+                    exitArg = codeVal;
                 }
                 else if (IsScalar(codeType))
                 {
@@ -127,7 +118,6 @@ public sealed partial class IRCodeGenerator
                 }
                 else
                 {
-                    // Dynamic (Struct box ptr) — unbox first.
                     var rawI64 = UnboxInt64(codeVal);
                     var code32 = NextTmp();
                     _funcs.AppendLine($"  {code32} = trunc i64 {rawI64} to i32");
@@ -158,14 +148,14 @@ public sealed partial class IRCodeGenerator
                 if (valExpr is FieldAccessExpression { ResolvedType: null } faLet)
                     faLet.ResolvedType = annType;
                 var (letVal, letType) = EmitValue(valExpr);
-                // Annotation-guided coercion: e.g. `let x Int64: arr.at(0)` returns (ptr, Struct).
-                if (IsScalar(annType) && letType == SuruType.Struct)
+                // Annotation-guided coercion: e.g. `let x Int64: arr.at(0)` returns (ptr, NamedType).
+                if (IsScalar(annType) && !IsScalar(letType))
                 {
                     letVal  = UnboxScalar(letVal, annType);
                     letType = annType;
                 }
                 // Int32 annotation coerces raw i64 to raw i32.
-                if (ann.Name == "Int32" && letType == SuruType.Int64)
+                if (ann.Name == "Int32" && letType is SuruType.Int64Type)
                 {
                     if (valExpr is IntLiteral intLit)
                     {
@@ -184,9 +174,7 @@ public sealed partial class IRCodeGenerator
                 var allocPtr = $"%{name}.addr";
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
                 _funcs.AppendLine($"  store {llvmT} {letVal}, ptr {allocPtr}");
-                _vars[name] = (allocPtr, letType);
-                if (annType == SuruType.Array && ann.TypeParam is { } atp)
-                    _arrayElementTypes[name] = SuruTypeFromAnnotation(atp);
+                _vars[name] = (allocPtr, annType);
                 break;
 
             // return { fields } — thread the declared return type name into EmitStructLiteral.
@@ -208,7 +196,6 @@ public sealed partial class IRCodeGenerator
                 else
                 {
                     var (rv, rvType) = EmitValue(retExpr);
-                    // If function returns scalar but expression returned a dynamic Struct ptr, unbox.
                     retVal = IsScalar(_currentFnReturnSuruType) && !IsScalar(rvType)
                         ? UnboxScalar(rv, _currentFnReturnSuruType)
                         : rv;
@@ -217,7 +204,6 @@ public sealed partial class IRCodeGenerator
                 _blockOpen = false;
                 break;
 
-            // while cond { body } — condition is already raw i1 for Bool expressions.
             case WhileStatement { Condition: var whileCond, Body: var whileBody }:
                 var wn = _whileCounter++;
                 _funcs.AppendLine($"  br label %while_cond_{wn}");
@@ -234,11 +220,9 @@ public sealed partial class IRCodeGenerator
                 _blockOpen = true;
                 break;
 
-            // name: expr — store new value into existing alloca (raw type for scalars).
             case AssignmentStatement { Name: var assignName, Value: var assignExpr }:
                 var (assignPtrAddr, assignVarType) = _vars[assignName];
                 var (assignVal, assignExprType)    = EmitValue(assignExpr);
-                // If var is scalar but expr returned a dynamic ptr (Struct), unbox first.
                 var storeVal  = IsScalar(assignVarType) && !IsScalar(assignExprType)
                     ? UnboxScalar(assignVal, assignVarType)
                     : assignVal;
@@ -261,9 +245,6 @@ public sealed partial class IRCodeGenerator
 
     // ─── @main wrapper ───────────────────────────────────────────────────────
 
-    // Emits a C-ABI `int main(int argc, char** argv)` that builds a %suru.String
-    // wrapping argv (type_tag=6 since it uses the String header layout), then calls
-    // suru_main and returns its exit code.
     private void EmitMainWrapper(StringBuilder sb)
     {
         sb.AppendLine("define i32 @main(i32 %argc, ptr %argv) {");

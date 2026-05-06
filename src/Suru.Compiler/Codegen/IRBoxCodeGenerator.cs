@@ -8,7 +8,8 @@ public sealed partial class IRCodeGenerator
 {
     // ─── Type utilities ───────────────────────────────────────────────────────
 
-    // Non-static so it can consult _module.TypeDeclarations for user-defined named types.
+    // Resolves a TypeAnnotation to the statically-known SuruType.
+    // Consults _module.TypeDeclarations for user-defined named types.
     private SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
     {
         "Bool"    => SuruType.Bool,
@@ -16,45 +17,56 @@ public sealed partial class IRCodeGenerator
         "Int64"   => SuruType.Int64,
         "Float64" => SuruType.Float64,
         "String"  => SuruType.String,
-        "Array"   => SuruType.Array,
-        // Named types declared via `type Foo: { ... }` use the same heap struct layout.
+        "Array"   => ann.TypeParam is { } tp
+                        ? new SuruType.ArrayType(SuruTypeFromAnnotation(tp))
+                        : throw new NotSupportedException($"IR codegen: Array requires a type parameter"),
         _ => _module.TypeDeclarations.ContainsKey(ann.Name)
-            ? SuruType.Struct
-            : throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
+                ? new SuruType.NamedType(ann.Name)
+                : throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
     };
 
-    // Scalars use their raw LLVM type; heap types remain `ptr`.
-    // Scalars (Bool/Int32/Int64/Float64) are stored as raw LLVM types in local vars,
-    // function params, and returns. Box calls are made only at three boundary points:
-    // printLn/printError, array element store/load, and struct field store/load.
+    // Scalars (Bool/Int32/Int64/Float64) use raw LLVM types in local vars,
+    // function params, and returns. All heap types use ptr.
+    // VoidType and NamedType (struct) both map to ptr — void emits `ret ptr null`.
     private static string LlvmType(SuruType type) => type switch
     {
-        SuruType.Bool    => "i1",
-        SuruType.Int32   => "i32",
-        SuruType.Int64   => "i64",
-        SuruType.Float64 => "double",
-        _                => "ptr",
+        SuruType.BoolType    => "i1",
+        SuruType.Int32Type   => "i32",
+        SuruType.Int64Type   => "i64",
+        SuruType.Float64Type => "double",
+        _                    => "ptr",
     };
 
-    // True for the four scalar types that use raw LLVM types (not ptr).
+    // True for the four scalar types that use raw LLVM values (not ptr).
     private static bool IsScalar(SuruType t) =>
-        t is SuruType.Bool or SuruType.Int32 or SuruType.Int64 or SuruType.Float64;
+        t is SuruType.BoolType or SuruType.Int32Type or SuruType.Int64Type or SuruType.Float64Type;
 
     // Raw LLVM type for arithmetic/comparison operands.
-    // Struct is treated as i64 (unknown field assumed to be box-of-Int64 at runtime).
+    // NamedType is treated as i64 (dynamic struct field assumed to be Box<Int64> at runtime).
     private static string RawLlvmType(SuruType type) => type switch
     {
-        SuruType.Bool    => "i1",
-        SuruType.Int32   => "i32",
-        SuruType.Int64   => "i64",
-        SuruType.Float64 => "double",
-        SuruType.Struct  => "i64",   // unknown struct fields unbox as i64 (see UnboxScalar)
-        _                => "ptr",
+        SuruType.BoolType    => "i1",
+        SuruType.Int32Type   => "i32",
+        SuruType.Int64Type   => "i64",
+        SuruType.Float64Type => "double",
+        SuruType.NamedType   => "i64",   // unknown struct field unboxed as i64 (see UnboxScalar)
+        _                    => "ptr",
     };
 
-    // Void functions map to SuruType.Struct so LlvmType → "ptr" and implicit return is `ret ptr null`.
+    // Void functions return SuruType.Void; codegen emits `ret ptr null` for them
+    // since Suru's IR convention uses ptr as the return type for non-scalar functions.
     private SuruType FnReturnSuruType(FunctionDeclaration fn)
-        => fn.ReturnType.Name is "void" ? SuruType.Struct : SuruTypeFromAnnotation(fn.ReturnType);
+        => fn.ReturnType.Name is "void" ? SuruType.Void : SuruTypeFromAnnotation(fn.ReturnType);
+
+    // Default zero-value constant for implicit returns.
+    private static string DefaultReturnValue(SuruType type) => type switch
+    {
+        SuruType.BoolType    => "0",
+        SuruType.Int32Type   => "0",
+        SuruType.Int64Type   => "0",
+        SuruType.Float64Type => "0.0",
+        _                    => "null",
+    };
 
     // ─── Box / Unbox helpers ──────────────────────────────────────────────────
 
@@ -92,11 +104,11 @@ public sealed partial class IRCodeGenerator
 
     private string BoxValue(string rawVal, SuruType type) => type switch
     {
-        SuruType.Bool    => BoxBool(rawVal),
-        SuruType.Int32   => BoxInt32(rawVal),
-        SuruType.Int64   => BoxInt64(rawVal),
-        SuruType.Float64 => BoxFloat64(rawVal),
-        _                => rawVal,   // String/Array/Struct already carry type_tag
+        SuruType.BoolType    => BoxBool(rawVal),
+        SuruType.Int32Type   => BoxInt32(rawVal),
+        SuruType.Int64Type   => BoxInt64(rawVal),
+        SuruType.Float64Type => BoxFloat64(rawVal),
+        _                    => rawVal,   // String/Array/NamedType already carry type_tag
     };
 
     private string UnboxBool(string ptrval)
@@ -132,24 +144,19 @@ public sealed partial class IRCodeGenerator
     }
 
     // Unbox a scalar value to its raw LLVM type for arithmetic/comparison.
-    // For Struct-typed values (dynamic unknown type), assume Int64 at runtime.
+    // For NamedType values (dynamic unknown struct field), assume Int64 at runtime.
     private string UnboxScalar(string ptrval, SuruType type) => type switch
     {
-        SuruType.Bool    => UnboxBool(ptrval),
-        SuruType.Int32   => UnboxInt32(ptrval),
-        SuruType.Int64   => UnboxInt64(ptrval),
-        SuruType.Float64 => UnboxFloat64(ptrval),
-        SuruType.Struct  => UnboxInt64(ptrval),   // assume Box(Int64) at runtime
-        _                => throw new NotSupportedException($"IR codegen: cannot unbox {type}"),
+        SuruType.BoolType    => UnboxBool(ptrval),
+        SuruType.Int32Type   => UnboxInt32(ptrval),
+        SuruType.Int64Type   => UnboxInt64(ptrval),
+        SuruType.Float64Type => UnboxFloat64(ptrval),
+        SuruType.NamedType   => UnboxInt64(ptrval),   // assume Box(Int64) at runtime
+        _ => throw new NotSupportedException($"IR codegen: cannot unbox {type}"),
     };
 
     // ─── String literal utilities ─────────────────────────────────────────────
 
-    // Escape a C# string (post-Suru-lexer, fully unescaped) for use as an LLVM IR
-    // string constant.  LLVM's only escape form is \XX (hex), so we hex-escape every
-    // non-printable byte and the two special chars (`"` and `\`).  The Suru lexer has
-    // already converted escape sequences (e.g. `\n` in source → 0x0A in memory), so we
-    // must NOT re-interpret `\n` here — a backslash followed by `n` is two literal bytes.
     private static string EscapeStringForIR(string source)
     {
         var sb = new StringBuilder();
@@ -163,20 +170,7 @@ public sealed partial class IRCodeGenerator
         return sb.ToString();
     }
 
-    // Each C# char maps to one byte (Suru strings are ASCII).
-    // The Suru lexer has already unescaped all escape sequences, so there are no
-    // multi-char escape tokens here — each char in the C# string is a real byte.
     private static int CountStringBytes(string source) => source.Length;
-
-    // Default zero-value constant for use in implicit returns.
-    private static string DefaultReturnValue(SuruType type) => type switch
-    {
-        SuruType.Bool    => "0",
-        SuruType.Int32   => "0",
-        SuruType.Int64   => "0",
-        SuruType.Float64 => "0.0",
-        _                => "null",
-    };
 
     private string NextTmp() => $"%t{_tmp++}";
 }

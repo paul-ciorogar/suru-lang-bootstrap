@@ -13,26 +13,11 @@ namespace Suru.Compiler.Codegen;
 //                        [0]  [1]  [2]  [3]  [4]
 //                       ttag name ftag  val  next
 //
-//   [0] type_tag  — always 4 (TYPE_STRUCT); identifies this heap ptr as a Struct
-//   [1] name      — ptr to a null-terminated field name string (interned via _stringLiterals)
-//   [2] field_tag — i32 type tag using unified enum: 0=Bool 1=Int32 2=Int64 3=Float64 4=Struct 5=Array 6=String
-//   [3] val       — i64 storage; always ptrtoint(ptr %fieldVal to i64) since all values are ptr
+//   [0] type_tag  — always 4 (TYPE_STRUCT)
+//   [1] name      — ptr to a null-terminated field name string
+//   [2] field_tag — i32 type tag (SuruType.TypeTag ordinal)
+//   [3] val       — i64 storage; always ptrtoint(ptr %fieldVal to i64)
 //   [4] next      — ptr to next field node, null for the tail
-//
-// Node size: 40 bytes on 64-bit.
-//
-// ── Runtime module ────────────────────────────────────────────────────────────
-//
-// All non-trivial struct operations (suru_find_field, suru_struct_clone, suru_struct_drop)
-// are implemented in suru_struct.ll and linked as a separate compilation unit. The user's
-// .ll only emits `declare` stubs via _runtimeDecls.
-//
-// ── What stays inline ─────────────────────────────────────────────────────────
-//
-//   EmitFieldNamePtr    — interns field name strings as module-local constants.
-//   EmitStructLiteral   — constructs field nodes inline; allocates per-field malloc+GEP+store.
-//   EmitFieldAccess     — field read: EmitFindFieldCall + GEP + load + inttoptr.
-//   EmitFieldAssignment — field write: EmitFindFieldCall + ptrtoint + GEP + store.
 partial class IRCodeGenerator
 {
     // ─── Field name interning ────────────────────────────────────────────────
@@ -60,22 +45,13 @@ partial class IRCodeGenerator
 
     // ─── Struct literal ──────────────────────────────────────────────────────
 
-    // Emit a `{ field1: val1, field2: val2, ... }` struct literal.
-    //
-    // typeName is the declared Suru type name (e.g. "Point", "Struct", or null for inline/anonymous).
-    // When typeName matches a type declaration in _module.TypeDeclarations, field types are looked
-    // up by name from the declaration. Otherwise, field types are inferred from EmitValue's returned
-    // SuruType — every value is a tagged pointer so the field_tag is always accurate.
-    //
-    // Nodes are built in reverse field order so the head of the list is the first
-    // declared field. For each field: malloc(40), store type_tag=4/name/field_tag/val/next.
-    // Field values are all ptr (Box for scalars, direct ptr for heap types); stored as
-    // ptrtoint(ptr %fieldVal to i64) in the i64 val slot.
+    // typeName is the declared Suru type name (e.g. "Point") or null for anonymous literals.
+    // Field types are looked up from the declaration when typeName is known;
+    // otherwise inferred from EmitValue's returned SuruType.
     private (string val, SuruType type) EmitStructLiteral(StructLiteralExpression lit, string? typeName)
     {
         _externals.AddMalloc();
 
-        // Try to resolve field types from the named type declaration.
         _module.TypeDeclarations.TryGetValue(typeName ?? "", out var typeDecl);
 
         var prevNodePtr = "null";
@@ -84,8 +60,7 @@ partial class IRCodeGenerator
         {
             var (fieldName, fieldExpr) = lit.Fields[i];
 
-            // Determine field type: from declaration (named type) or infer from EmitValue.
-            SuruType fieldType = SuruType.Struct; // fallback for FieldAccessExpression.ResolvedType
+            SuruType fieldType = new SuruType.NamedType("");
             if (typeDecl != null)
             {
                 var declField = typeDecl.Fields.FirstOrDefault(f => f.Field == fieldName);
@@ -97,36 +72,30 @@ partial class IRCodeGenerator
                 faField.ResolvedType = fieldType;
             var (fieldVal, inferredType) = EmitValue(fieldExpr);
 
-            // When no type declaration is available, use the inferred type from the value.
             if (typeDecl == null)
                 fieldType = inferredType;
 
             var nodePtr = NextTmp();
             _funcs.AppendLine($"  {nodePtr} = call ptr @malloc(i64 40)");
 
-            // [0] type_tag — always 4 (TYPE_STRUCT)
             var typeTagGep = NextTmp();
             _funcs.AppendLine($"  {typeTagGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 0");
             _funcs.AppendLine($"  store i64 4, ptr {typeTagGep}");
 
-            // [1] name ptr
             var nameGep = NextTmp();
             var namePtr = EmitFieldNamePtr(fieldName);
             _funcs.AppendLine($"  {nameGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 1");
             _funcs.AppendLine($"  store ptr {namePtr}, ptr {nameGep}");
 
-            // [2] field_tag — unified type enum ordinal
             var tagGep = NextTmp();
             _funcs.AppendLine($"  {tagGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 2");
-            _funcs.AppendLine($"  store i32 {(int)fieldType}, ptr {tagGep}");
+            _funcs.AppendLine($"  store i32 {fieldType.TypeTag}, ptr {tagGep}");
 
-            // [3] value as i64 via ptrtoint (all values are ptr in the tagged-pointer system)
             var valGep = NextTmp();
             var as64   = EmitToI64(fieldVal, fieldType);
             _funcs.AppendLine($"  {valGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 3");
             _funcs.AppendLine($"  store i64 {as64}, ptr {valGep}");
 
-            // [4] next
             var nextGep = NextTmp();
             _funcs.AppendLine($"  {nextGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 4");
             _funcs.AppendLine($"  store ptr {prevNodePtr}, ptr {nextGep}");
@@ -134,15 +103,14 @@ partial class IRCodeGenerator
             prevNodePtr = nodePtr;
         }
 
-        return (prevNodePtr, SuruType.Struct);
+        var resultType = typeName is not null
+            ? (SuruType)new SuruType.NamedType(typeName)
+            : new SuruType.NamedType("");
+        return (prevNodePtr, resultType);
     }
 
     // ─── Field access / assignment ───────────────────────────────────────────
 
-    // .field — load a field value from a struct.
-    //
-    // Calls suru_find_field, loads the i64 val slot, applies inttoptr to get the box ptr,
-    // then unboxes to a raw scalar if fa.ResolvedType is a scalar type.
     private (string val, SuruType type) EmitFieldAccess(FieldAccessExpression fa)
     {
         var (headPtr, _) = EmitValue(fa.Receiver);
@@ -153,21 +121,16 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  {valGep} = getelementptr %suru.Field, ptr {node}, i32 0, i32 3");
         _funcs.AppendLine($"  {raw}    = load i64, ptr {valGep}");
 
-        var fieldType = fa.ResolvedType ?? SuruType.Struct;
+        var fieldType = fa.ResolvedType ?? new SuruType.NamedType("");
         var boxPtr    = EmitFromI64(raw, fieldType);
         if (IsScalar(fieldType))
         {
-            // Field was stored as ptrtoint(box_ptr); unbox to get the raw scalar.
             var rawScalar = UnboxScalar(boxPtr, fieldType);
             return (rawScalar, fieldType);
         }
         return (boxPtr, fieldType);
     }
 
-    // receiver.field: value — update a field's stored i64 in-place.
-    //
-    // Locates the node via suru_find_field, converts the new ptr value via ptrtoint,
-    // and stores it into slot [3].
     private void EmitFieldAssignment(FieldAssignmentStatement fa)
     {
         var (headPtr, _)      = EmitValue(fa.Receiver);
@@ -180,12 +143,12 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  store i64 {as64}, ptr {valGep}");
     }
 
-    // ─── Clone ───────────────────────────────────────────────────────────────
+    // ─── Clone / Drop ────────────────────────────────────────────────────────
 
     internal (string val, SuruType type) EmitCloneStructDispatch(Expression arg)
     {
-        var (headPtr, _) = EmitValue(arg);
-        return (EmitCloneStruct(headPtr), SuruType.Struct);
+        var (headPtr, headType) = EmitValue(arg);
+        return (EmitCloneStruct(headPtr), headType);
     }
 
     internal string EmitCloneStruct(string headPtr)
@@ -195,8 +158,6 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  {tmp} = call ptr @suru_struct_clone(ptr {headPtr})");
         return tmp;
     }
-
-    // ─── Drop ────────────────────────────────────────────────────────────────
 
     internal (string val, SuruType type) EmitDropStructDispatch(Expression arg)
     {

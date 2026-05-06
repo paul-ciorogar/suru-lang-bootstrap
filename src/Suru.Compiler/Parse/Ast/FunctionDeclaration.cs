@@ -1,9 +1,12 @@
+using Suru.Compiler.Types;
+
 namespace Suru.Compiler.Parse.Ast;
 
 public sealed class FunctionParameter(string name, TypeAnnotation typeAnnotation)
 {
-    public string Name             { get; } = name;
+    public string Name                   { get; } = name;
     public TypeAnnotation TypeAnnotation { get; } = typeAnnotation;
+    public SuruType? ResolvedType        { get; set; }
 }
 
 public sealed class FunctionDeclaration(

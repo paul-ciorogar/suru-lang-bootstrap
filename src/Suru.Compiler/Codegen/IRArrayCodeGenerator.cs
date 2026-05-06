@@ -12,37 +12,16 @@ namespace Suru.Compiler.Codegen;
 //   %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }  (40 bytes)
 //
 // type_tag=5 at field 0: any heap ptr can be identified as Array at runtime.
-// elem_tag holds the full SuruType ordinal (0-6) for the element type.
-// data is a flat i64[] buffer; each element is a ptr-as-i64 (Box ptr for scalars,
-// direct heap ptr for String/Array/Struct — all converted via ptrtoint/inttoptr).
+// elem_tag holds the full SuruType TypeTag for the element type.
+// data is a flat i64[] buffer; each element is a ptr-as-i64.
 //
 // ── Runtime module ────────────────────────────────────────────────────────────
 //
-// All non-trivial array operations are implemented in suru_array.ll:
-//   at (returns ptr), set/add (take ptr), slice,
-//   clone_dyn (dispatch on element type_tag), drop_dyn.
-//
-// The user's .ll only emits `declare` stubs via _runtimeDecls. Callers pass Box ptrs
-// for scalars and direct ptrs for heap types — no EmitToI64/EmitFromI64 dispatch needed.
-//
-// ── What stays inline ─────────────────────────────────────────────────────────
-//
-//   EmitExtractArrayLen/Cap/Data — simple GEP+load helpers used by EmitArrayLiteral.
-//   EmitArrayLiteral             — constructs an array from inline literal values.
-//   EmitToI64 / EmitFromI64      — trivial ptrtoint/inttoptr (all values are ptr).
-//   EmitArrayLen                 — .len() is a GEP+load+BoxInt64; no call needed.
-//
-// ── argv vs regular arrays ─────────────────────────────────────────────────────
-//
-// The `args` parameter of suru_main holds a %suru.String (not %suru.Array) where
-// data = argv (char**). It is tracked in _argvVars, so Array dispatch in EmitMethodCall
-// falls through to EmitArgAt instead of the regular array methods.
+// All non-trivial array operations are implemented in suru_array.ll.
 partial class IRCodeGenerator
 {
     // ─── Low-level %suru.Array GEP helpers ──────────────────────────────────
-    //
-    // GEP indices shifted by 1 compared to the old layout because type_tag is
-    // now at field 0. New layout: { type_tag@0, elem_tag@1, len@2, cap@3, data@4 }
+    // Layout: { type_tag@0, elem_tag@1, len@2, cap@3, data@4 }
 
     private string EmitExtractArrayLen(string arrVal)
     {
@@ -73,11 +52,6 @@ partial class IRCodeGenerator
 
     // ─── Array literal ───────────────────────────────────────────────────────
 
-    // Emit a `[e1, e2, ...]` array literal.
-    //
-    // Allocates a 40-byte %suru.Array header. For empty literals the data ptr is
-    // stored as null and cap=0; for non-empty literals: malloc count*8 bytes, emit
-    // each element as ptrtoint(ptr) and store at GEP-indexed slots, build the header.
     private (string val, SuruType type) EmitArrayLiteral(ArrayLiteralExpression lit)
     {
         var hdrPtr = NextTmp();
@@ -116,16 +90,12 @@ partial class IRCodeGenerator
             }
         }
 
-        // Build %suru.Array header: { type_tag=5, elem_tag, len, cap, data }
-        var ttagGep = NextTmp();
-        var etagGep = NextTmp();
-        var lenGep  = NextTmp();
-        var capGep  = NextTmp();
-        var dataGep = NextTmp();
+        var ttagGep = NextTmp(); var etagGep = NextTmp();
+        var lenGep  = NextTmp(); var capGep  = NextTmp(); var dataGep = NextTmp();
         _funcs.AppendLine($"  {ttagGep} = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 0");
         _funcs.AppendLine($"  store i64 5, ptr {ttagGep}");
         _funcs.AppendLine($"  {etagGep} = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 1");
-        _funcs.AppendLine($"  store i64 {ElemTag(elemType)}, ptr {etagGep}");
+        _funcs.AppendLine($"  store i64 {elemType.TypeTag}, ptr {etagGep}");
         _funcs.AppendLine($"  {lenGep}  = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 2");
         _funcs.AppendLine($"  store i64 {count}, ptr {lenGep}");
         _funcs.AppendLine($"  {capGep}  = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 3");
@@ -133,23 +103,17 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  {dataGep} = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 4");
         _funcs.AppendLine($"  store ptr {dataPtr}, ptr {dataGep}");
 
-        return (hdrPtr, SuruType.Array);
+        return (hdrPtr, new SuruType.ArrayType(elemType));
     }
-
-    // Full SuruType ordinal as elem_tag (matches the unified type_tag enum: 0=Bool ... 6=String).
-    private static int ElemTag(SuruType t) => (int)t;
 
     // ─── Array instance methods ──────────────────────────────────────────────
 
-    // .len() → raw i64: GEP+load the len field directly.
     private (string val, SuruType type) EmitArrayLen(string arrVal)
     {
         var raw = EmitExtractArrayLen(arrVal);
         return (raw, SuruType.Int64);
     }
 
-    // .len() on a value of unknown compile-time kind (Struct default).
-    // Calls @suru_dyn_len which reads type_tag at offset 0 and dispatches.
     private (string val, SuruType type) EmitDynLen(string val)
     {
         _runtimeDecls.AddDynLen();
@@ -158,25 +122,23 @@ partial class IRCodeGenerator
         return (raw, SuruType.Int64);
     }
 
-    // .at(i) → ptr (box for scalars, heap ptr for non-scalars). idx is raw i64 or Struct ptr.
-    // Element type unknown at compile time; LetStatement annotation-guided unboxing handles it.
-    private (string val, SuruType type) EmitArrayAt(string arrVal, Expression idxExpr, SuruType? elemType = null)
+    // .at(i) — element type known from the array declaration (ArrayType.Element).
+    // Unboxes scalars at the boundary; returns ptr for heap types.
+    private (string val, SuruType type) EmitArrayAt(string arrVal, Expression idxExpr,
+        SuruType? elemType = null)
     {
         var (idxVal, idxType) = EmitValue(idxExpr);
         var idx = IsScalar(idxType) ? idxVal : UnboxInt64(idxVal);
         _runtimeDecls.AddArrayAt();
         var result = NextTmp();
         _funcs.AppendLine($"  {result} = call ptr @suru_array_at(ptr {arrVal}, i64 {idx})");
-        // When element type is known from the array's declaration, unbox scalars and return
-        // the concrete type — this lets callers (e.g. .equals()) dispatch correctly.
-        if (elemType.HasValue && IsScalar(elemType.Value))
-            return (UnboxScalar(result, elemType.Value), elemType.Value);
-        if (elemType.HasValue)
-            return (result, elemType.Value);   // String / Array / Struct: ptr is the value directly
-        return (result, SuruType.Struct);      // element type unknown at compile time
+        if (elemType is { } et && IsScalar(et))
+            return (UnboxScalar(result, et), et);
+        if (elemType is { } et2)
+            return (result, et2);
+        return (result, new SuruType.NamedType(""));
     }
 
-    // .set(val, i) — box scalar val at boundary; idx is raw i64 or Struct ptr.
     private (string val, SuruType type) EmitArraySet(
         string arrVal, Expression valExpr, Expression idxExpr)
     {
@@ -189,7 +151,6 @@ partial class IRCodeGenerator
         return ("0", SuruType.Bool);
     }
 
-    // .add(v) — box scalar val at boundary before passing to runtime.
     private (string val, SuruType type) EmitArrayAdd(string arrVal, Expression valExpr)
     {
         var (elemVal, elemType) = EmitValue(valExpr);
@@ -199,9 +160,8 @@ partial class IRCodeGenerator
         return ("0", SuruType.Bool);
     }
 
-    // .slice(from, to) → Array: from/to are raw i64 or Struct ptr.
     private (string val, SuruType type) EmitArraySlice(
-        string arrVal, Expression fromExpr, Expression toExpr)
+        string arrVal, Expression fromExpr, Expression toExpr, SuruType.ArrayType arrayType)
     {
         var (fromVal, fromType) = EmitValue(fromExpr);
         var (toVal, toType)     = EmitValue(toExpr);
@@ -210,24 +170,20 @@ partial class IRCodeGenerator
         _runtimeDecls.AddArraySlice();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_array_slice(ptr {arrVal}, i64 {from}, i64 {to})");
-        return (tmp, SuruType.Array);
+        return (tmp, arrayType);
     }
 
-    // ─── Clone ───────────────────────────────────────────────────────────────
+    // ─── Clone / Drop ────────────────────────────────────────────────────────
 
-    // suru_array_clone_dyn reads each element's type_tag at runtime and dispatches.
     private (string val, SuruType type) EmitCloneArrayDispatch(Expression arg)
     {
-        var (arrVal, _) = EmitValue(arg);
+        var (arrVal, arrType) = EmitValue(arg);
         _runtimeDecls.AddArrayCloneDyn();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_array_clone_dyn(ptr {arrVal})");
-        return (tmp, SuruType.Array);
+        return (tmp, arrType);
     }
 
-    // ─── Drop ────────────────────────────────────────────────────────────────
-
-    // suru_array_drop_dyn reads each element's type_tag at runtime and dispatches.
     private (string val, SuruType type) EmitDropArrayDispatch(Expression arg)
     {
         var (arrVal, _) = EmitValue(arg);
@@ -237,13 +193,7 @@ partial class IRCodeGenerator
     }
 
     // ─── Element type conversion ─────────────────────────────────────────────
-    //
-    // Array/struct data buffers store values as ptrtoint(ptr) → i64. Since scalars
-    // are now raw values (not ptr), EmitToI64 boxes them first before ptrtoint.
-    // EmitFromI64 still returns a ptr (box ptr for scalars); callers unbox if needed.
 
-    // Convert a Suru value to i64 for storage in an array/struct data buffer.
-    // Scalars are boxed first (boundary point) before ptrtoint.
     private string EmitToI64(string val, SuruType type)
     {
         var ptrVal = IsScalar(type) ? BoxValue(val, type) : val;
@@ -252,8 +202,6 @@ partial class IRCodeGenerator
         return tmp;
     }
 
-    // Restore a ptr from the raw i64 stored in a data buffer (inttoptr).
-    // Callers that need a scalar must unbox the returned ptr.
     private string EmitFromI64(string raw, SuruType type)
     {
         var tmp = NextTmp();

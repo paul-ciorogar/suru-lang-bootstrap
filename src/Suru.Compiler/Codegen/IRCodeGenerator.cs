@@ -13,7 +13,7 @@ namespace Suru.Compiler.Codegen;
 // Value representation model (Stage 12.5f and later):
 //   Scalars (Bool/Int32/Int64/Float64) use raw LLVM types (i1/i32/i64/double) in local
 //   variables, function parameters, and return values. No heap allocation for scalars.
-//   Non-scalars (String/Array/Struct) remain `ptr` to heap-allocated tagged-pointer structs.
+//   Non-scalars (String/ArrayType/NamedType) remain `ptr` to heap-allocated tagged structs.
 //   Box calls (@suru_box_*) appear only at three runtime boundaries:
 //     1. printLn/printError — runtime dispatches via type_tag
 //     2. Array element store/load — suru_array_add/set/at take/return ptr
@@ -29,7 +29,6 @@ namespace Suru.Compiler.Codegen;
 //   IRStructCodeGenerator.cs   — struct methods and helpers
 public sealed partial class IRCodeGenerator
 {
-
     private readonly Module _module;
     private readonly string _sourceName;
 
@@ -45,13 +44,8 @@ public sealed partial class IRCodeGenerator
     private int _strCount;
 
     // Per-function variable table: name → (alloca SSA name, SuruType).
-    // Scalar vars use alloca i64/i1/etc.; non-scalar vars use alloca ptr.
+    // ArrayType carries element type; NamedType carries struct name — no side dicts needed.
     private Dictionary<string, (string ptr, SuruType type)> _vars = new();
-
-    // Per-function element-type table: array variable name → SuruType of its elements.
-    // Populated from let/param type annotations (e.g. Array<String> → SuruType.String).
-    // Lets EmitArrayAt return the correct element type instead of always SuruType.Struct.
-    private Dictionary<string, SuruType> _arrayElementTypes = new();
 
     private bool _blockOpen;
     private int  _matchCounter;
@@ -61,10 +55,10 @@ public sealed partial class IRCodeGenerator
         _userFunctions = new();
 
     // LLVM return type of the function currently being emitted.
-    // suru_main is always "i64"; all other non-void functions are "ptr".
+    // suru_main is always "i64"; void Suru functions emit "ptr" (ret ptr null).
     private string   _currentFnReturnLlvmType = "i64";
     private SuruType _currentFnReturnSuruType = SuruType.Int64;
-    // Suru type annotation name of the current function's return type (e.g. "Point", "Struct", "void").
+    // Suru type annotation name of the current function's return type.
     // Used to thread the declared type into EmitStructLiteral for return-statement struct literals.
     private string?  _currentFnReturnTypeName;
 
@@ -72,7 +66,6 @@ public sealed partial class IRCodeGenerator
     private readonly Dictionary<string, (string GlobalName, SuruType Type)> _globalVars = new();
 
     // Tracks which Array variables are the argv Seq (built by @main from char**).
-    // argv access goes through EmitArgAt (GEP into char**), not suru_array_at.
     private HashSet<string> _argvVars = new();
 
     private IRCodeGenerator(Module module, string sourceName)
@@ -97,10 +90,10 @@ public sealed partial class IRCodeGenerator
             {
                 var cType = cVal switch
                 {
-                    BoolLiteral   => SuruType.Bool,
-                    IntLiteral    => SuruType.Int64,
-                    FloatLiteral  => SuruType.Float64,
-                    _             => throw new InvalidOperationException("unreachable"),
+                    BoolLiteral  => (SuruType)SuruType.Bool,
+                    IntLiteral   => SuruType.Int64,
+                    FloatLiteral => SuruType.Float64,
+                    _            => throw new InvalidOperationException("unreachable"),
                 };
                 _globalVars[cName] = ($"@{cName}", cType);
             }
@@ -168,7 +161,6 @@ public sealed partial class IRCodeGenerator
 
     private (string val, SuruType type) EmitValue(Expression expr) => expr switch
     {
-        // Scalar literals return raw LLVM values (i1/i64/double), not box ptrs.
         BoolLiteral b              => (b.Value ? "1" : "0", SuruType.Bool),
         IntLiteral i               => (i.Value.ToString(CultureInfo.InvariantCulture), SuruType.Int64),
         FloatLiteral f             => ($"0x{BitConverter.DoubleToInt64Bits(f.Value):X16}", SuruType.Float64),
@@ -189,7 +181,6 @@ public sealed partial class IRCodeGenerator
     };
 
     // Dynamic clone/drop: read type_tag at offset 0 and dispatch at runtime.
-    // Scalars have value semantics — clone is a no-op, drop is a no-op.
     private (string val, SuruType type) EmitCloneDyn(Expression arg)
     {
         var (val, type) = EmitValue(arg);
@@ -197,7 +188,7 @@ public sealed partial class IRCodeGenerator
         _runtimeDecls.AddCloneDyn();
         var tmp = NextTmp();
         _funcs.AppendLine($"  {tmp} = call ptr @suru_clone_dyn(ptr {val})");
-        return (tmp, SuruType.Struct);
+        return (tmp, type);
     }
 
     private (string val, SuruType type) EmitDropDyn(Expression arg)
@@ -209,7 +200,6 @@ public sealed partial class IRCodeGenerator
         return ("0", SuruType.Bool);
     }
 
-    // Bool NOT: xor i1 directly on raw bool value.
     private (string val, SuruType type) EmitBoolNot(Expression operand)
     {
         var (v, vtype) = EmitValue(operand);
@@ -219,7 +209,6 @@ public sealed partial class IRCodeGenerator
         return (tmp, SuruType.Bool);
     }
 
-    // and/or: operate directly on raw i1 values.
     private (string val, SuruType type) EmitBinaryExpr(BinaryExpression bin)
     {
         var (lv, ltype) = EmitValue(bin.Left);
@@ -232,13 +221,11 @@ public sealed partial class IRCodeGenerator
         return (tmp, SuruType.Bool);
     }
 
-    // Load from a local alloca or from a module-level constant global.
-    // Scalars return raw LLVM values (i64/i1/double); non-scalars return ptr.
+    // Load from a local alloca or module-level constant global.
     private (string val, SuruType type) EmitLoad(string name)
     {
         if (!_vars.TryGetValue(name, out var entry))
         {
-            // Module-level constant: stored as raw LLVM type (i1/i64/double), return raw.
             var (gName, gType) = _globalVars[name];
             var rawTmp = NextTmp();
             _funcs.AppendLine($"  {rawTmp} = load {LlvmType(gType)}, ptr {gName}");
@@ -257,10 +244,7 @@ public sealed partial class IRCodeGenerator
         // Namespace calls: `lib.fn(args)` where `lib` is an include alias.
         if (m.Receiver is VariableReferenceExpression { Name: var nsName } &&
             _module.Namespaces.Contains(nsName))
-        {
-            var qualifiedName = $"{nsName}.{m.MethodName}";
-            return EmitUserFunctionCall(new CallExpression(qualifiedName, m.Args));
-        }
+            return EmitUserFunctionCall(new CallExpression($"{nsName}.{m.MethodName}", m.Args));
 
         // Static methods on type names.
         if (m.Receiver is VariableReferenceExpression { Name: "Int32" })
@@ -270,9 +254,8 @@ public sealed partial class IRCodeGenerator
 
         var (recvVal, recvType) = EmitValue(m.Receiver);
 
-        // Array instance methods.
-        // argv Seq (args.at(i)) is detected via _argvVars and routes to EmitArgAt.
-        if (recvType == SuruType.Array)
+        // Array instance methods — element type carried in ArrayType.Element.
+        if (recvType is SuruType.ArrayType arrayType)
         {
             var isArgv = m.Receiver is VariableReferenceExpression { Name: var an } && _argvVars.Contains(an);
             if (isArgv)
@@ -283,24 +266,19 @@ public sealed partial class IRCodeGenerator
                     _ => throw new NotSupportedException($"IR codegen: unsupported argv method '{m.MethodName}'"),
                 };
 
-            // Look up element type from declaration so arr.at(i) returns the correct SuruType.
-            var knownElemType = m.Receiver is VariableReferenceExpression { Name: var an2 }
-                                && _arrayElementTypes.TryGetValue(an2, out var et) ? et : (SuruType?)null;
             return m.MethodName switch
             {
                 "len"   => EmitArrayLen(recvVal),
-                "at"    => EmitArrayAt(recvVal, m.Args[0], knownElemType),
+                "at"    => EmitArrayAt(recvVal, m.Args[0], arrayType.Element),
                 "set"   => EmitArraySet(recvVal, m.Args[0], m.Args[1]),
                 "add"   => EmitArrayAdd(recvVal, m.Args[0]),
-                "slice" => EmitArraySlice(recvVal, m.Args[0], m.Args[1]),
+                "slice" => EmitArraySlice(recvVal, m.Args[0], m.Args[1], arrayType),
                 _ => throw new NotSupportedException($"IR codegen: unsupported Array method '{m.MethodName}'"),
             };
         }
 
-        // Struct-typed values with unknown runtime kind: dispatch on type_tag.
-        // .len() uses suru_dyn_len which branches on tag=5 (Array) vs tag=6 (String).
-        // .at/.set are unambiguously array operations (no string analogue at this level).
-        if (recvType == SuruType.Struct && m.MethodName is "at" or "len" or "set")
+        // NamedType with dynamic runtime kind: dispatch on type_tag for collection ops.
+        if (recvType is SuruType.NamedType && m.MethodName is "at" or "len" or "set")
             return m.MethodName switch
             {
                 "len" => EmitDynLen(recvVal),
@@ -310,7 +288,7 @@ public sealed partial class IRCodeGenerator
             };
 
         // String instance methods.
-        if (recvType == SuruType.String)
+        if (recvType is SuruType.StringType)
             return m.MethodName switch
             {
                 "len"    => EmitStringLen(recvVal),
@@ -322,16 +300,11 @@ public sealed partial class IRCodeGenerator
                 _ => throw new NotSupportedException($"IR codegen: unsupported String method '{m.MethodName}'"),
             };
 
-        // toString() on Int64: receiver is already raw i64.
-        if (m.MethodName == "toString" && recvType == SuruType.Int64)
+        if (m.MethodName == "toString" && recvType is SuruType.Int64Type)
             return EmitInt64ToString(recvVal);
 
-        // toString() on unknown Struct-typed value: still a box ptr, unbox as Int64.
-        if (m.MethodName == "toString" && recvType == SuruType.Struct)
-        {
-            var rawI64 = UnboxInt64(recvVal);
-            return EmitInt64ToString(rawI64);
-        }
+        if (m.MethodName == "toString" && recvType is SuruType.NamedType)
+            return EmitInt64ToString(UnboxInt64(recvVal));
 
         if (m.MethodName == "invert")
             return EmitInvert(recvVal, recvType);
@@ -370,25 +343,22 @@ public sealed partial class IRCodeGenerator
         {
             var pType = SuruTypeFromAnnotation(paramDefs[i].TypeAnnotation);
             var (argVal, argType) = EmitValue(call.Args[i]);
-            // If param expects scalar but we received a dynamic ptr (e.g., arr.at result), unbox.
             var finalVal = IsScalar(pType) && !IsScalar(argType)
                 ? UnboxScalar(argVal, pType)
                 : argVal;
             argParts.Add($"{LlvmType(pType)} {finalVal}");
         }
-        var retLlvmType = LlvmType(returnType);
+        var retLlvmType = returnType is SuruType.VoidType ? "ptr" : LlvmType(returnType);
         var llvmName    = _module.ExternalFunctions.TryGetValue(call.Name, out var orig) ? orig : call.Name;
         var callTmp     = NextTmp();
         _funcs.AppendLine($"  {callTmp} = call {retLlvmType} @{llvmName}({string.Join(", ", argParts)})");
         return (callTmp, returnType);
     }
 
-    // Int32.from(expr): truncate raw i64 → raw i32.
     private (string val, SuruType type) EmitInt32From(Expression arg)
     {
         if (arg is IntLiteral lit)
             return (lit.Value.ToString(CultureInfo.InvariantCulture), SuruType.Int32);
-
         var (val, vtype) = EmitValue(arg);
         var rawI64 = IsScalar(vtype) ? val : UnboxInt64(val);
         var i32tmp = NextTmp();
@@ -396,66 +366,59 @@ public sealed partial class IRCodeGenerator
         return (i32tmp, SuruType.Int32);
     }
 
-    // Arithmetic: operate on raw values directly.
-    // When ltype is Struct (unknown field type assumed to be Int64), unbox as Int64.
+    // Arithmetic on raw values. NamedType fields assumed to be Int64 at runtime.
     private (string val, SuruType type) EmitBinOp(
         string intOp, string floatOp,
         string lval, SuruType ltype, Expression argExpr)
     {
-        var effectiveType = ltype == SuruType.Struct ? SuruType.Int64 : ltype;
-        var (rval, rtype) = EmitValue(argExpr);
-        var rawL = IsScalar(ltype)      ? lval : UnboxScalar(lval, ltype);
+        var effectiveType = ltype is SuruType.NamedType ? SuruType.Int64 : ltype;
+        var (rval, _) = EmitValue(argExpr);
+        var rawL = IsScalar(ltype)         ? lval : UnboxScalar(lval, ltype);
         var rawR = IsScalar(effectiveType) ? rval : UnboxScalar(rval, effectiveType);
-        var op   = effectiveType == SuruType.Float64 ? floatOp : intOp;
+        var op   = effectiveType is SuruType.Float64Type ? floatOp : intOp;
         var result = NextTmp();
         _funcs.AppendLine($"  {result} = {op} {RawLlvmType(effectiveType)} {rawL}, {rawR}");
         return (result, effectiveType);
     }
 
-    // Unary negation: operate on raw value directly.
-    // When recvType is Struct (unknown field type assumed to be Int64), unbox as Int64.
     private (string val, SuruType type) EmitInvert(string recvVal, SuruType recvType)
     {
-        var effectiveType = recvType == SuruType.Struct ? SuruType.Int64 : recvType;
+        var effectiveType = recvType is SuruType.NamedType ? SuruType.Int64 : recvType;
         var raw = IsScalar(recvType) ? recvVal : UnboxScalar(recvVal, recvType);
         var tmp = NextTmp();
-        if (effectiveType == SuruType.Float64)
+        if (effectiveType is SuruType.Float64Type)
             _funcs.AppendLine($"  {tmp} = fneg double {raw}");
         else
             _funcs.AppendLine($"  {tmp} = sub {RawLlvmType(effectiveType)} 0, {raw}");
         return (tmp, effectiveType);
     }
 
-    // Comparison: raw icmp/fcmp, returns raw i1 Bool.
     private (string val, SuruType type) EmitCmp(
         string intOp, string floatOp,
         string lval, SuruType ltype, Expression argExpr)
     {
-        var effectiveType = ltype == SuruType.Struct ? SuruType.Int64 : ltype;
-        var (rval, rtype) = EmitValue(argExpr);
+        var effectiveType = ltype is SuruType.NamedType ? SuruType.Int64 : ltype;
+        var (rval, _) = EmitValue(argExpr);
         var rawL = IsScalar(ltype)         ? lval : UnboxScalar(lval, ltype);
-        var rawR = IsScalar(effectiveType)  ? rval : UnboxScalar(rval, effectiveType);
-        var op   = effectiveType == SuruType.Float64 ? floatOp : intOp;
+        var rawR = IsScalar(effectiveType) ? rval : UnboxScalar(rval, effectiveType);
+        var op   = effectiveType is SuruType.Float64Type ? floatOp : intOp;
         var cmpTmp = NextTmp();
         _funcs.AppendLine($"  {cmpTmp} = {op} {RawLlvmType(effectiveType)} {rawL}, {rawR}");
         return (cmpTmp, SuruType.Bool);
     }
 
-    // compare(): returns raw i64 with -1/0/1.
     private (string val, SuruType type) EmitCompare(
         string lval, SuruType ltype, Expression argExpr)
     {
-        var effectiveType = ltype == SuruType.Struct ? SuruType.Int64 : ltype;
-        var (rval, rtype) = EmitValue(argExpr);
+        var effectiveType = ltype is SuruType.NamedType ? SuruType.Int64 : ltype;
+        var (rval, _) = EmitValue(argExpr);
         var rawL  = IsScalar(ltype)         ? lval : UnboxScalar(lval, ltype);
-        var rawR  = IsScalar(effectiveType)  ? rval : UnboxScalar(rval, effectiveType);
+        var rawR  = IsScalar(effectiveType) ? rval : UnboxScalar(rval, effectiveType);
         var rawT  = RawLlvmType(effectiveType);
-        var gtTmp = NextTmp();
-        var ltTmp = NextTmp();
-        var gtExt = NextTmp();
-        var ltExt = NextTmp();
+        var gtTmp = NextTmp(); var ltTmp = NextTmp();
+        var gtExt = NextTmp(); var ltExt = NextTmp();
         var result = NextTmp();
-        if (effectiveType == SuruType.Float64)
+        if (effectiveType is SuruType.Float64Type)
         {
             _funcs.AppendLine($"  {gtTmp} = fcmp ogt {rawT} {rawL}, {rawR}");
             _funcs.AppendLine($"  {ltTmp} = fcmp olt {rawT} {rawL}, {rawR}");
