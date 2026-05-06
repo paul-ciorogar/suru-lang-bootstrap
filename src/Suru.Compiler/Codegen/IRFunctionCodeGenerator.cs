@@ -21,9 +21,10 @@ public sealed partial class IRCodeGenerator
             return;
         }
 
-        _blockOpen = true;
-        _vars      = new();
-        _argvVars  = new();
+        _blockOpen          = true;
+        _vars               = new();
+        _argvVars           = new();
+        _arrayElementTypes  = new();
 
         if (fn.Name == "main")
         {
@@ -61,6 +62,8 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
                 _funcs.AppendLine($"  store {llvmT} %{p.Name}, ptr {allocPtr}");
                 _vars[p.Name] = (allocPtr, pType);
+                if (pType == SuruType.Array && p.TypeAnnotation.TypeParam is { } tp)
+                    _arrayElementTypes[p.Name] = SuruTypeFromAnnotation(tp);
             }
         }
 
@@ -182,6 +185,8 @@ public sealed partial class IRCodeGenerator
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
                 _funcs.AppendLine($"  store {llvmT} {letVal}, ptr {allocPtr}");
                 _vars[name] = (allocPtr, letType);
+                if (annType == SuruType.Array && ann.TypeParam is { } atp)
+                    _arrayElementTypes[name] = SuruTypeFromAnnotation(atp);
                 break;
 
             // return { fields } — thread the declared return type name into EmitStructLiteral.

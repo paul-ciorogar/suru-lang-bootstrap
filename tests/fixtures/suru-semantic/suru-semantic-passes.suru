@@ -1,0 +1,153 @@
+// Stage 13b — Semantic Analyzer: Declaration Pre-passes
+//
+// Implements two passes over an AstModule's statement list that populate
+// AnalyzerState before any statement analysis runs:
+//
+//   Pass 1 (collectTypeDeclarations)  — collects TypeDeclaration node names
+//     into state.typeNames; errors on duplicates.
+//
+//   Pass 2 (collectFunctionDeclarations) — collects FunctionDeclaration
+//     signatures into state.functions; validates param and return types via
+//     resolveTypeName; errors on unknown types and duplicate function names.
+//
+// Entry point: runPrePasses(state, stmts) runs both passes in order.
+//
+// Mirrors C# SemanticAnalyzer passes 1 and 2 in _Analyze() (lines 44-47).
+//
+// Design note: AnalyzerState fields (typeNames, functions, errors) are accessed
+// through typed intermediate variables (e.g. `let typeNames Array<String>: state.typeNames`)
+// before calling array methods on them. Without this, the field access has an unknown
+// resolved type (struct parameters don't get PropagateStructMeta), causing the codegen
+// to route `.add()` to integer arithmetic instead of suru_array_add.
+//
+// Function bodies must also not call namespace functions from sem.* or parser.*,
+// because those namespaces are not visible in the merged module of any including file.
+// Types (AstNode, Param, AnalysisError, FunctionSig) are merged unqualified and are safe.
+
+include "suru-semantic.suru" as sem
+include "../suru-parser/suru-parser.suru" as parser
+
+// ─── Error helper ─────────────────────────────────────────────────────────────
+
+// appendError — appends one AnalysisError to state.errors.
+// Uses an intermediate typed variable to avoid the struct-field-type-unknown issue.
+fn appendError(state AnalyzerState, message String) AnalyzerState {
+    let err AnalysisError: { message: message }
+    let errors Array<AnalysisError>: state.errors
+    errors.add(err)
+    return state
+}
+
+// ─── Type resolution ──────────────────────────────────────────────────────────
+
+// isBuiltinType — true for the six primitive type names recognised by the compiler.
+fn isBuiltinType(name String) Bool {
+    return name.equals("Bool") or name.equals("Int32") or name.equals("Int64") or name.equals("Float64") or name.equals("String") or name.equals("Array")
+}
+
+// typeNameExistsAt — linear search from index i; true if name is in typeNames.
+fn typeNameExistsAt(typeNames Array<String>, name String, i Int64) Bool {
+    return match i.lt(typeNames.len()) {
+        true: match typeNames.at(i).equals(name) {
+            true: true
+            _: typeNameExistsAt(typeNames, name, i.add(1))
+        }
+        _: false
+    }
+}
+
+// fnNameExistsAt — linear search from index i; true if name matches any FunctionSig.
+fn fnNameExistsAt(fns Array<FunctionSig>, name String, i Int64) Bool {
+    return match i.lt(fns.len()) {
+        true: match fns.at(i).name.equals(name) {
+            true: true
+            _: fnNameExistsAt(fns, name, i.add(1))
+        }
+        _: false
+    }
+}
+
+// resolveTypeName — true when name is a built-in or a user-declared type.
+// Passes state.typeNames as a typed argument; the callee's Array<String> annotation
+// ensures correct dispatch inside typeNameExistsAt.
+fn resolveTypeName(state AnalyzerState, name String) Bool {
+    let typeNames Array<String>: state.typeNames
+    return isBuiltinType(name) or typeNameExistsAt(typeNames, name, 0)
+}
+
+// ─── Pass 1: collect type declarations ───────────────────────────────────────
+
+// collectTypeDeclarations — walk stmts; for each NODE_TYPE_DECL node either
+// add its name to state.typeNames or report a duplicate-type error.
+fn collectTypeDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
+    let typeNames Array<String>: state.typeNames
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt.kind.equals(NODE_TYPE_DECL) {
+            true: match typeNameExistsAt(typeNames, stmt.name, 0) {
+                true: appendError(state, "type '".append(stmt.name).append("' is already declared"))
+                _: typeNames.add(stmt.name)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return state
+}
+
+// ─── Pass 2: collect function declarations ────────────────────────────────────
+
+// registerFnDecl — validate and register one NODE_FN_DECL node into state.functions.
+// Emits errors for unknown param/return types but still registers the signature.
+fn registerFnDecl(state AnalyzerState, stmt AstNode) AnalyzerState {
+    let paramTypes Array<String>: []
+    let params Array<Param>: stmt.params
+    let pi Int64: 0
+    while pi.lt(params.len()) {
+        let p Param: params.at(pi)
+        let pType String: p.typeName
+        match resolveTypeName(state, pType) {
+            true: paramTypes.add(pType)
+            _: appendError(state, "unknown type '".append(pType).append("' in parameter '").append(p.name).append("' of function '").append(stmt.name).append("'"))
+        }
+        pi: pi.add(1)
+    }
+    let returnType String: stmt.returnType
+    match returnType.equals("void") or resolveTypeName(state, returnType) {
+        true: {}
+        _: appendError(state, "unknown return type '".append(returnType).append("' for function '").append(stmt.name).append("'"))
+    }
+    let sig FunctionSig: { name: stmt.name, paramTypes: paramTypes, returnType: returnType }
+    let functions Array<FunctionSig>: state.functions
+    functions.add(sig)
+    return state
+}
+
+// collectFunctionDeclarations — walk stmts; for each NODE_FN_DECL node either
+// report a duplicate-function error or call registerFnDecl.
+fn collectFunctionDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
+    let functions Array<FunctionSig>: state.functions
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt.kind.equals(NODE_FN_DECL) {
+            true: match fnNameExistsAt(functions, stmt.name, 0) {
+                true: appendError(state, "function '".append(stmt.name).append("' is already declared"))
+                _: registerFnDecl(state, stmt)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return state
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+// runPrePasses — runs pass 1 then pass 2 in order, matching the C# _Analyze() contract.
+fn runPrePasses(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
+    collectTypeDeclarations(state, stmts)
+    collectFunctionDeclarations(state, stmts)
+    return state
+}

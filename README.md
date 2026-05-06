@@ -534,7 +534,8 @@ Suru is being implemented in stages toward compiling its own source. Each stage 
 | 12 | **Parser in Suru** (`tests/fixtures/suru-parser/`) — recursive-descent parser; cross-validated against C# parser | ✅ Complete |
 | 12.5g | **Semantic analysis re-enabled** — block-level scope stack; semantic errors on every compile path | ✅ Complete |
 | 13a | **Semantic analyzer data structures in Suru** (`tests/fixtures/suru-semantic/`) — scope chain, symbol lookup, error accumulation | ✅ Complete |
-| 13b–e | Semantic Analyzer in Suru (declaration passes, statement analysis, expression analysis) | ⬜ Planned |
+| 13b | **Declaration pre-passes in Suru** (`suru-semantic-passes.suru`) — type resolution, type/function table population | ✅ Complete |
+| 13c–e | Semantic Analyzer in Suru (statement analysis, function analysis, expression analysis) | ⬜ Planned |
 | 14 | Code Generator in Suru | ⬜ Planned |
 | 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |
 
@@ -565,7 +566,7 @@ The scope chain is a flat `Array<Scope>` with integer `parent` indices (simulati
 **Helpers:** `makeAnalyzerState`, `pushScope`, `popScope`, `declareSymbol`, `lookupSymbol` (walks parent chain), `existsInCurrentScope` (current frame only, for duplicate-let detection), `addError`.
 
 ```bash
-# Compile and run the data-structure unit tests
+# Compile and run all semantic unit tests (Stage 13a + 13b)
 dotnet run --project src/Suru.CLI -- build tests/fixtures/suru-semantic/main.suru
 ./tests/fixtures/suru-semantic/build/main
 # PASS: push_pop_roundtrip
@@ -573,6 +574,34 @@ dotnet run --project src/Suru.CLI -- build tests/fixtures/suru-semantic/main.sur
 # PASS: lookup_walks_parent
 # PASS: lookup_returns_empty
 # PASS: add_error
+# PASS: resolveTypeName_builtin
+# PASS: resolveTypeName_user_declared
+# PASS: collectTypeDecls_registers
+# PASS: collectTypeDecls_duplicate
+# PASS: collectFnDecls_registers
+# PASS: collectFnDecls_duplicate
+# PASS: collectFnDecls_unknown_param
+# PASS: runPrePasses_cross_pass
+```
+
+### Stage 13b — Declaration Pre-passes
+
+`tests/fixtures/suru-semantic/suru-semantic-passes.suru` implements the two declaration pre-passes that populate the type and function tables before any statement analysis runs. It includes `suru-semantic.suru` (for `AnalyzerState` and helpers) and `suru-parser.suru` (for `AstNode`, `Param`, and the `NODE_*` constants).
+
+**Pass 1 — `collectTypeDeclarations`:** walks the module's statement list, finds every `NODE_TYPE_DECL` node, and adds its `name` to `state.typeNames`. Reports a duplicate-type error if the name was already seen.
+
+**Pass 2 — `collectFunctionDeclarations`:** walks the statement list, finds every `NODE_FN_DECL` node, and registers its signature in `state.functions`. Validates each parameter type and the return type via `resolveTypeName`; reports an error for any unknown type. Reports a duplicate-function error if the name was already registered.
+
+**Type resolution:** `resolveTypeName(state, name)` returns `true` for the six built-in type names (`Bool`, `Int32`, `Int64`, `Float64`, `String`, `Array`) or any name already in `state.typeNames`. Because pass 1 runs first, a user-declared type (e.g. `type Point: { ... }`) is in `typeNames` before pass 2 validates function parameter types — so `fn usePoint(p Point)` resolves correctly without any extra wiring.
+
+```suru
+// Example: resolveTypeName recognises built-ins and user-declared names
+let state AnalyzerState: semantic.makeAnalyzerState()
+let typeNames Array<String>: state.typeNames
+typeNames.add("Point")
+passes.resolveTypeName(state, "Int64")  // true — built-in
+passes.resolveTypeName(state, "Point")  // true — user-declared
+passes.resolveTypeName(state, "Nope")   // false — unknown
 ```
 
 ### Stage 12 — Suru Parser

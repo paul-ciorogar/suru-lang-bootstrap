@@ -1,16 +1,16 @@
 namespace Suru.Tests;
 
-// Verifies the Stage-13a milestone: scope-chain data structures for the Suru semantic analyzer,
-// written in Suru itself (tests/fixtures/suru-semantic/main.suru).
+// Verifies Stage-13a and Stage-13b milestones for the Suru semantic analyzer
+// written in Suru itself (tests/fixtures/suru-semantic/).
 //
-// ── What the fixture does ────────────────────────────────────────────────────
+// Stage 13a (suru-semantic.suru): scope-chain data structures — AnalyzerState,
+// Scope, SymbolEntry, FunctionSig, AnalysisError, and helpers pushScope/popScope/
+// declareSymbol/lookupSymbol/existsInCurrentScope/addError.
 //
-// suru-semantic defines AnalyzerState, Scope, SymbolEntry, FunctionSig, and
-// AnalysisError types along with helpers: pushScope, popScope, declareSymbol,
-// lookupSymbol, existsInCurrentScope, and addError.
+// Stage 13b (suru-semantic-passes.suru): declaration pre-passes — resolveTypeName,
+// collectTypeDeclarations (pass 1), collectFunctionDeclarations (pass 2), runPrePasses.
 //
-// main.suru runs five unit tests and prints "PASS: <name>" or "FAIL: <name>"
-// for each, then exits 0.
+// main.suru runs all unit tests and prints "PASS: <name>" or "FAIL: <name>" for each.
 [Collection("IntegrationIR")]
 public class IRSuruSemanticTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
 {
@@ -25,13 +25,24 @@ public class IRSuruSemanticTests(CompiledFixturesIR fixtures) : IntegrationTestB
 
         var failLines = lines.Where(l => l.StartsWith("FAIL:")).ToArray();
         Assert.True(failLines.Length == 0,
-            $"Some scope-chain tests failed:\n{string.Join("\n", failLines)}");
+            $"Some semantic tests failed:\n{string.Join("\n", failLines)}");
 
+        // Stage 13a — scope-chain helpers
         Assert.Contains(lines, l => l.Contains("PASS: push_pop_roundtrip"));
         Assert.Contains(lines, l => l.Contains("PASS: lookup_finds_nearest"));
         Assert.Contains(lines, l => l.Contains("PASS: lookup_walks_parent"));
         Assert.Contains(lines, l => l.Contains("PASS: lookup_returns_empty"));
         Assert.Contains(lines, l => l.Contains("PASS: add_error"));
+
+        // Stage 13b — declaration pre-passes
+        Assert.Contains(lines, l => l.Contains("PASS: resolveTypeName_builtin"));
+        Assert.Contains(lines, l => l.Contains("PASS: resolveTypeName_user_declared"));
+        Assert.Contains(lines, l => l.Contains("PASS: collectTypeDecls_registers"));
+        Assert.Contains(lines, l => l.Contains("PASS: collectTypeDecls_duplicate"));
+        Assert.Contains(lines, l => l.Contains("PASS: collectFnDecls_registers"));
+        Assert.Contains(lines, l => l.Contains("PASS: collectFnDecls_duplicate"));
+        Assert.Contains(lines, l => l.Contains("PASS: collectFnDecls_unknown_param"));
+        Assert.Contains(lines, l => l.Contains("PASS: runPrePasses_cross_pass"));
 
         _testPassed = true;
     }

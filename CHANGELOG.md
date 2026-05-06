@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13b — Semantic Analyzer in Suru: Declaration Pre-passes
+
+Implements the two declaration pre-passes of the Suru semantic analyzer in Suru itself (`tests/fixtures/suru-semantic/suru-semantic-passes.suru`), building on the Stage 13a scope-chain data structures.
+
+**New Suru functions:**
+- `isBuiltinType(name String) Bool` — true for the six primitive type names
+- `resolveTypeName(state AnalyzerState, name String) Bool` — true for built-ins and any name in `state.typeNames`
+- `collectTypeDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState` — pass 1: walks module statements, registers `NODE_TYPE_DECL` names into `typeNames`, errors on duplicates
+- `collectFunctionDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState` — pass 2: walks module statements, registers `NODE_FN_DECL` signatures into `functions`, validates param/return types via `resolveTypeName`, errors on unknown types and duplicate names
+- `runPrePasses(state AnalyzerState, stmts Array<AstNode>) AnalyzerState` — runs pass 1 then pass 2 in order
+
+**New unit tests** (8, bringing the fixture total to 13): `resolveTypeName_builtin`, `resolveTypeName_user_declared`, `collectTypeDecls_registers`, `collectTypeDecls_duplicate`, `collectFnDecls_registers`, `collectFnDecls_duplicate`, `collectFnDecls_unknown_param`, `runPrePasses_cross_pass` (verifies a type declared in pass 1 is accepted as a param type in pass 2).
+
+**Codegen fix — array element type propagation:** `IRCodeGenerator` now maintains `_arrayElementTypes: Dictionary<string, SuruType>` (reset per function), populated from `let` and parameter type annotations when the declared type is `Array<T>`. `EmitArrayAt` accepts an optional element type and uses it to return the correct `SuruType` — unboxing scalars and returning `SuruType.String` for `Array<String>` elements. This fixes chained method calls like `arr.at(i).equals(x)` when the array is `Array<String>`, which previously dispatched through integer compare instead of `suru_string_equals`. The fix uses the declared type from syntax, not inference.
+
+**Codegen fix — nested match in statement context:** `EmitMatchArmBodyAsStatement` now routes `MatchExpression` arm bodies through `EmitMatchAsStatement` instead of `EmitValue`. Previously, a nested match used as a statement arm created a result alloca and attempted `store ptr 0` when arm return types were incompatible (e.g. `AnalyzerState` vs void-returning `array.add()`), producing invalid LLVM IR.
+
+All 83 tests pass.
+
+---
+
 ### Refactor: Remove Legacy PropagateStructMeta / _structScopes
 
 Replaced the legacy struct-metadata tracking system with a simple flat dictionary, matching the pattern already used for `_arrayElementTypeNames`. No behaviour change — all 83 tests pass.

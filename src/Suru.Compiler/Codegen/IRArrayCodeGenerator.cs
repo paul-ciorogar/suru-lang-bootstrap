@@ -160,14 +160,20 @@ partial class IRCodeGenerator
 
     // .at(i) → ptr (box for scalars, heap ptr for non-scalars). idx is raw i64 or Struct ptr.
     // Element type unknown at compile time; LetStatement annotation-guided unboxing handles it.
-    private (string val, SuruType type) EmitArrayAt(string arrVal, Expression idxExpr)
+    private (string val, SuruType type) EmitArrayAt(string arrVal, Expression idxExpr, SuruType? elemType = null)
     {
         var (idxVal, idxType) = EmitValue(idxExpr);
         var idx = IsScalar(idxType) ? idxVal : UnboxInt64(idxVal);
         _runtimeDecls.AddArrayAt();
         var result = NextTmp();
         _funcs.AppendLine($"  {result} = call ptr @suru_array_at(ptr {arrVal}, i64 {idx})");
-        return (result, SuruType.Struct);   // element type unknown at compile time
+        // When element type is known from the array's declaration, unbox scalars and return
+        // the concrete type — this lets callers (e.g. .equals()) dispatch correctly.
+        if (elemType.HasValue && IsScalar(elemType.Value))
+            return (UnboxScalar(result, elemType.Value), elemType.Value);
+        if (elemType.HasValue)
+            return (result, elemType.Value);   // String / Array / Struct: ptr is the value directly
+        return (result, SuruType.Struct);      // element type unknown at compile time
     }
 
     // .set(val, i) — box scalar val at boundary; idx is raw i64 or Struct ptr.

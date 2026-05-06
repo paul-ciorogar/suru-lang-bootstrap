@@ -32,6 +32,12 @@ public sealed partial class IRCodeGenerator
     {
         switch (body)
         {
+            // Nested match used as a statement arm — emit as statement so no result alloca is created.
+            // EmitValue would call EmitMatchAsExpression, producing a typed alloca that may mismatch
+            // when arm bodies have incompatible types (e.g. Struct vs Bool from array.add).
+            case MatchExpression nestedMatch:
+                EmitMatchAsStatement(nestedMatch);
+                break;
             case CallExpression { Name: "printLn", Args: [var arg] }:
                 var (v, vt) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();

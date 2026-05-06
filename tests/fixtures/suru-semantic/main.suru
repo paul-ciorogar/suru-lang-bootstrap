@@ -1,4 +1,5 @@
 include "suru-semantic.suru" as semantic
+include "suru-semantic-passes.suru" as passes
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -9,7 +10,7 @@ fn passOrFail(name String, result Bool) {
     }
 }
 
-// ─── Unit tests ───────────────────────────────────────────────────────────────
+// ─── Stage 13a: scope-chain unit tests ───────────────────────────────────────
 
 // push_pop_roundtrip: push 3 scopes beyond the module scope, verify count, pop all, verify restored.
 fn testPushPopRoundtrip() Bool {
@@ -63,12 +64,124 @@ fn testAddError() Bool {
     return errors.len().equals(2)
 }
 
+// ─── Stage 13b: declaration pre-pass unit tests ───────────────────────────────
+//
+// AstNode only declares { kind Int64 }. Extra fields (name, params, returnType)
+// are added in struct literals passed directly to array.add() — these skip
+// ValidateStructLiteralFields because they are call arguments, not let bindings.
+
+// resolveTypeName_builtin: built-in types are known; unknown names are not.
+fn testResolveTypeNameBuiltin() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let r1 Bool: passes.resolveTypeName(state, "Int64")
+    let r2 Bool: passes.resolveTypeName(state, "Bool")
+    let r3 Bool: passes.resolveTypeName(state, "String")
+    let r4 Bool: passes.resolveTypeName(state, "Float64")
+    let r5 Bool: passes.resolveTypeName(state, "Array")
+    let r6 Bool: passes.resolveTypeName(state, "Unknown")
+    return r1 and r2 and r3 and r4 and r5 and not r6
+}
+
+// resolveTypeName_user_declared: a name added to state.typeNames resolves correctly.
+fn testResolveTypeNameUserDeclared() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let typeNames Array<String>: state.typeNames
+    typeNames.add("MyType")
+    let r1 Bool: passes.resolveTypeName(state, "MyType")
+    let r2 Bool: passes.resolveTypeName(state, "OtherType")
+    return r1 and not r2
+}
+
+// collectTypeDecls_registers: two NODE_TYPE_DECL stmts populate typeNames; no errors.
+fn testCollectTypeDeclsRegisters() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Bar" })
+    stmts.add({ kind: NODE_LET, name: "x" })
+    passes.collectTypeDeclarations(state, stmts)
+    let typeNames Array<String>: state.typeNames
+    let errors Array<AnalysisError>: state.errors
+    return typeNames.len().equals(2) and errors.len().equals(0)
+}
+
+// collectTypeDecls_duplicate: duplicate name produces exactly one error.
+fn testCollectTypeDeclsDuplicate() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    passes.collectTypeDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// collectFnDecls_registers: one NODE_FN_DECL with valid param type registers cleanly.
+fn testCollectFnDeclsRegisters() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Bool" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let functions Array<FunctionSig>: state.functions
+    let errors Array<AnalysisError>: state.errors
+    return functions.len().equals(1) and errors.len().equals(0)
+}
+
+// collectFnDecls_duplicate: same function name twice produces exactly one error.
+fn testCollectFnDeclsDuplicate() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// collectFnDecls_unknown_param: unknown param type produces exactly one error.
+fn testCollectFnDeclsUnknownParam() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "UnknownType" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// runPrePasses_cross_pass: type declared in pass1 is valid as param type in pass2.
+fn testRunPrePassesCrossPass() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "p", typeName: "Point" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Point" })
+    stmts.add({ kind: NODE_FN_DECL, name: "usePoint", params: params, returnType: "void" })
+    passes.runPrePasses(state, stmts)
+    let typeNames Array<String>: state.typeNames
+    let functions Array<FunctionSig>: state.functions
+    let errors Array<AnalysisError>: state.errors
+    return typeNames.len().equals(1) and functions.len().equals(1) and errors.len().equals(0)
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 fn main(args Array<String>) {
-    passOrFail("push_pop_roundtrip", testPushPopRoundtrip())
-    passOrFail("lookup_finds_nearest", testLookupFindsNearest())
-    passOrFail("lookup_walks_parent", testLookupWalksParent())
-    passOrFail("lookup_returns_empty", testLookupReturnsEmpty())
-    passOrFail("add_error", testAddError())
+    passOrFail("push_pop_roundtrip",       testPushPopRoundtrip())
+    passOrFail("lookup_finds_nearest",     testLookupFindsNearest())
+    passOrFail("lookup_walks_parent",      testLookupWalksParent())
+    passOrFail("lookup_returns_empty",     testLookupReturnsEmpty())
+    passOrFail("add_error",                testAddError())
+    passOrFail("resolveTypeName_builtin",       testResolveTypeNameBuiltin())
+    passOrFail("resolveTypeName_user_declared", testResolveTypeNameUserDeclared())
+    passOrFail("collectTypeDecls_registers",    testCollectTypeDeclsRegisters())
+    passOrFail("collectTypeDecls_duplicate",    testCollectTypeDeclsDuplicate())
+    passOrFail("collectFnDecls_registers",      testCollectFnDeclsRegisters())
+    passOrFail("collectFnDecls_duplicate",      testCollectFnDeclsDuplicate())
+    passOrFail("collectFnDecls_unknown_param",  testCollectFnDeclsUnknownParam())
+    passOrFail("runPrePasses_cross_pass",       testRunPrePassesCrossPass())
 }

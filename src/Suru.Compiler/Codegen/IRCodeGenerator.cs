@@ -48,6 +48,11 @@ public sealed partial class IRCodeGenerator
     // Scalar vars use alloca i64/i1/etc.; non-scalar vars use alloca ptr.
     private Dictionary<string, (string ptr, SuruType type)> _vars = new();
 
+    // Per-function element-type table: array variable name → SuruType of its elements.
+    // Populated from let/param type annotations (e.g. Array<String> → SuruType.String).
+    // Lets EmitArrayAt return the correct element type instead of always SuruType.Struct.
+    private Dictionary<string, SuruType> _arrayElementTypes = new();
+
     private bool _blockOpen;
     private int  _matchCounter;
     private int  _whileCounter;
@@ -278,10 +283,13 @@ public sealed partial class IRCodeGenerator
                     _ => throw new NotSupportedException($"IR codegen: unsupported argv method '{m.MethodName}'"),
                 };
 
+            // Look up element type from declaration so arr.at(i) returns the correct SuruType.
+            var knownElemType = m.Receiver is VariableReferenceExpression { Name: var an2 }
+                                && _arrayElementTypes.TryGetValue(an2, out var et) ? et : (SuruType?)null;
             return m.MethodName switch
             {
                 "len"   => EmitArrayLen(recvVal),
-                "at"    => EmitArrayAt(recvVal, m.Args[0]),
+                "at"    => EmitArrayAt(recvVal, m.Args[0], knownElemType),
                 "set"   => EmitArraySet(recvVal, m.Args[0], m.Args[1]),
                 "add"   => EmitArrayAdd(recvVal, m.Args[0]),
                 "slice" => EmitArraySlice(recvVal, m.Args[0], m.Args[1]),
