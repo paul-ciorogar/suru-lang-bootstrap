@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13a — Semantic Analyzer in Suru: Data Structures
+
+Foundation types and scope-chain helpers for writing the Suru semantic analyzer in Suru itself. No C# changes — entirely new Suru source code and tests.
+
+**New fixture:** `tests/fixtures/suru-semantic/`
+
+- **`suru-semantic.suru`** — five named type declarations and nine helper functions:
+  - `SymbolEntry { name String, typeName String }` — one binding in a scope frame
+  - `Scope { symbols Array<SymbolEntry>, parent Int64 }` — flat-array scope node; `parent = -1` for module scope
+  - `FunctionSig { name String, paramTypes Array<String>, returnType String }` — registered function signature
+  - `AnalysisError { message String }` — accumulated semantic error
+  - `AnalyzerState { scopes Array<Scope>, functions Array<FunctionSig>, typeNames Array<String>, errors Array<AnalysisError>, currentReturnType String, insideFunction Int64, constants Array<String> }` — full analyzer state
+  - `makeAnalyzerState() AnalyzerState` — creates initial state with module scope pushed
+  - `pushScope / popScope` — append / slice-remove the innermost scope
+  - `declareSymbol` — adds a name→typeName binding to the current scope
+  - `lookupSymbol` — walks the parent chain from innermost scope outward; returns `""` when not found
+  - `existsInCurrentScope` — checks only the innermost scope (for duplicate-let detection)
+  - `addError` — appends to `state.errors`
+  - Three field-extractor helpers (`entryName`, `entryTypeName`, `scopeParent`) that force correct SuruType at call sites, working around the codegen's inability to infer String/Int64 types through untyped struct field chains
+
+- **`main.suru`** — five unit tests: `push_pop_roundtrip`, `lookup_finds_nearest`, `lookup_walks_parent`, `lookup_returns_empty`, `add_error`; prints `PASS: <name>` for each
+
+- **`IRSuruSemanticTests.cs`** — one integration test (`Semantic_DataStructures_AllPass`) that compiles and runs the fixture and asserts all five `PASS:` lines appear with no `FAIL:` lines
+
+- All 77 tests pass
+
+---
+
 ### Stage 12.5g — Re-enable & Fix Semantic Analysis
 
 `SemanticAnalyzer.Analyze()` is now called on every compile path. Invalid programs are rejected before codegen with meaningful error messages.

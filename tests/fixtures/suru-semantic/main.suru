@@ -1,0 +1,74 @@
+include "suru-semantic.suru" as semantic
+
+// ─── Test harness ─────────────────────────────────────────────────────────────
+
+fn passOrFail(name String, result Bool) {
+    match result {
+        true: printLn("PASS: ".append(name))
+        _: printLn("FAIL: ".append(name))
+    }
+}
+
+// ─── Unit tests ───────────────────────────────────────────────────────────────
+
+// push_pop_roundtrip: push 3 scopes beyond the module scope, verify count, pop all, verify restored.
+fn testPushPopRoundtrip() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    let s1 Array<Scope>: state.scopes
+    let afterPush Bool: s1.len().equals(4)
+    semantic.popScope(state)
+    semantic.popScope(state)
+    semantic.popScope(state)
+    let s2 Array<Scope>: state.scopes
+    let afterPop Bool: s2.len().equals(1)
+    return afterPush and afterPop
+}
+
+// lookup_finds_nearest: same name declared in outer and inner scope; inner wins.
+fn testLookupFindsNearest() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.declareSymbol(state, "x", "Int64")
+    semantic.pushScope(state)
+    semantic.declareSymbol(state, "x", "Bool")
+    let result String: semantic.lookupSymbol(state, "x")
+    return result.equals("Bool")
+}
+
+// lookup_walks_parent: symbol declared only in module scope; visible from deep nested scope.
+fn testLookupWalksParent() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.declareSymbol(state, "y", "String")
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    let result String: semantic.lookupSymbol(state, "y")
+    return result.equals("String")
+}
+
+// lookup_returns_empty: undeclared name yields "".
+fn testLookupReturnsEmpty() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let result String: semantic.lookupSymbol(state, "undeclared")
+    return result.equals("")
+}
+
+// add_error: two addError calls produce two entries in state.errors.
+fn testAddError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.addError(state, "error one")
+    semantic.addError(state, "error two")
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(2)
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+fn main(args Array<String>) {
+    passOrFail("push_pop_roundtrip", testPushPopRoundtrip())
+    passOrFail("lookup_finds_nearest", testLookupFindsNearest())
+    passOrFail("lookup_walks_parent", testLookupWalksParent())
+    passOrFail("lookup_returns_empty", testLookupReturnsEmpty())
+    passOrFail("add_error", testAddError())
+}

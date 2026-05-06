@@ -1,0 +1,154 @@
+// Stage 13a — Semantic Analyzer Data Structures
+//
+// Defines the scope-chain types and core helpers used by all later semantic
+// analysis stages. The design mirrors C# SemanticAnalyzer's scope stack but
+// uses Suru-idiomatic patterns: a flat Array<Scope> with integer parent indices
+// replaces Stack<Dictionary>, and in-place heap mutation replaces copy-on-write.
+//
+// Invariant: the current scope is always the last element of state.scopes.
+// pushScope appends; popScope slices off the last element.
+// parent = -1 marks the module scope (no parent).
+
+// ─── Type declarations ────────────────────────────────────────────────────────
+
+type SymbolEntry: { name String, typeName String }
+
+type Scope: { symbols Array<SymbolEntry>, parent Int64 }
+
+type FunctionSig: { name String, paramTypes Array<String>, returnType String }
+
+type AnalysisError: { message String }
+
+type AnalyzerState: {
+    scopes          Array<Scope>
+    functions       Array<FunctionSig>
+    typeNames       Array<String>
+    errors          Array<AnalysisError>
+    currentReturnType String
+    insideFunction  Int64
+    constants       Array<String>
+}
+
+// ─── State constructor ────────────────────────────────────────────────────────
+
+fn makeAnalyzerState() AnalyzerState {
+    let state AnalyzerState: {
+        scopes: [],
+        functions: [],
+        typeNames: [],
+        errors: [],
+        currentReturnType: "",
+        insideFunction: 0,
+        constants: []
+    }
+    return pushScope(state)
+}
+
+// ─── Scope stack helpers ──────────────────────────────────────────────────────
+
+// pushScope — adds a new empty scope on top of the stack.
+// parent = index of the current last scope before the push (or -1 when empty).
+fn pushScope(state AnalyzerState) AnalyzerState {
+    let scopes Array<Scope>: state.scopes
+    let parent Int64: scopes.len().take(1)
+    let scope Scope: { symbols: [], parent: parent }
+    scopes.add(scope)
+    return state
+}
+
+// popScope — removes the innermost scope.
+// Uses slice to drop the last element; the parent chain in remaining scopes is unchanged.
+fn popScope(state AnalyzerState) AnalyzerState {
+    let scopes Array<Scope>: state.scopes
+    let newLen Int64: scopes.len().take(1)
+    let newScopes Array<Scope>: scopes.slice(0, newLen)
+    state.scopes: newScopes
+    return state
+}
+
+// ─── Symbol declaration ───────────────────────────────────────────────────────
+
+// declareSymbol — adds a name→typeName binding to the current (innermost) scope.
+fn declareSymbol(state AnalyzerState, name String, typeName String) AnalyzerState {
+    let scopes Array<Scope>: state.scopes
+    let idx Int64: scopes.len().take(1)
+    let scope Scope: scopes.at(idx)
+    let symbols Array<SymbolEntry>: scope.symbols
+    let entry SymbolEntry: { name: name, typeName: typeName }
+    symbols.add(entry)
+    return state
+}
+
+// ─── Field extractors ─────────────────────────────────────────────────────────
+// These one-line helpers exist because Suru's codegen cannot infer String field
+// types through a chain like array.at(i).field.equals(...). Wrapping the field
+// access in a typed function forces the correct SuruType at the call site.
+
+fn entryName(e SymbolEntry) String {
+    return e.name
+}
+
+fn entryTypeName(e SymbolEntry) String {
+    return e.typeName
+}
+
+fn scopeParent(scope Scope) Int64 {
+    return scope.parent
+}
+
+// ─── Symbol lookup ────────────────────────────────────────────────────────────
+
+// lookupInScopeAt — linear search starting at index i.
+// Returns the typeName of the first matching entry, or "" when exhausted.
+fn lookupInScopeAt(symbols Array<SymbolEntry>, name String, i Int64) String {
+    return match i.lt(symbols.len()) {
+        true: match entryName(symbols.at(i)).equals(name) {
+            true: entryTypeName(symbols.at(i))
+            _: lookupInScopeAt(symbols, name, i.add(1))
+        }
+        _: ""
+    }
+}
+
+// lookupInScope — searches one scope frame.
+fn lookupInScope(scope Scope, name String) String {
+    let symbols Array<SymbolEntry>: scope.symbols
+    return lookupInScopeAt(symbols, name, 0)
+}
+
+// lookupSymbolAt — walks the parent chain from scope[idx].
+// Returns the nearest binding, or "" when the chain is exhausted (parent = -1).
+fn lookupSymbolAt(state AnalyzerState, name String, idx Int64) String {
+    let scopes Array<Scope>: state.scopes
+    return match idx.gte(0) {
+        true: match lookupInScope(scopes.at(idx), name).equals("") {
+            true: lookupSymbolAt(state, name, scopeParent(scopes.at(idx)))
+            _: lookupInScope(scopes.at(idx), name)
+        }
+        _: ""
+    }
+}
+
+// lookupSymbol — public entry point; starts from the innermost scope.
+fn lookupSymbol(state AnalyzerState, name String) String {
+    let scopes Array<Scope>: state.scopes
+    let idx Int64: scopes.len().take(1)
+    return lookupSymbolAt(state, name, idx)
+}
+
+// existsInCurrentScope — checks only the innermost scope (for duplicate-let detection).
+fn existsInCurrentScope(state AnalyzerState, name String) Bool {
+    let scopes Array<Scope>: state.scopes
+    let idx Int64: scopes.len().take(1)
+    let scope Scope: scopes.at(idx)
+    return not lookupInScope(scope, name).equals("")
+}
+
+// ─── Error accumulation ───────────────────────────────────────────────────────
+
+fn addError(state AnalyzerState, message String) AnalyzerState {
+    let errors Array<AnalysisError>: state.errors
+    let err AnalysisError: { message: message }
+    errors.add(err)
+    return state
+}

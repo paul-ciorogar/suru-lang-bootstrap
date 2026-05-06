@@ -517,9 +517,47 @@ Suru is being implemented in stages toward compiling its own source. Each stage 
 | 10–11 | Language convenience: mandatory type annotations, constants, `include`, negative literals, `printError` | ✅ Complete |
 | 12 | **Parser in Suru** (`tests/fixtures/suru-parser/`) — recursive-descent parser; cross-validated against C# parser | ✅ Complete |
 | 12.5g | **Semantic analysis re-enabled** — block-level scope stack; semantic errors on every compile path | ✅ Complete |
-| 13 | Semantic Analyzer in Suru | ⬜ Planned |
+| 13a | **Semantic analyzer data structures in Suru** (`tests/fixtures/suru-semantic/`) — scope chain, symbol lookup, error accumulation | ✅ Complete |
+| 13b–e | Semantic Analyzer in Suru (declaration passes, statement analysis, expression analysis) | ⬜ Planned |
 | 14 | Code Generator in Suru | ⬜ Planned |
 | 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |
+
+### Stage 13a — Semantic Analyzer Data Structures
+
+`tests/fixtures/suru-semantic/suru-semantic.suru` defines the scope-chain types and helpers that the Suru semantic analyzer (Stages 13b–e) will build on.
+
+**Types:**
+
+```suru
+type SymbolEntry:   { name String, typeName String }
+type Scope:         { symbols Array<SymbolEntry>, parent Int64 }
+type FunctionSig:   { name String, paramTypes Array<String>, returnType String }
+type AnalysisError: { message String }
+type AnalyzerState: {
+    scopes            Array<Scope>
+    functions         Array<FunctionSig>
+    typeNames         Array<String>
+    errors            Array<AnalysisError>
+    currentReturnType String
+    insideFunction    Int64
+    constants         Array<String>
+}
+```
+
+The scope chain is a flat `Array<Scope>` with integer `parent` indices (simulating a stack). `parent = -1` marks the module scope. The current scope is always the last element; `pushScope` appends and `popScope` slices off the last.
+
+**Helpers:** `makeAnalyzerState`, `pushScope`, `popScope`, `declareSymbol`, `lookupSymbol` (walks parent chain), `existsInCurrentScope` (current frame only, for duplicate-let detection), `addError`.
+
+```bash
+# Compile and run the data-structure unit tests
+dotnet run --project src/Suru.CLI -- build tests/fixtures/suru-semantic/main.suru
+./tests/fixtures/suru-semantic/build/main
+# PASS: push_pop_roundtrip
+# PASS: lookup_finds_nearest
+# PASS: lookup_walks_parent
+# PASS: lookup_returns_empty
+# PASS: add_error
+```
 
 ### Stage 12 — Suru Parser
 
