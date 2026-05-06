@@ -8,6 +8,10 @@
 // Invariant: the current scope is always the last element of state.scopes.
 // pushScope appends; popScope slices off the last element.
 // parent = -1 marks the module scope (no parent).
+//
+// Field access on array elements (e.g. symbols.at(i).name) works directly
+// because the C# compiler tracks Array<T> element types and annotates every
+// AST expression node with its resolved SuruType during semantic analysis.
 
 // ─── Type declarations ────────────────────────────────────────────────────────
 
@@ -79,31 +83,14 @@ fn declareSymbol(state AnalyzerState, name String, typeName String) AnalyzerStat
     return state
 }
 
-// ─── Field extractors ─────────────────────────────────────────────────────────
-// These one-line helpers exist because Suru's codegen cannot infer String field
-// types through a chain like array.at(i).field.equals(...). Wrapping the field
-// access in a typed function forces the correct SuruType at the call site.
-
-fn entryName(e SymbolEntry) String {
-    return e.name
-}
-
-fn entryTypeName(e SymbolEntry) String {
-    return e.typeName
-}
-
-fn scopeParent(scope Scope) Int64 {
-    return scope.parent
-}
-
 // ─── Symbol lookup ────────────────────────────────────────────────────────────
 
 // lookupInScopeAt — linear search starting at index i.
 // Returns the typeName of the first matching entry, or "" when exhausted.
 fn lookupInScopeAt(symbols Array<SymbolEntry>, name String, i Int64) String {
     return match i.lt(symbols.len()) {
-        true: match entryName(symbols.at(i)).equals(name) {
-            true: entryTypeName(symbols.at(i))
+        true: match symbols.at(i).name.equals(name) {
+            true: symbols.at(i).typeName
             _: lookupInScopeAt(symbols, name, i.add(1))
         }
         _: ""
@@ -122,7 +109,7 @@ fn lookupSymbolAt(state AnalyzerState, name String, idx Int64) String {
     let scopes Array<Scope>: state.scopes
     return match idx.gte(0) {
         true: match lookupInScope(scopes.at(idx), name).equals("") {
-            true: lookupSymbolAt(state, name, scopeParent(scopes.at(idx)))
+            true: lookupSymbolAt(state, name, scopes.at(idx).parent)
             _: lookupInScope(scopes.at(idx), name)
         }
         _: ""

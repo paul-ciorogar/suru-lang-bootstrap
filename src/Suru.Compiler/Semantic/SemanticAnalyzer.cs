@@ -23,6 +23,9 @@ public sealed class SemanticAnalyzer
     private string? _currentFunctionName = null;
     private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
     private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
+    // Maps variable/parameter name → declared element type name for Array<TypeName> annotations.
+    // Enables InferType to resolve field types through arr.at(i).field chains.
+    private readonly Dictionary<string, string> _arrayElementTypeNames = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -86,6 +89,14 @@ public sealed class SemanticAnalyzer
 
     private void DeclareStructMeta(string name, List<(string Name, SuruType Type)> meta) =>
         _structScopes.Peek()[name] = meta;
+
+    // Records the element type name for Array<TypeName> annotations so InferType can
+    // resolve field access through arr.at(i).field chains.
+    private void RecordArrayElementType(string varName, TypeAnnotation ann)
+    {
+        if (ann.Name == "Array" && ann.TypeParam is { } elemAnn && elemAnn.Name != "Array")
+            _arrayElementTypeNames[varName] = elemAnn.Name;
+    }
 
     // ─── Pre-pass registrations ───────────────────────────────────────────────
 
@@ -221,6 +232,7 @@ public sealed class SemanticAnalyzer
             else
             {
                 DeclareSymbol(let.Name, type.Value);
+                RecordArrayElementType(let.Name, let.TypeAnnotation);
                 if (type.Value == SuruType.Struct)
                 {
                     ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
@@ -273,8 +285,11 @@ public sealed class SemanticAnalyzer
 
         _functions.TryGetValue(fn.Name, out var sig);
         for (int i = 0; i < fn.Parameters.Count; i++)
+        {
             if (i < sig.ParamTypes.Count)
                 DeclareSymbol(fn.Parameters[i].Name, sig.ParamTypes[i]);
+            RecordArrayElementType(fn.Parameters[i].Name, fn.Parameters[i].TypeAnnotation);
+        }
 
         _currentFunctionReturnType    = sig.ReturnType;
         _currentFunctionReturnTypeName = fn.ReturnType.Name;
@@ -340,6 +355,20 @@ public sealed class SemanticAnalyzer
             case MatchExpression match when match.Arms.Count > 0:
                 PropagateStructMeta(varName, match.Arms[0].Body, typeName);
                 break;
+            // arr.at(i) result: propagate field layout from the tracked element type.
+            case MethodCallExpression { MethodName: "at", Receiver: VariableReferenceExpression arrVar }
+                when _arrayElementTypeNames.TryGetValue(arrVar.Name, out var elemTypeName)
+                  && _typeDeclarations.TryGetValue(elemTypeName, out var atTd):
+            {
+                var fields = new List<(string Name, SuruType Type)>();
+                foreach (var (fname, fieldTypeAnn) in atTd.Fields)
+                {
+                    var t = ResolveTypeAnnotation(fieldTypeAnn);
+                    if (t.HasValue) fields.Add((fname, t.Value));
+                }
+                if (fields.Count > 0) DeclareStructMeta(varName, fields);
+                break;
+            }
         }
     }
 
@@ -385,7 +414,6 @@ public sealed class SemanticAnalyzer
 
             case FieldAccessExpression fa:
                 AnalyzeExpression(fa.Receiver);
-                fa.ResolvedType = InferType(fa);
                 break;
 
             case MethodCallExpression nsCall
@@ -502,6 +530,8 @@ public sealed class SemanticAnalyzer
                 }
                 break;
         }
+        // Annotate every expression with its resolved type so codegen never has to guess.
+        expr.ResolvedType = InferType(expr);
     }
 
     // ─── Type inference ───────────────────────────────────────────────────────
@@ -514,6 +544,15 @@ public sealed class SemanticAnalyzer
         StructLiteralExpression    => SuruType.Struct,
         ArrayLiteralExpression     => SuruType.Array,
         StringLiteralExpression    => SuruType.String,
+        // arr.at(i).field — receiver is a method call on an Array<TypeName> variable.
+        FieldAccessExpression fa
+            when fa.Receiver is MethodCallExpression { MethodName: "at",
+                                                       Receiver: VariableReferenceExpression arrVar }
+              && _arrayElementTypeNames.TryGetValue(arrVar.Name, out var elemTypeName)
+              && _typeDeclarations.TryGetValue(elemTypeName, out var elemTd)
+            => elemTd.Fields.FirstOrDefault(f => f.Field == fa.FieldName) is var fld && fld.Field != null
+                ? ResolveTypeAnnotation(fld.Type) : null,
+        // var.field — receiver is a local variable with known struct meta.
         FieldAccessExpression fa when fa.Receiver is VariableReferenceExpression fv
             && LookupStructMeta(fv.Name) is { } fields
             => fields.FirstOrDefault(f => f.Name == fa.FieldName) is var field && field.Name != null

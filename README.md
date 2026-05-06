@@ -320,6 +320,22 @@ fn processAll(items Array<Int64>) void {
 }
 ```
 
+When the element type is a named struct, fields can be accessed directly on `.at()` results — no intermediate variable or wrapper function needed:
+
+```suru
+type Token: { kind Int64, text String, line Int64, col Int64 }
+
+fn getKind(tokens Array<Token>, i Int64) Int64 {
+    return tokens.at(i).kind      // Int64 field resolved correctly
+}
+
+fn getText(tokens Array<Token>, i Int64) String {
+    return tokens.at(i).text      // String field resolved correctly
+}
+```
+
+This works because the compiler tracks the element type from the `Array<T>` annotation and annotates every AST expression with its resolved type during semantic analysis.
+
 Use `clone(arr)` to deep-copy and `drop(arr)` to free the array and its data.
 
 ### Strings

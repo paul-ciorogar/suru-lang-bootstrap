@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Universal AST Type Annotation + Array Element Type Tracking
+
+Every `Expression` AST node now carries a `ResolvedType` property set by the semantic analyzer.
+This eliminates codegen guessing and enables direct field access on `arr.at(i).field` chains.
+
+**Changes:**
+
+- **`Expression` base class** (`Parse/Ast/Expression.cs`) — new `public SuruType? ResolvedType { get; set; }` property; `FieldAccessExpression` no longer declares its own (inherited).
+- **`SemanticAnalyzer`** (`Semantic/SemanticAnalyzer.cs`):
+  - `_arrayElementTypeNames: Dictionary<string, string>` — records element type name for every `Array<TypeName>` variable or parameter declaration.
+  - `RecordArrayElementType` helper — called from `AnalyzeLetStatement` and `AnalyzeFunctionDeclaration`.
+  - `InferType` extended — new case resolves `arr.at(i).field` via `_arrayElementTypeNames` + `_typeDeclarations`, returning the correct field type instead of `null`.
+  - `PropagateStructMeta` extended — new case propagates field layout metadata when the value is `arr.at(i)` for a tracked element type, enabling subsequent `let x T: arr.at(i)` + `x.field` access.
+  - `AnalyzeExpression` — annotation call `expr.ResolvedType = InferType(expr)` moved to the bottom of the method so it fires for **every** expression node, not just `FieldAccessExpression`.
+- **`suru-semantic.suru`** (`tests/fixtures/suru-semantic/`) — field-extractor workaround removed:
+  - Deleted `entryName`, `entryTypeName`, `scopeParent` helper functions.
+  - `lookupInScopeAt` uses `symbols.at(i).name` and `symbols.at(i).typeName` directly.
+  - `lookupSymbolAt` uses `scopes.at(idx).parent` directly.
+- **`SemanticAnalyzerArrayElementTypeTests.cs`** — 6 new unit tests covering String/Int64 field access via function parameters and `let` variables, chained method calls, and expression annotation coverage.
+- All 83 tests pass.
+
+---
+
 ### Stage 13a — Semantic Analyzer in Suru: Data Structures
 
 Foundation types and scope-chain helpers for writing the Suru semantic analyzer in Suru itself. No C# changes — entirely new Suru source code and tests.
