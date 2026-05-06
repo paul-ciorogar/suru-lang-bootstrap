@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Refactor: Remove Legacy PropagateStructMeta / _structScopes
+
+Replaced the legacy struct-metadata tracking system with a simple flat dictionary, matching the pattern already used for `_arrayElementTypeNames`. No behaviour change — all 83 tests pass.
+
+**Motivation:** `SuruType` is a flat enum — `LookupSymbol("p")` returns `SuruType.Struct` with no way to recover the declared type name. The old system patched this by caching the full resolved field layout (`List<(string, SuruType)>`) in a scope-parallel stack. Since Suru `let` statements have mandatory type annotations, the annotation name is always available directly — no need to derive it from the value expression.
+
+**Removed from `SemanticAnalyzer`:**
+- `_structScopes: Stack<Dictionary<string, List<(string Name, SuruType Type)>>>` — scope-parallel field layout cache
+- `_functionReturnStructSymbols: Dictionary<string, List<…>>` — function return field cache
+- `PropagateStructMeta(varName, value, typeName)` — 45-line dispatcher with 6 value-expression cases
+- `LookupStructMeta` / `DeclareStructMeta` helper methods
+- `_functionReturnStructSymbols` population block in `AnalyzeReturnStatement`
+- `_structScopes` push/pop from `PushScope`/`PopScope`
+
+**Added:**
+- `_varStructTypeNames: Dictionary<string, string>` — maps var/param name → declared type name (e.g. `"p" → "Point"`); set in `AnalyzeLetStatement` and `AnalyzeFunctionDeclaration`.
+- `InferType` `var.field` case updated: `_varStructTypeNames` + `_typeDeclarations` lookup, consistent with the existing `arr.at(i).field` case.
+
+---
+
 ### Universal AST Type Annotation + Array Element Type Tracking
 
 Every `Expression` AST node now carries a `ResolvedType` property set by the semantic analyzer.

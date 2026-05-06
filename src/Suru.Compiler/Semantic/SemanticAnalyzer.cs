@@ -11,9 +11,6 @@ public sealed class SemanticAnalyzer
     // Each frame maps variable name → SuruType. LookupSymbol walks top→bottom.
     private readonly Stack<Dictionary<string, SuruType>> _scopes = new();
 
-    // Parallel stack for struct field metadata (name → field list).
-    private readonly Stack<Dictionary<string, List<(string Name, SuruType Type)>>> _structScopes = new();
-
     private readonly Dictionary<string, (IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)> _functions = new();
     private readonly HashSet<string> _constants = new();
     private readonly List<string> _errors = [];
@@ -21,11 +18,13 @@ public sealed class SemanticAnalyzer
     private string? _currentFunctionReturnTypeName = null;
     private bool _currentFunctionIsVoid = false;
     private string? _currentFunctionName = null;
-    private readonly Dictionary<string, List<(string Name, SuruType Type)>> _functionReturnStructSymbols = new();
     private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
     // Maps variable/parameter name → declared element type name for Array<TypeName> annotations.
     // Enables InferType to resolve field types through arr.at(i).field chains.
     private readonly Dictionary<string, string> _arrayElementTypeNames = new();
+    // Maps variable/parameter name → declared struct type name for named-type annotations.
+    // Enables InferType to resolve field types for var.field access chains.
+    private readonly Dictionary<string, string> _varStructTypeNames = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -53,17 +52,9 @@ public sealed class SemanticAnalyzer
 
     // ─── Scope helpers ───────────────────────────────────────────────────────
 
-    private void PushScope()
-    {
-        _scopes.Push(new Dictionary<string, SuruType>());
-        _structScopes.Push(new Dictionary<string, List<(string Name, SuruType Type)>>());
-    }
+    private void PushScope() => _scopes.Push(new Dictionary<string, SuruType>());
 
-    private void PopScope()
-    {
-        _scopes.Pop();
-        _structScopes.Pop();
-    }
+    private void PopScope() => _scopes.Pop();
 
     // Walks the scope stack from innermost to outermost.
     private SuruType? LookupSymbol(string name)
@@ -79,16 +70,6 @@ public sealed class SemanticAnalyzer
 
     private void DeclareSymbol(string name, SuruType type) =>
         _scopes.Peek()[name] = type;
-
-    private List<(string Name, SuruType Type)>? LookupStructMeta(string name)
-    {
-        foreach (var scope in _structScopes)
-            if (scope.TryGetValue(name, out var meta)) return meta;
-        return null;
-    }
-
-    private void DeclareStructMeta(string name, List<(string Name, SuruType Type)> meta) =>
-        _structScopes.Peek()[name] = meta;
 
     // Records the element type name for Array<TypeName> annotations so InferType can
     // resolve field access through arr.at(i).field chains.
@@ -236,7 +217,7 @@ public sealed class SemanticAnalyzer
                 if (type.Value == SuruType.Struct)
                 {
                     ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
-                    PropagateStructMeta(let.Name, let.Value, let.TypeAnnotation.Name);
+                    _varStructTypeNames[let.Name] = let.TypeAnnotation.Name;
                 }
             }
             // Module-scope lets (stack depth == 1) are constants — reassignment is forbidden.
@@ -261,19 +242,6 @@ public sealed class SemanticAnalyzer
                 if (retType.HasValue && retType.Value != _currentFunctionReturnType.Value)
                     _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType.Value}, got {retType.Value}");
             }
-            if (_currentFunctionName != null && ret.Value is StructLiteralExpression
-                && _currentFunctionReturnTypeName != null
-                && _typeDeclarations.TryGetValue(_currentFunctionReturnTypeName, out var retTd))
-            {
-                var fields = new List<(string Name, SuruType Type)>();
-                foreach (var (fname, fieldTypeAnn) in retTd.Fields)
-                {
-                    var t = ResolveTypeAnnotation(fieldTypeAnn);
-                    if (t.HasValue) fields.Add((fname, t.Value));
-                }
-                if (fields.Count > 0)
-                    _functionReturnStructSymbols[_currentFunctionName] = fields;
-            }
         }
     }
 
@@ -289,6 +257,8 @@ public sealed class SemanticAnalyzer
             if (i < sig.ParamTypes.Count)
                 DeclareSymbol(fn.Parameters[i].Name, sig.ParamTypes[i]);
             RecordArrayElementType(fn.Parameters[i].Name, fn.Parameters[i].TypeAnnotation);
+            if (i < sig.ParamTypes.Count && sig.ParamTypes[i] == SuruType.Struct)
+                _varStructTypeNames[fn.Parameters[i].Name] = fn.Parameters[i].TypeAnnotation.Name;
         }
 
         _currentFunctionReturnType    = sig.ReturnType;
@@ -323,53 +293,6 @@ public sealed class SemanticAnalyzer
             if (stmt is WhileStatement ws && CheckHasReturn(ws.Body)) return true;
         }
         return false;
-    }
-
-    private void PropagateStructMeta(string varName, Expression value, string typeName)
-    {
-        switch (value)
-        {
-            case StructLiteralExpression:
-                if (_typeDeclarations.TryGetValue(typeName, out var td))
-                {
-                    var fields = new List<(string Name, SuruType Type)>();
-                    foreach (var (fname, fieldTypeAnn) in td.Fields)
-                    {
-                        var t = ResolveTypeAnnotation(fieldTypeAnn);
-                        if (t.HasValue) fields.Add((fname, t.Value));
-                    }
-                    DeclareStructMeta(varName, fields);
-                }
-                break;
-            case VariableReferenceExpression v when LookupStructMeta(v.Name) is { } meta:
-                DeclareStructMeta(varName, new List<(string, SuruType)>(meta));
-                break;
-            case CallExpression { Name: "clone", Args.Count: 1 } call
-                when call.Args[0] is VariableReferenceExpression src
-                  && LookupStructMeta(src.Name) is { } srcMeta:
-                DeclareStructMeta(varName, new List<(string, SuruType)>(srcMeta));
-                break;
-            case CallExpression call when _functionReturnStructSymbols.TryGetValue(call.Name, out var fnMeta):
-                DeclareStructMeta(varName, new List<(string, SuruType)>(fnMeta));
-                break;
-            case MatchExpression match when match.Arms.Count > 0:
-                PropagateStructMeta(varName, match.Arms[0].Body, typeName);
-                break;
-            // arr.at(i) result: propagate field layout from the tracked element type.
-            case MethodCallExpression { MethodName: "at", Receiver: VariableReferenceExpression arrVar }
-                when _arrayElementTypeNames.TryGetValue(arrVar.Name, out var elemTypeName)
-                  && _typeDeclarations.TryGetValue(elemTypeName, out var atTd):
-            {
-                var fields = new List<(string Name, SuruType Type)>();
-                foreach (var (fname, fieldTypeAnn) in atTd.Fields)
-                {
-                    var t = ResolveTypeAnnotation(fieldTypeAnn);
-                    if (t.HasValue) fields.Add((fname, t.Value));
-                }
-                if (fields.Count > 0) DeclareStructMeta(varName, fields);
-                break;
-            }
-        }
     }
 
     // Validates that a struct literal's field names match the declared type (when one exists).
@@ -552,11 +475,12 @@ public sealed class SemanticAnalyzer
               && _typeDeclarations.TryGetValue(elemTypeName, out var elemTd)
             => elemTd.Fields.FirstOrDefault(f => f.Field == fa.FieldName) is var fld && fld.Field != null
                 ? ResolveTypeAnnotation(fld.Type) : null,
-        // var.field — receiver is a local variable with known struct meta.
+        // var.field — receiver is a local variable with a known named struct type.
         FieldAccessExpression fa when fa.Receiver is VariableReferenceExpression fv
-            && LookupStructMeta(fv.Name) is { } fields
-            => fields.FirstOrDefault(f => f.Name == fa.FieldName) is var field && field.Name != null
-                ? field.Type : null,
+            && _varStructTypeNames.TryGetValue(fv.Name, out var structTypeName)
+            && _typeDeclarations.TryGetValue(structTypeName, out var structTd)
+            => structTd.Fields.FirstOrDefault(f => f.Field == fa.FieldName) is var fld && fld.Field != null
+                ? ResolveTypeAnnotation(fld.Type) : null,
         VariableReferenceExpression v => LookupSymbol(v.Name),
         MethodCallExpression { MethodName: "compare" } => SuruType.Int64,
         MethodCallExpression { MethodName: "equals" or "lt" or "gt" or "lte" or "gte" } => SuruType.Bool,
