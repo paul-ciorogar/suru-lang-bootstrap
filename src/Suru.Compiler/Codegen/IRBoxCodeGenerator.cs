@@ -46,7 +46,7 @@ public sealed partial class IRCodeGenerator
     // Void functions return SuruType.Void; codegen emits `ret ptr null` for them
     // since Suru's IR convention uses ptr as the return type for non-scalar functions.
     private SuruType FnReturnSuruType(FunctionDeclaration fn)
-        => fn.ReturnType.Name is "void" ? SuruType.Void : SuruTypeFromAnnotation(fn.ReturnType);
+        => fn.ReturnType.Name is BuiltinNames.Void ? SuruType.Void : SuruTypeFromAnnotation(fn.ReturnType);
 
     // Default zero-value constant for implicit returns.
     private static string DefaultReturnValue(SuruType type) => type switch

@@ -196,14 +196,11 @@ public class Compiler
 
         try
         {
-            var visitedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                Path.GetFullPath(_sourcePath)
-            };
-            var sourceDir = Path.GetDirectoryName(Path.GetFullPath(_sourcePath));
+            var rootPath  = Path.GetFullPath(_sourcePath);
+            var sourceDir = Path.GetDirectoryName(rootPath);
             if (sourceDir is null)
                 return (null, [$"Cannot determine directory for source path: {_sourcePath}"]);
-            module = ResolveIncludes(module, sourceDir, visitedPaths);
+            module = IncludeResolver.Resolve(module, sourceDir, new IncludeGraph(rootPath));
         }
         catch (Exception ex)
         {
@@ -215,170 +212,6 @@ public class Compiler
             return (null, semanticErrors);
 
         return (module, []);
-    }
-
-    // Resolves `include "path" as ns` directives in module by merging function signatures
-    // from each included file into the statement list under the `ns.` prefix — enabling
-    // semantic analysis to type-check cross-module calls without a separate declaration step.
-    //
-    // Two additional collections are populated and returned in the Module:
-    //
-    //   ExternalFunctions — maps every merged "ns.fn" Suru name back to the original
-    //     LLVM symbol name "fn". IRCodeGenerator uses this to emit `declare @fn` instead
-    //     of `define @ns.fn` and to call `@fn` (not `@ns.fn`) at call sites.
-    //
-    //   IncludedSourcePaths — absolute paths of all included source files, collected
-    //     transitively so CompileIR can build each into its own object file and link
-    //     everything together. Each path appears at most once (deduplicated via a set).
-    //
-    // visitedPaths guards against circular includes; it accumulates across the recursive
-    // calls so a file can't be included twice anywhere in the include graph.
-    private static Module ResolveIncludes(
-        Module module, string baseDir, HashSet<string> visitedPaths, HashSet<string>? beingResolved = null)
-    {
-        beingResolved ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        var directives = module.Statements.OfType<IncludeDirective>().ToList();
-        if (directives.Count == 0) return module;
-
-        var mergedStatements = module.Statements
-            .Where(s => s is not IncludeDirective)
-            .ToList();
-        var namespaces       = new HashSet<string>(module.Namespaces);
-        var externalFns      = new Dictionary<string, string>();
-        var seenPaths        = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var includedPaths    = new List<string>();
-
-        // Track constant names already in the main module so we can deduplicate
-        // constants from multiple included files that share the same names.
-        var seenConstantNames = new HashSet<string>();
-        foreach (var s in module.Statements)
-            if (s is LetStatement ls) seenConstantNames.Add(ls.Name);
-
-        // Track type names already in the main module so included types don't shadow them
-        // and diamond includes don't produce duplicates that trigger "already declared" errors.
-        var seenTypeNames = new HashSet<string>(
-            module.Statements.OfType<TypeDeclaration>().Select(td => td.Name));
-
-        // Collect constants from all included files (deduplicated) so that included
-        // function bodies can reference them during semantic analysis of the merged module.
-        // These are inserted before function declarations to ensure they're in _symbols
-        // before AnalyzeFunctionDeclaration re-injects constants at function entry.
-        var includedConstants = new List<Statement>();
-        var includedTypes     = new List<Statement>();
-
-        foreach (var directive in directives)
-        {
-            var fullPath = Path.GetFullPath(Path.Combine(baseDir, directive.Path));
-            if (!File.Exists(fullPath))
-                throw new Exception($"Include file not found: {fullPath}");
-
-            // True circular include: currently on the resolution call stack.
-            if (beingResolved.Contains(fullPath))
-                throw new Exception($"Circular include detected: {fullPath}");
-
-            // Diamond include: already fully resolved by a sibling branch.
-            // Register the namespace alias but skip re-merging the content.
-            if (visitedPaths.Contains(fullPath))
-            {
-                namespaces.Add(directive.NamespaceName);
-                continue;
-            }
-
-            beingResolved.Add(fullPath);
-            visitedPaths.Add(fullPath);
-
-            var source         = File.ReadAllText(fullPath);
-            var includeParseResult = Parser.Parse(new Tokens(new Lexer(source), fullPath));
-            if (!includeParseResult.Success)
-                throw new Exception(string.Join("\n", includeParseResult.Errors));
-            var includedModule = includeParseResult.Require();
-
-            var includedDir = Path.GetDirectoryName(fullPath)
-                ?? throw new InvalidOperationException($"Cannot determine directory for included path: {fullPath}");
-            includedModule  = ResolveIncludes(includedModule, includedDir, visitedPaths, beingResolved);
-            beingResolved.Remove(fullPath);
-
-            // Collect this file and its transitive includes as separate compilation units.
-            if (seenPaths.Add(fullPath))
-                includedPaths.Add(fullPath);
-            foreach (var transPath in includedModule.IncludedSourcePaths)
-                if (seenPaths.Add(transPath))
-                    includedPaths.Add(transPath);
-
-            var ns = directive.NamespaceName;
-            namespaces.Add(ns);
-            // Propagate transitive namespaces so that a file including this one can still
-            // resolve calls like `sem.foo()` that appear inside the included file's bodies.
-            foreach (var transitiveNs in includedModule.Namespaces)
-                namespaces.Add(transitiveNs);
-
-            foreach (var stmt in includedModule.Statements)
-            {
-                if (stmt is FunctionDeclaration fn)
-                {
-                    if (includedModule.ExternalFunctions.TryGetValue(fn.Name, out var llvmSymbol))
-                    {
-                        // Transitive function (came from one of the included file's own includes).
-                        // Propagate as-is — don't double-prefix with ns. TryAdd prevents
-                        // duplicates when multiple siblings share the same transitive dependency.
-                        if (externalFns.TryAdd(fn.Name, llvmSymbol))
-                            mergedStatements.Add(fn);
-                    }
-                    else
-                    {
-                        // Function declared in the included file itself — prefix with ns.
-                        // Register the qualified name ("ns.fn") and record the original LLVM
-                        // symbol name ("fn") so codegen can emit `declare @fn` and `call @fn`.
-                        var qualifiedName = ns + "." + fn.Name;
-                        externalFns[qualifiedName] = fn.Name;
-                        mergedStatements.Add(new FunctionDeclaration(
-                            qualifiedName, fn.Parameters, fn.ReturnType, fn.Body));
-                    }
-                }
-                else if (stmt is LetStatement constant && seenConstantNames.Add(constant.Name))
-                {
-                    // Only scalar (Bool/Int64/Float64) module-level constants are merged:
-                    // they become internal globals in both the main .ll and the included .ll
-                    // (internal linkage means no symbol conflict at link time). String
-                    // constants are skipped — they can't be emitted as simple LLVM globals
-                    // and are only needed in the included file's own translation unit.
-                    if (constant.Value is BoolLiteral or IntLiteral or FloatLiteral)
-                        includedConstants.Add(stmt);
-                }
-                else if (stmt is TypeDeclaration typeDecl && seenTypeNames.Add(typeDecl.Name))
-                {
-                    // Type declarations produce no LLVM IR — they're purely compile-time
-                    // metadata. Merging them lets the importing file use the type name in
-                    // annotations, struct literals, and function signatures without redefining it.
-                    includedTypes.Add(typeDecl);
-                }
-            }
-        }
-
-        // Prepend types then constants so both precede all function declarations in the merged
-        // list — SemanticAnalyzer's first pass registers types before it enters any function body.
-        mergedStatements.InsertRange(0, includedTypes.Concat(includedConstants));
-
-        return new Module
-        {
-            SourcePath           = module.SourcePath,
-            Statements           = mergedStatements,
-            Namespaces           = namespaces,
-            ExternalFunctions    = externalFns,
-            IncludedSourcePaths  = includedPaths,
-            TypeDeclarations     = BuildTypeDeclarationsDict(mergedStatements),
-        };
-    }
-
-    private static Dictionary<string, TypeDeclaration> BuildTypeDeclarationsDict(
-        IEnumerable<Statement> stmts)
-    {
-        // Duplicates are intentionally allowed; the semantic analyzer reports them.
-        var dict = new Dictionary<string, TypeDeclaration>();
-        foreach (var td in stmts.OfType<TypeDeclaration>())
-            dict[td.Name] = td;
-        return dict;
     }
 
     private static string? RunClang(string irPath, string objectPath)

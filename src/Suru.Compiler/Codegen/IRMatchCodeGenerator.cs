@@ -35,7 +35,7 @@ public sealed partial class IRCodeGenerator
             case MatchExpression nestedMatch:
                 EmitMatchAsStatement(nestedMatch);
                 break;
-            case CallExpression { Name: "printLn", Args: [var arg] }:
+            case CallExpression { Name: BuiltinNames.PrintLn, Args: [var arg] }:
                 var (v, vt) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();
                 var printP = IsScalar(vt) ? BoxValue(v, vt) : v;
@@ -90,7 +90,7 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression        => new SuruType.ArrayType(SuruType.Int64),   // best-effort
         StructLiteralExpression       => new SuruType.NamedType(""),
         FieldAccessExpression fa      => fa.ResolvedType ?? new SuruType.NamedType(""),
-        CallExpression { Name: "clone", Args: [var carg] } => PeekType(carg),
+        CallExpression { Name: BuiltinNames.Clone, Args: [var carg] } => PeekType(carg),
         UnaryExpression               => SuruType.Bool,
         BinaryExpression              => SuruType.Bool,
         VariableReferenceExpression v =>
@@ -99,7 +99,7 @@ public sealed partial class IRCodeGenerator
             : throw new InvalidOperationException($"IR codegen: undefined variable '{v.Name}' in match pattern"),
         MatchExpression match         => PeekMatchType(match),
         MethodCallExpression m        => PeekMethodType(m),
-        CallExpression { Name: "readFile" } => SuruType.String,
+        CallExpression { Name: BuiltinNames.ReadFile } => SuruType.String,
         CallExpression c when _userFunctions.ContainsKey(c.Name)
                                       => _userFunctions[c.Name].ReturnType,
         _ => throw new NotSupportedException($"IR codegen: cannot peek type of {expr.GetType().Name}"),
@@ -123,7 +123,7 @@ public sealed partial class IRCodeGenerator
         }
 
         if (m.Receiver is VariableReferenceExpression { Name: var typeName }
-            && typeName is "Int32" or "Int64" or "Float64" or "Bool" or "String")
+            && typeName is BuiltinNames.Int32 or BuiltinNames.Int64 or BuiltinNames.Float64 or BuiltinNames.Bool or BuiltinNames.String)
             return SuruTypeFromAnnotation(new TypeAnnotation(typeName));
 
         if (m.Receiver is VariableReferenceExpression rv2 &&

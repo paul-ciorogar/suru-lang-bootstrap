@@ -12,12 +12,12 @@ internal static class SuruTypeSystem
         TypeAnnotation ann,
         IReadOnlyDictionary<string, TypeDeclaration> typeDecls) => ann.Name switch
     {
-        "Bool"    => SuruType.Bool,
-        "Int32"   => SuruType.Int32,
-        "Int64"   => SuruType.Int64,
-        "Float64" => SuruType.Float64,
-        "String"  => SuruType.String,
-        "Array"   => ann.TypeParam is { } tp
+        BuiltinNames.Bool    => SuruType.Bool,
+        BuiltinNames.Int32   => SuruType.Int32,
+        BuiltinNames.Int64   => SuruType.Int64,
+        BuiltinNames.Float64 => SuruType.Float64,
+        BuiltinNames.String  => SuruType.String,
+        BuiltinNames.Array   => ann.TypeParam is { } tp
                         ? new SuruType.ArrayType(TryResolve(tp, typeDecls) ?? SuruType.Int64)
                         : null,
         // Named types declared via `type Foo: { ... }` resolve to NamedType("Foo").

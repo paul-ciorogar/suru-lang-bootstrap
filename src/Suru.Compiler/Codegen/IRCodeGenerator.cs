@@ -100,7 +100,7 @@ public sealed partial class IRCodeGenerator
 
         // Pre-pass: register all non-main function signatures.
         foreach (var stmt in _module.Statements)
-            if (stmt is FunctionDeclaration { Name: not "main" } fn)
+            if (stmt is FunctionDeclaration { Name: not BuiltinNames.Main } fn)
                 _userFunctions[fn.Name] = (fn.Parameters, FnReturnSuruType(fn));
 
         // Pass 1: emit all function bodies.
@@ -151,7 +151,7 @@ public sealed partial class IRCodeGenerator
         sb.Append(_helpers);
         sb.Append(_funcs);
 
-        var hasMain = _module.Statements.OfType<FunctionDeclaration>().Any(f => f.Name == "main");
+        var hasMain = _module.Statements.OfType<FunctionDeclaration>().Any(f => f.Name == BuiltinNames.Main);
         if (hasMain) EmitMainWrapper(sb);
 
         return sb.ToString();
@@ -168,14 +168,14 @@ public sealed partial class IRCodeGenerator
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
         StructLiteralExpression sl => EmitStructLiteral(sl, null),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
-        CallExpression { Name: "clone", Args: [var cloneArg] } => EmitCloneDyn(cloneArg),
-        CallExpression { Name: "drop",  Args: [var dropArg]  } => EmitDropDyn(dropArg),
+        CallExpression { Name: BuiltinNames.Clone, Args: [var cloneArg] } => EmitCloneDyn(cloneArg),
+        CallExpression { Name: BuiltinNames.Drop,  Args: [var dropArg]  } => EmitDropDyn(dropArg),
         VariableReferenceExpression v  => EmitLoad(v.Name),
         MethodCallExpression m         => EmitMethodCall(m),
         UnaryExpression { Op: UnaryOp.Not } u => EmitBoolNot(u.Operand),
         BinaryExpression bin           => EmitBinaryExpr(bin),
         MatchExpression match          => EmitMatchAsExpression(match),
-        CallExpression { Name: "readFile", Args: [var pathArg] } => EmitReadFile(pathArg),
+        CallExpression { Name: BuiltinNames.ReadFile, Args: [var pathArg] } => EmitReadFile(pathArg),
         CallExpression c when _userFunctions.ContainsKey(c.Name) => EmitUserFunctionCall(c),
         _ => throw new NotSupportedException($"IR codegen: unsupported expression {expr.GetType().Name}"),
     };
@@ -249,9 +249,9 @@ public sealed partial class IRCodeGenerator
             return EmitUserFunctionCall(new CallExpression($"{nsName}.{m.MethodName}", m.Args));
 
         // Static methods on type names.
-        if (m.Receiver is VariableReferenceExpression { Name: "Int32" })
+        if (m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int32 })
             return EmitInt32StaticMethod(m.MethodName, m.Args);
-        if (m.Receiver is VariableReferenceExpression { Name: "Int64" })
+        if (m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int64 })
             return EmitInt64StaticMethod(m.MethodName, m.Args);
 
         var (recvVal, recvType) = EmitValue(m.Receiver);

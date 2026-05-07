@@ -13,7 +13,7 @@ public sealed partial class IRCodeGenerator
         if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
         {
             var retSuruType = FnReturnSuruType(fn);
-            var retLlvmType = fn.ReturnType.Name == "void" ? "void" : LlvmType(retSuruType);
+            var retLlvmType = fn.ReturnType.Name == BuiltinNames.Void ? "void" : LlvmType(retSuruType);
             var paramTypes  = string.Join(", ", fn.Parameters.Select(p =>
                 LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))));
             _funcs.AppendLine($"declare {retLlvmType} @{originalName}({paramTypes})");
@@ -24,7 +24,7 @@ public sealed partial class IRCodeGenerator
         _vars      = new();
         _argvVars  = new();
 
-        if (fn.Name == "main")
+        if (fn.Name == BuiltinNames.Main)
         {
             _currentFnReturnLlvmType = "i64";
             _currentFnReturnSuruType = SuruType.Int64;
@@ -67,7 +67,7 @@ public sealed partial class IRCodeGenerator
 
         if (_blockOpen)
         {
-            if (fn.Name == "main")
+            if (fn.Name == BuiltinNames.Main)
                 _funcs.AppendLine("  ret i64 0");
             else
                 _funcs.AppendLine($"  ret {_currentFnReturnLlvmType} {DefaultReturnValue(_currentFnReturnSuruType)}");
@@ -88,21 +88,21 @@ public sealed partial class IRCodeGenerator
                 EmitMatchAsStatement(matchStmt);
                 break;
 
-            case ExpressionStatement { Expression: CallExpression { Name: "printLn", Args: [var arg] } }:
+            case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.PrintLn, Args: [var arg] } }:
                 var (pval, ptype) = EmitValue(arg);
                 _runtimeDecls.AddSuruPrintln();
                 var printPtr = IsScalar(ptype) ? BoxValue(pval, ptype) : pval;
                 _funcs.AppendLine($"  call void @suru_println(ptr {printPtr})");
                 break;
 
-            case ExpressionStatement { Expression: CallExpression { Name: "printError", Args: [var errArg] } }:
+            case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.PrintError, Args: [var errArg] } }:
                 var (errVal, errType) = EmitValue(errArg);
                 _runtimeDecls.AddSuruPrintError();
                 var errPtr = IsScalar(errType) ? BoxValue(errVal, errType) : errVal;
                 _funcs.AppendLine($"  call void @suru_printerror(ptr {errPtr})");
                 break;
 
-            case ExpressionStatement { Expression: CallExpression { Name: "exit", Args: [var codeExpr] } }:
+            case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.Exit, Args: [var codeExpr] } }:
                 _externals.AddExit();
                 var (codeVal, codeType) = EmitValue(codeExpr);
                 string exitArg;
@@ -129,7 +129,7 @@ public sealed partial class IRCodeGenerator
                 _blockOpen = true;
                 break;
 
-            case ExpressionStatement { Expression: CallExpression { Name: "writeFile", Args: [var wfPath, var wfContent] } }:
+            case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.WriteFile, Args: [var wfPath, var wfContent] } }:
                 EmitWriteFile(wfPath, wfContent);
                 break;
 
@@ -155,7 +155,7 @@ public sealed partial class IRCodeGenerator
                     letType = annType;
                 }
                 // Int32 annotation coerces raw i64 to raw i32.
-                if (ann.Name == "Int32" && letType is SuruType.Int64Type)
+                if (ann.Name == BuiltinNames.Int32 && letType is SuruType.Int64Type)
                 {
                     if (valExpr is IntLiteral intLit)
                     {

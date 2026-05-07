@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #10 — Extract `IncludeResolver` and `IncludeGraph`
+
+`Compiler.ResolveIncludes` was a single 136-line method responsible for six distinct
+concerns: path validation, circular detection, diamond deduplication, source-path collection,
+namespace merging, and declaration merging. It has been replaced by two dedicated types.
+
+`IncludeGraph` (`src/Suru.Compiler/IncludeGraph.cs`) is a type-safe class that makes the
+two-HashSet guard protocol explicit. `IsActive`/`IsResolved` name the two different states
+(on the call stack vs. fully processed); `Enter`/`Exit` must be called symmetrically around
+each recursive call, making the circular/diamond distinction impossible to confuse.
+
+`IncludeResolver` (`src/Suru.Compiler/IncludeResolver.cs`) is a static class with four
+focused helpers: `ValidatePath` (existence check, returns absolute path), `LoadModule`
+(read + parse + recurse), `CollectPaths` (appends a file and its transitives to the path
+list), `MergeModule` (folds one resolved module's declarations into the accumulator).
+`Compiler.ParseAndResolve` now delegates to `IncludeResolver.Resolve`.
+
+15 new unit tests in `IncludeResolverTests.cs` cover every previously untested edge case:
+no-op, missing file, circular include, single include (namespace, function qualification,
+path recording), diamond (path deduplication, function deduplication), type merging, diamond
+type deduplication, scalar constant merging, string constant exclusion, diamond constant
+deduplication, and transitive namespace/function/path propagation. All 121 tests pass.
+
+### Compiler audit #9 — Extract `ParseNegativeNumber()` helper
+
+`ParsePrimary()` and `ParseMatchPattern()` both contained identical 15-line blocks for
+consuming a leading `-` and returning a negated `IntLiteral` or `FloatLiteral`. The shared
+logic is now in a private `ParseNegativeNumber()` method; both call sites are a single
+delegation. No behaviour change — all 106 tests pass.
+
+### Compiler audit #8 — `BuiltinNames` constants replace magic strings
+
+Added `src/Suru.Compiler/Types/BuiltinNames.cs` with `public const string` entries for all
+seven built-in Suru type names (`Void`, `Bool`, `Int32`, `Int64`, `Float64`, `String`, `Array`)
+and eight built-in function names (`Main`, `PrintLn`, `PrintError`, `Exit`, `Clone`, `Drop`,
+`ReadFile`, `WriteFile`). All inline Suru-level magic string literals in `SuruType.cs`,
+`SuruTypeSystem.cs`, `SemanticAnalyzer.cs`, `IRCodeGenerator.cs`, `IRFunctionCodeGenerator.cs`,
+`IRBoxCodeGenerator.cs`, and `IRMatchCodeGenerator.cs` now reference these constants. A future
+rename or addition only requires a single edit in `BuiltinNames.cs`.
+
 ### Compiler audit #7 — Consistent error handling across the pipeline
 
 `ParseException` is now `internal` (private flow-control detail within the parser).

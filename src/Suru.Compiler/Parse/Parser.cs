@@ -330,21 +330,7 @@ public sealed class Parser
         }
 
         if (token.Kind == TokenKind.Minus)
-        {
-            Advance();
-            var num = _tokens.Current();
-            if (num.Kind == TokenKind.IntLiteral)
-            {
-                Advance();
-                return new IntLiteral(-long.Parse(num.Text));
-            }
-            if (num.Kind == TokenKind.FloatLiteral)
-            {
-                Advance();
-                return new FloatLiteral(-double.Parse(num.Text, CultureInfo.InvariantCulture));
-            }
-            throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
-        }
+            return ParseNegativeNumber();
 
         Advance();
 
@@ -398,21 +384,7 @@ public sealed class Parser
         }
 
         if (token.Kind == TokenKind.Minus)
-        {
-            Advance();
-            var num = _tokens.Current();
-            if (num.Kind == TokenKind.IntLiteral)
-            {
-                Advance();
-                return new IntLiteral(-long.Parse(num.Text));
-            }
-            if (num.Kind == TokenKind.FloatLiteral)
-            {
-                Advance();
-                return new FloatLiteral(-double.Parse(num.Text, CultureInfo.InvariantCulture));
-            }
-            throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
-        }
+            return ParseNegativeNumber();
 
         if (token.Kind == TokenKind.Identifier)
         {
@@ -421,6 +393,23 @@ public sealed class Parser
         }
 
         throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected match pattern, got {token.Kind}");
+    }
+
+    private Expression ParseNegativeNumber()
+    {
+        Advance(); // consume '-'
+        var num = _tokens.Current();
+        if (num.Kind == TokenKind.IntLiteral)
+        {
+            Advance();
+            return new IntLiteral(-long.Parse(num.Text));
+        }
+        if (num.Kind == TokenKind.FloatLiteral)
+        {
+            Advance();
+            return new FloatLiteral(-double.Parse(num.Text, CultureInfo.InvariantCulture));
+        }
+        throw new ParseException($"{_tokens.SourcePath}({num.Line},{num.Column}): expected number after '-', got {num.Kind}");
     }
 
     private List<Expression> ParseArguments()

@@ -28,7 +28,7 @@ public abstract class SuruType
         public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is BoolType;
         public override int GetHashCode() => Tag;
-        public override string ToString() => "Bool";
+        public override string ToString() => BuiltinNames.Bool;
     }
 
     public sealed class Int32Type : SuruType
@@ -37,7 +37,7 @@ public abstract class SuruType
         public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Int32Type;
         public override int GetHashCode() => Tag;
-        public override string ToString() => "Int32";
+        public override string ToString() => BuiltinNames.Int32;
     }
 
     public sealed class Int64Type : SuruType
@@ -46,7 +46,7 @@ public abstract class SuruType
         public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Int64Type;
         public override int GetHashCode() => Tag;
-        public override string ToString() => "Int64";
+        public override string ToString() => BuiltinNames.Int64;
     }
 
     public sealed class Float64Type : SuruType
@@ -55,7 +55,7 @@ public abstract class SuruType
         public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Float64Type;
         public override int GetHashCode() => Tag;
-        public override string ToString() => "Float64";
+        public override string ToString() => BuiltinNames.Float64;
     }
 
     // Named struct type — declared via `type Foo: { ... }`.
@@ -90,7 +90,7 @@ public abstract class SuruType
         public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is StringType;
         public override int GetHashCode() => Tag;
-        public override string ToString() => "String";
+        public override string ToString() => BuiltinNames.String;
     }
 
     // Represents the absence of a return value (void functions).
@@ -102,6 +102,6 @@ public abstract class SuruType
             throw new InvalidOperationException("VoidType has no type_tag");
         public override bool Equals(object? obj) => obj is VoidType;
         public override int GetHashCode() => 7;
-        public override string ToString() => "void";
+        public override string ToString() => BuiltinNames.Void;
     }
 }

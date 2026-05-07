@@ -71,8 +71,8 @@ public sealed class SemanticAnalyzer
             }
         }
 
-        SuruType? returnType = fn.ReturnType.Name is "void" ? null : ResolveTypeAnnotation(fn.ReturnType);
-        if (fn.ReturnType.Name is not "void" && returnType is null)
+        SuruType? returnType = fn.ReturnType.Name is BuiltinNames.Void ? null : ResolveTypeAnnotation(fn.ReturnType);
+        if (fn.ReturnType.Name is not BuiltinNames.Void && returnType is null)
             _errors.Add($"{_module.SourcePath}: unknown return type '{fn.ReturnType}' for function '{fn.Name}'");
 
         _scopes.RegisterFunction(fn.Name, new FunctionSig(paramTypes, returnType));
@@ -203,13 +203,13 @@ public sealed class SemanticAnalyzer
         }
 
         _currentFunctionReturnType = sig?.ReturnType;
-        _currentFunctionIsVoid     = fn.ReturnType.Name == "void";
+        _currentFunctionIsVoid     = fn.ReturnType.Name == BuiltinNames.Void;
 
         bool hasReturn = CheckHasReturn(fn.Body);
         foreach (var bodyStmt in fn.Body)
             AnalyzeStatement(bodyStmt);
 
-        if (!_currentFunctionIsVoid && !hasReturn && fn.Name != "main")
+        if (!_currentFunctionIsVoid && !hasReturn && fn.Name != BuiltinNames.Main)
             _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
         _scopes.Exit();
@@ -222,7 +222,7 @@ public sealed class SemanticAnalyzer
         foreach (var stmt in stmts)
         {
             if (stmt is ReturnStatement) return true;
-            if (stmt is ExpressionStatement { Expression: CallExpression { Name: "exit" } }) return true;
+            if (stmt is ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.Exit } }) return true;
             if (stmt is WhileStatement ws && CheckHasReturn(ws.Body)) return true;
         }
         return false;
@@ -248,7 +248,7 @@ public sealed class SemanticAnalyzer
         switch (expr)
         {
             case VariableReferenceExpression varRef:
-                if (varRef.Name is not ("Int32" or "Int64" or "Float64" or "Bool")
+                if (varRef.Name is not (BuiltinNames.Int32 or BuiltinNames.Int64 or BuiltinNames.Float64 or BuiltinNames.Bool)
                     && _scopes.Lookup(varRef.Name) is null
                     && !_module.Namespaces.Contains(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
@@ -298,21 +298,21 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(arg);
                 break;
 
-            case CallExpression { Name: "printLn" or "printError" } printCall:
+            case CallExpression { Name: BuiltinNames.PrintLn or BuiltinNames.PrintError } printCall:
                 if (printCall.Args.Count != 1)
                     _errors.Add($"{_module.SourcePath}: '{printCall.Name}' expects exactly 1 argument");
                 else
                     AnalyzeExpression(printCall.Args[0]);
                 break;
 
-            case CallExpression { Name: "clone" or "drop" } builtIn:
+            case CallExpression { Name: BuiltinNames.Clone or BuiltinNames.Drop } builtIn:
                 if (builtIn.Args.Count != 1)
                     _errors.Add($"{_module.SourcePath}: '{builtIn.Name}' expects exactly 1 argument");
                 else
                     AnalyzeExpression(builtIn.Args[0]);
                 break;
 
-            case CallExpression { Name: "exit" } exitCall:
+            case CallExpression { Name: BuiltinNames.Exit } exitCall:
                 if (exitCall.Args.Count != 1)
                     _errors.Add($"{_module.SourcePath}: 'exit' expects exactly 1 argument");
                 else
@@ -324,7 +324,7 @@ public sealed class SemanticAnalyzer
                 }
                 break;
 
-            case CallExpression { Name: "readFile" } readFileCall:
+            case CallExpression { Name: BuiltinNames.ReadFile } readFileCall:
                 if (readFileCall.Args.Count != 1)
                     _errors.Add($"{_module.SourcePath}: 'readFile' expects exactly 1 argument");
                 else
@@ -336,7 +336,7 @@ public sealed class SemanticAnalyzer
                 }
                 break;
 
-            case CallExpression { Name: "writeFile" } writeFileCall:
+            case CallExpression { Name: BuiltinNames.WriteFile } writeFileCall:
                 if (writeFileCall.Args.Count != 2)
                     _errors.Add($"{_module.SourcePath}: 'writeFile' expects exactly 2 arguments");
                 else
@@ -439,11 +439,11 @@ public sealed class SemanticAnalyzer
         MethodCallExpression { MethodName: "slice" } m
             when InferType(m.Receiver) is SuruType.ArrayType at                    => at,
         MethodCallExpression { MethodName: "from" } m
-            when m.Receiver is VariableReferenceExpression { Name: "Int32" }        => SuruType.Int32,
+            when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int32 }    => SuruType.Int32,
         MethodCallExpression { MethodName: "from" } m
-            when m.Receiver is VariableReferenceExpression { Name: "Int64" }        => SuruType.Int64,
+            when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int64 }    => SuruType.Int64,
         MethodCallExpression { MethodName: "from" } m
-            when m.Receiver is VariableReferenceExpression { Name: "Float64" }      => SuruType.Float64,
+            when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Float64 }  => SuruType.Float64,
         MethodCallExpression nsCall
             when nsCall.Receiver is VariableReferenceExpression nsRef2
               && _module.Namespaces.Contains(nsRef2.Name)
@@ -453,11 +453,11 @@ public sealed class SemanticAnalyzer
         UnaryExpression        => SuruType.Bool,
         BinaryExpression       => SuruType.Bool,
         MatchExpression m      => m.Arms.Count > 0 ? InferType(m.Arms[0].Body) : null,
-        CallExpression { Name: "clone" }     => null,   // type propagated from annotation context
-        CallExpression { Name: "drop" }      => null,
-        CallExpression { Name: "exit" }      => null,
-        CallExpression { Name: "readFile" }  => SuruType.String,
-        CallExpression { Name: "writeFile" } => null,
+        CallExpression { Name: BuiltinNames.Clone }     => null,   // type propagated from annotation context
+        CallExpression { Name: BuiltinNames.Drop }      => null,
+        CallExpression { Name: BuiltinNames.Exit }      => null,
+        CallExpression { Name: BuiltinNames.ReadFile }  => SuruType.String,
+        CallExpression { Name: BuiltinNames.WriteFile } => null,
         CallExpression call when _scopes.LookupFunction(call.Name) is { } fnSig => fnSig.ReturnType,
         _                                    => null,
     };
