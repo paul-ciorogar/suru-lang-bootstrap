@@ -93,7 +93,7 @@ partial class IRCodeGenerator
         var ttagGep = NextTmp(); var etagGep = NextTmp();
         var lenGep  = NextTmp(); var capGep  = NextTmp(); var dataGep = NextTmp();
         _funcs.AppendLine($"  {ttagGep} = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 0");
-        _funcs.AppendLine($"  store i64 5, ptr {ttagGep}");
+        _funcs.AppendLine($"  store i64 {SuruType.ArrayType.Tag}, ptr {ttagGep}");
         _funcs.AppendLine($"  {etagGep} = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 1");
         _funcs.AppendLine($"  store i64 {elemType.TypeTag}, ptr {etagGep}");
         _funcs.AppendLine($"  {lenGep}  = getelementptr %suru.Array, ptr {hdrPtr}, i32 0, i32 2");

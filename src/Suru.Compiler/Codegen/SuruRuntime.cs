@@ -11,6 +11,11 @@ namespace Suru.Compiler.Codegen;
 //   Every heap-allocated Suru value stores its type_tag as the FIRST i64 field.
 //   This means `load i64, ptr %anyVal` gives the type_tag regardless of kind.
 //
+//   Authoritative C# definition: SuruType.*Type.Tag constants in Types/SuruType.cs.
+//   The C# codegen derives tag values from those constants. The LLVM IR text in
+//   this file and the three sibling runtime files is the only remaining manual
+//   sync point — update both together if tag ordinals ever change.
+//
 // ── Modules ──────────────────────────────────────────────────────────────────
 //
 //   suru_box.ll    — Scalar heap wrapper: %suru.Box = { i64 type_tag, i64 payload }.

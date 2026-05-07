@@ -24,33 +24,37 @@ public abstract class SuruType
 
     public sealed class BoolType : SuruType
     {
-        public override int TypeTag => 0;
+        public const int Tag = 0;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is BoolType;
-        public override int GetHashCode() => 0;
+        public override int GetHashCode() => Tag;
         public override string ToString() => "Bool";
     }
 
     public sealed class Int32Type : SuruType
     {
-        public override int TypeTag => 1;
+        public const int Tag = 1;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Int32Type;
-        public override int GetHashCode() => 1;
+        public override int GetHashCode() => Tag;
         public override string ToString() => "Int32";
     }
 
     public sealed class Int64Type : SuruType
     {
-        public override int TypeTag => 2;
+        public const int Tag = 2;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Int64Type;
-        public override int GetHashCode() => 2;
+        public override int GetHashCode() => Tag;
         public override string ToString() => "Int64";
     }
 
     public sealed class Float64Type : SuruType
     {
-        public override int TypeTag => 3;
+        public const int Tag = 3;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is Float64Type;
-        public override int GetHashCode() => 3;
+        public override int GetHashCode() => Tag;
         public override string ToString() => "Float64";
     }
 
@@ -58,31 +62,34 @@ public abstract class SuruType
     // Every NamedType carries a non-empty declared name.
     public sealed class NamedType : SuruType
     {
+        public const int Tag = 4;
         public string Name { get; }
         public NamedType(string name) => Name = name;
-        public override int TypeTag => 4;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is NamedType nt && Name == nt.Name;
-        public override int GetHashCode() => HashCode.Combine(4, Name);
+        public override int GetHashCode() => HashCode.Combine(Tag, Name);
         public override string ToString() => Name;
     }
 
     // Array type — carries the statically-known element type.
     public sealed class ArrayType : SuruType
     {
+        public const int Tag = 5;
         public SuruType Element { get; }
         public ArrayType(SuruType element) => Element = element;
-        public override int TypeTag => 5;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) =>
             obj is ArrayType at && Equals(Element, at.Element);
-        public override int GetHashCode() => HashCode.Combine(5, Element);
+        public override int GetHashCode() => HashCode.Combine(Tag, Element);
         public override string ToString() => $"Array<{Element}>";
     }
 
     public sealed class StringType : SuruType
     {
-        public override int TypeTag => 6;
+        public const int Tag = 6;
+        public override int TypeTag => Tag;
         public override bool Equals(object? obj) => obj is StringType;
-        public override int GetHashCode() => 6;
+        public override int GetHashCode() => Tag;
         public override string ToString() => "String";
     }
 

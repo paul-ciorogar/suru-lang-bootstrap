@@ -80,7 +80,7 @@ partial class IRCodeGenerator
 
             var typeTagGep = NextTmp();
             _funcs.AppendLine($"  {typeTagGep} = getelementptr %suru.Field, ptr {nodePtr}, i32 0, i32 0");
-            _funcs.AppendLine($"  store i64 4, ptr {typeTagGep}");
+            _funcs.AppendLine($"  store i64 {SuruType.NamedType.Tag}, ptr {typeTagGep}");
 
             var nameGep = NextTmp();
             var namePtr = EmitFieldNamePtr(fieldName);

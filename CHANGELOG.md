@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #4 — Type tag synchronization
+
+Added `public const int Tag = N;` to each TypeTag-bearing subclass in `SuruType.cs`
+(`BoolType.Tag=0` through `StringType.Tag=6`), with `TypeTag` delegating to `Tag`.
+Three codegen sites now reference these constants instead of inline literals:
+- `IRArrayCodeGenerator` — `SuruType.ArrayType.Tag` (was `5`)
+- `IRStructCodeGenerator` — `SuruType.NamedType.Tag` (was `4`)
+- `IRFunctionCodeGenerator` — `SuruType.StringType.Tag` (was `6`)
+
+The LLVM IR text in the four `SuruRuntime` files remains as the documented secondary
+sync point; a cross-reference comment in `SuruRuntime.cs` points to `SuruType.cs`
+as the C# authority. Any future type addition now requires updating `SuruType.cs`
+in one place — the codegen derives the value automatically.
+
 ### Compiler audit #3 — Guard unchecked dictionary accesses in codegen
 
 Replaced four bare `[]` indexer accesses in the IR codegen partial files with `TryGetValue` guards

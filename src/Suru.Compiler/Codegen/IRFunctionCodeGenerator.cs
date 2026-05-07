@@ -253,7 +253,7 @@ public sealed partial class IRCodeGenerator
         sb.AppendLine("entry:");
         sb.AppendLine("  %seq      = call ptr @malloc(i64 24)");
         sb.AppendLine("  %tag_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 0");
-        sb.AppendLine("  store i64 6, ptr %tag_gep");
+        sb.AppendLine($"  store i64 {SuruType.StringType.Tag}, ptr %tag_gep");
         sb.AppendLine("  %len_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 1");
         sb.AppendLine("  %argc64   = sext i32 %argc to i64");
         sb.AppendLine("  store i64 %argc64, ptr %len_gep");
