@@ -10,20 +10,10 @@ public sealed partial class IRCodeGenerator
 
     // Resolves a TypeAnnotation to the statically-known SuruType.
     // Consults _module.TypeDeclarations for user-defined named types.
-    private SuruType SuruTypeFromAnnotation(TypeAnnotation ann) => ann.Name switch
-    {
-        "Bool"    => SuruType.Bool,
-        "Int32"   => SuruType.Int32,
-        "Int64"   => SuruType.Int64,
-        "Float64" => SuruType.Float64,
-        "String"  => SuruType.String,
-        "Array"   => ann.TypeParam is { } tp
-                        ? new SuruType.ArrayType(SuruTypeFromAnnotation(tp))
-                        : throw new NotSupportedException($"IR codegen: Array requires a type parameter"),
-        _ => _module.TypeDeclarations.ContainsKey(ann.Name)
-                ? new SuruType.NamedType(ann.Name)
-                : throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'"),
-    };
+    // Throws if the type is unrecognised — semantic analysis should have caught it first.
+    private SuruType SuruTypeFromAnnotation(TypeAnnotation ann)
+        => SuruTypeSystem.TryResolve(ann, _module.TypeDeclarations)
+           ?? throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'");
 
     // Scalars (Bool/Int32/Int64/Float64) use raw LLVM types in local vars,
     // function params, and returns. All heap types use ptr.

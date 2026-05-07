@@ -80,21 +80,8 @@ public sealed class SemanticAnalyzer
 
     // Resolves a type annotation to a SuruType.
     // Returns null when the name is unrecognised (caller reports the error).
-    private SuruType? ResolveTypeAnnotation(TypeAnnotation ann) => ann.Name switch
-    {
-        "Bool"    => SuruType.Bool,
-        "Int32"   => SuruType.Int32,
-        "Int64"   => SuruType.Int64,
-        "Float64" => SuruType.Float64,
-        "String"  => SuruType.String,
-        "Array"   => ann.TypeParam is { } tp
-                        ? new SuruType.ArrayType(ResolveTypeAnnotation(tp) ?? SuruType.Int64)
-                        : null,
-        // Named types declared via `type Foo: { ... }` resolve to NamedType("Foo").
-        _ => _typeDeclarations.ContainsKey(ann.Name)
-                ? new SuruType.NamedType(ann.Name)
-                : null,
-    };
+    private SuruType? ResolveTypeAnnotation(TypeAnnotation ann)
+        => SuruTypeSystem.TryResolve(ann, _typeDeclarations);
 
     // ─── Statement analysis ───────────────────────────────────────────────────
 

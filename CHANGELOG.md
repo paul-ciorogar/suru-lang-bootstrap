@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #1 — Extract shared type resolution
+
+Eliminated the parallel `ResolveTypeAnnotation` / `SuruTypeFromAnnotation` implementations that
+were the highest divergence risk in the codebase. Added `SuruTypeSystem.TryResolve()` in
+`src/Suru.Compiler/Types/SuruTypeSystem.cs` as the single source of truth for
+`TypeAnnotation → SuruType` mapping. Both the semantic analyzer and IR codegen delegate to it;
+adding a new primitive type now requires one edit instead of two.
+
 ### Stage 13c — Semantic Analyzer in Suru: Statement Analysis
 
 Implements statement-level analysis in Suru itself (`tests/fixtures/suru-semantic/suru-semantic-stmts.suru`), building on the Stage 13a scope-chain data structures and the Stage 13b declaration pre-passes.
