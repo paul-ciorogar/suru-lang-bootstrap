@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #2 — `printLn`/`printError` arity check
+
+Added explicit arity validation for `printLn` and `printError` in `SemanticAnalyzer.AnalyzeExpression`,
+matching the pattern already used by `clone`, `drop`, `exit`, `readFile`, and `writeFile`. Calling
+either builtin with any argument count other than 1 now produces a `CompilationResult.Fail` with a
+readable error message instead of crashing at codegen. The general call-site guard no longer needs
+to exclude these names.
+
 ### Compiler audit #1 — Extract shared type resolution
 
 Eliminated the parallel `ResolveTypeAnnotation` / `SuruTypeFromAnnotation` implementations that

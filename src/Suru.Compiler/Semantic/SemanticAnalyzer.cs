@@ -298,6 +298,13 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(arg);
                 break;
 
+            case CallExpression { Name: "printLn" or "printError" } printCall:
+                if (printCall.Args.Count != 1)
+                    _errors.Add($"{_module.SourcePath}: '{printCall.Name}' expects exactly 1 argument");
+                else
+                    AnalyzeExpression(printCall.Args[0]);
+                break;
+
             case CallExpression { Name: "clone" or "drop" } builtIn:
                 if (builtIn.Args.Count != 1)
                     _errors.Add($"{_module.SourcePath}: '{builtIn.Name}' expects exactly 1 argument");
@@ -347,7 +354,7 @@ public sealed class SemanticAnalyzer
 
             case CallExpression call:
                 var callSig = _scopes.LookupFunction(call.Name);
-                if (call.Name != "printLn" && call.Name != "printError" && callSig is not null)
+                if (callSig is not null)
                 {
                     if (call.Args.Count != callSig.ParamTypes.Count)
                         _errors.Add($"{_module.SourcePath}: function '{call.Name}' called with {call.Args.Count} argument(s), expected {callSig.ParamTypes.Count}");
