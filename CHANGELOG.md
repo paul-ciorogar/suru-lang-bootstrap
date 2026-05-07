@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #7 — Consistent error handling across the pipeline
+
+`ParseException` is now `internal` (private flow-control detail within the parser).
+`Parser.Parse()` changed from `→ Module` (throwing) to `→ CompilationResult<Module>`
+(returning), wrapping the first `ParseException` as a `Fail` result. 
+`Compiler.ParseAndResolve()` checks `parseResult.Success` directly, removing both
+`catch (ParseException)` blocks. Parse errors in included files surface as
+`"Include resolution failed: <message>"`, consistent with other include errors.
+Five test call sites updated to `.Require()`.
+
+### Compiler audit #6 — `CompilationResult.Require()` helper
+
+Added `Require()` to both `CompilationResult` (returns `OutputPath`) and
+`CompilationResult<T>` (returns `Value`). Each throws `InvalidOperationException`
+with the joined error list if called on a failed result. All 6 `!` force-unwrap
+sites across `Program.cs`, `Compiler.cs`, `IRSuruParserTests.cs`, and
+`CompiledFixtures.cs` now call `Require()` instead.
+
+### Compiler audit #5 — Guard `Path.GetDirectoryName()` null returns
+
+Both `Path.GetDirectoryName()` call sites in `Compiler.cs` are now explicitly guarded.
+`ParseAndResolve()` (line 208) checks for null and returns `(null, [error])` instead of
+throwing `NullReferenceException`. `ResolveIncludes()` (line 300) uses `?? throw new
+InvalidOperationException(...)`, which propagates to the caller's existing exception
+handler and surfaces as `CompilationResult.Fail` with a descriptive message.
+
 ### Compiler audit #4 — Type tag synchronization
 
 Added `public const int Tag = N;` to each TypeTag-bearing subclass in `SuruType.cs`

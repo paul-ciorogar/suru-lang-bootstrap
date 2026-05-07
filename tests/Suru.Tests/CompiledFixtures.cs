@@ -39,7 +39,7 @@ public sealed class CompiledFixtures : IDisposable
             throw new InvalidOperationException(
                 $"Fixture '{name}' failed to compile:\n{string.Join("\n", result.Errors)}");
 
-        return result.OutputPath!;
+        return result.Require();
     }
 
     private static string FindFixturePath(string name)
@@ -87,7 +87,7 @@ public sealed class CompiledFixturesIR : IDisposable
             throw new InvalidOperationException(
                 $"Fixture '{name}' failed IR compile:\n{string.Join("\n", result.Errors)}");
 
-        return result.OutputPath!;
+        return result.Require();
     }
 
     private static string GetBuildDir(string name)

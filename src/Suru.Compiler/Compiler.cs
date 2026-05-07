@@ -138,7 +138,7 @@ public class Compiler
                 return CompilationResult.Fail($"Failed to compile included file '{includedPath}':\n" +
                                               string.Join("\n", inclResult.Errors));
 
-            File.WriteAllText(inclIrPath, inclResult.Value!);
+            File.WriteAllText(inclIrPath, inclResult.Require());
             var inclClangError = RunClang(inclIrPath, inclObjPath);
             if (inclClangError is not null)
                 return CompilationResult.Fail($"IR compile of '{inclName}' failed: {inclClangError}");
@@ -189,15 +189,10 @@ public class Compiler
 
         var source = File.ReadAllText(_sourcePath);
 
-        Module module;
-        try
-        {
-            module = Parser.Parse(new Tokens(new Lexer(source), _sourcePath));
-        }
-        catch (ParseException ex)
-        {
-            return (null, [ex.Message]);
-        }
+        var parseResult = Parser.Parse(new Tokens(new Lexer(source), _sourcePath));
+        if (!parseResult.Success)
+            return (null, parseResult.Errors);
+        var module = parseResult.Require();
 
         try
         {
@@ -205,11 +200,10 @@ public class Compiler
             {
                 Path.GetFullPath(_sourcePath)
             };
-            module = ResolveIncludes(module, Path.GetDirectoryName(Path.GetFullPath(_sourcePath))!, visitedPaths);
-        }
-        catch (ParseException ex)
-        {
-            return (null, [ex.Message]);
+            var sourceDir = Path.GetDirectoryName(Path.GetFullPath(_sourcePath));
+            if (sourceDir is null)
+                return (null, [$"Cannot determine directory for source path: {_sourcePath}"]);
+            module = ResolveIncludes(module, sourceDir, visitedPaths);
         }
         catch (Exception ex)
         {
@@ -295,9 +289,13 @@ public class Compiler
             visitedPaths.Add(fullPath);
 
             var source         = File.ReadAllText(fullPath);
-            var includedModule = Parser.Parse(new Tokens(new Lexer(source), fullPath));
+            var includeParseResult = Parser.Parse(new Tokens(new Lexer(source), fullPath));
+            if (!includeParseResult.Success)
+                throw new Exception(string.Join("\n", includeParseResult.Errors));
+            var includedModule = includeParseResult.Require();
 
-            var includedDir = Path.GetDirectoryName(fullPath)!;
+            var includedDir = Path.GetDirectoryName(fullPath)
+                ?? throw new InvalidOperationException($"Cannot determine directory for included path: {fullPath}");
             includedModule  = ResolveIncludes(includedModule, includedDir, visitedPaths, beingResolved);
             beingResolved.Remove(fullPath);
 

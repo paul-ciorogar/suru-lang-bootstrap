@@ -13,7 +13,7 @@ public class SemanticAnalyzerTests
 {
     private static IReadOnlyList<string> Analyze(string source)
     {
-        var module = Parser.Parse(new Tokens(new Lexer(source), "<test>"));
+        var module = Parser.Parse(new Tokens(new Lexer(source), "<test>")).Require();
         return SemanticAnalyzer.Analyze(module);
     }
 

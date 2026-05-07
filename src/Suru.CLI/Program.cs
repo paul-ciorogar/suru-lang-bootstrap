@@ -66,7 +66,7 @@ static int RunLex(string sourcePath)
         return 1;
     }
 
-    foreach (var token in result.Value!)
+    foreach (var token in result.Require())
     {
         // Right-align line, left-align column; pad the kind name to 16 chars so
         // columns are visually scannable even for long kind names.
@@ -93,7 +93,7 @@ static int RunParse(string sourcePath)
         return 1;
     }
 
-    Console.Write(AstPrinter.Print(result.Value!));
+    Console.Write(AstPrinter.Print(result.Require()));
     return 0;
 }
 

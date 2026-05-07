@@ -236,13 +236,13 @@ public class IRNamedTypeTests(CompiledFixturesIR fixtures) : IntegrationTestBase
     private static Module ParseSource(string source)
     {
         var tokens = new Tokens(new Lexer(source), "<test>");
-        return Parser.Parse(tokens);
+        return Parser.Parse(tokens).Require();
     }
 
     private static IReadOnlyList<string> AnalyzeSource(string source)
     {
         var tokens = new Tokens(new Lexer(source), "<test>");
-        var module = Parser.Parse(tokens);
+        var module = Parser.Parse(tokens).Require();
         return SemanticAnalyzer.Analyze(module);
     }
 

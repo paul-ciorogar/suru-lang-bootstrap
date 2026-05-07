@@ -1,3 +1,3 @@
 namespace Suru.Compiler.Parse;
 
-public sealed class ParseException(string message) : Exception(message);
+internal sealed class ParseException(string message) : Exception(message);

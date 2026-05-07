@@ -18,6 +18,11 @@ public sealed class CompilationResult
 
     public static CompilationResult Fail(string error) =>
         Fail([error]);
+
+    // Unwraps OutputPath after a .Success check; throws descriptively on misuse.
+    public string Require() =>
+        OutputPath ?? throw new InvalidOperationException(
+            $"CompilationResult failed: {string.Join("; ", Errors)}");
 }
 
 /// <summary>
@@ -39,4 +44,9 @@ public sealed class CompilationResult<T>
 
     public static CompilationResult<T> Fail(string error) =>
         Fail([error]);
+
+    // Unwraps Value after a .Success check; throws descriptively on misuse.
+    public T Require() =>
+        Value ?? throw new InvalidOperationException(
+            $"CompilationResult failed: {string.Join("; ", Errors)}");
 }

@@ -1,4 +1,5 @@
 using System.Globalization;
+using Suru.Compiler;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse.Ast;
 
@@ -13,10 +14,17 @@ public sealed class Parser
         _tokens = tokens;
     }
 
-    public static Module Parse(Tokens tokens)
+    public static CompilationResult<Module> Parse(Tokens tokens)
     {
-        var parser = new Parser(tokens);
-        return parser._Parse();
+        try
+        {
+            var parser = new Parser(tokens);
+            return CompilationResult<Module>.Ok(parser._Parse());
+        }
+        catch (ParseException ex)
+        {
+            return CompilationResult<Module>.Fail(ex.Message);
+        }
     }
 
     private Module _Parse()

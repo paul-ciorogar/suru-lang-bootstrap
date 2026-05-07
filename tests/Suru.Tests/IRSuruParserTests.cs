@@ -46,7 +46,7 @@ public class IRSuruParserTests(CompiledFixturesIR fixtures) : IntegrationTestBas
         if (!result.Success)
             throw new InvalidOperationException(
                 $"C# parse failed for '{path}':\n{string.Join("\n", result.Errors)}");
-        return AstPrinter.Print(result.Value!).TrimEnd();
+        return AstPrinter.Print(result.Require()).TrimEnd();
     }
 
     [Fact]
