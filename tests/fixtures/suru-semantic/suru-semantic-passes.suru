@@ -20,9 +20,10 @@
 // resolved type (struct parameters don't get PropagateStructMeta), causing the codegen
 // to route `.add()` to integer arithmetic instead of suru_array_add.
 //
-// Function bodies must also not call namespace functions from sem.* or parser.*,
-// because those namespaces are not visible in the merged module of any including file.
-// Types (AstNode, Param, AnalysisError, FunctionSig) are merged unqualified and are safe.
+// Function bodies may call namespace functions from sem.* or parser.* — transitive
+// namespace propagation in ResolveIncludes makes those namespaces visible in any
+// file that includes this one. Types (AstNode, Param, AnalysisError, FunctionSig)
+// are merged unqualified and are also safe.
 
 include "suru-semantic.suru" as sem
 include "../suru-parser/suru-parser.suru" as parser

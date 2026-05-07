@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Transitive namespace propagation in include resolution
+
+`ResolveIncludes` now propagates transitive namespaces and their function declarations into any importing module, lifting a constraint that prevented included files from calling functions in their own included namespaces.
+
+**Problem:** when file A included file B (which itself included C as `sem`), B's function bodies could not call `sem.*` functions — those calls would fail semantic analysis in A's context because `sem` was not in A's `Namespaces` set, and C's functions were double-prefixed as `A.sem.foo` instead of `sem.foo`.
+
+**Fix in `Compiler.cs` (`ResolveIncludes`):**
+- After adding `ns` to `Namespaces`, all of `includedModule.Namespaces` are also added (transitive namespace propagation).
+- When iterating `includedModule.Statements`, functions already in `includedModule.ExternalFunctions` are transitive — they are propagated as-is without a second namespace prefix. `externalFns.TryAdd` deduplicates when multiple siblings share the same transitive dependency.
+- Functions declared directly in the included file continue to get the `ns.` prefix as before.
+
+**Comment updated** in `tests/fixtures/suru-semantic/suru-semantic-passes.suru` to reflect that `sem.*` / `parser.*` calls are now safe from any including file.
+
+All 106 tests pass.
+
+---
+
 ### FunctionSignatures refactor — scoped function signatures and constants (internal)
 
 Moved function-signature tracking and module-level constant tracking out of flat dictionaries in `SemanticAnalyzer` and into the scope stack so nested function declarations will be supported without additional plumbing.

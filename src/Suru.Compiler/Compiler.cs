@@ -310,17 +310,33 @@ public class Compiler
 
             var ns = directive.NamespaceName;
             namespaces.Add(ns);
+            // Propagate transitive namespaces so that a file including this one can still
+            // resolve calls like `sem.foo()` that appear inside the included file's bodies.
+            foreach (var transitiveNs in includedModule.Namespaces)
+                namespaces.Add(transitiveNs);
 
             foreach (var stmt in includedModule.Statements)
             {
                 if (stmt is FunctionDeclaration fn)
                 {
-                    // Register the qualified name ("ns.fn") and record the original LLVM
-                    // symbol name ("fn") so codegen can emit `declare @fn` and `call @fn`.
-                    var qualifiedName = ns + "." + fn.Name;
-                    externalFns[qualifiedName] = fn.Name;
-                    mergedStatements.Add(new FunctionDeclaration(
-                        qualifiedName, fn.Parameters, fn.ReturnType, fn.Body));
+                    if (includedModule.ExternalFunctions.TryGetValue(fn.Name, out var llvmSymbol))
+                    {
+                        // Transitive function (came from one of the included file's own includes).
+                        // Propagate as-is — don't double-prefix with ns. TryAdd prevents
+                        // duplicates when multiple siblings share the same transitive dependency.
+                        if (externalFns.TryAdd(fn.Name, llvmSymbol))
+                            mergedStatements.Add(fn);
+                    }
+                    else
+                    {
+                        // Function declared in the included file itself — prefix with ns.
+                        // Register the qualified name ("ns.fn") and record the original LLVM
+                        // symbol name ("fn") so codegen can emit `declare @fn` and `call @fn`.
+                        var qualifiedName = ns + "." + fn.Name;
+                        externalFns[qualifiedName] = fn.Name;
+                        mergedStatements.Add(new FunctionDeclaration(
+                            qualifiedName, fn.Parameters, fn.ReturnType, fn.Body));
+                    }
                 }
                 else if (stmt is LetStatement constant && seenConstantNames.Add(constant.Name))
                 {
