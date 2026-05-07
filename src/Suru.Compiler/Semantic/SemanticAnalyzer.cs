@@ -9,8 +9,6 @@ public sealed class SemanticAnalyzer
 
     private readonly Scopes _scopes = new();
 
-    private readonly Dictionary<string, (IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)> _functions = new();
-    private readonly HashSet<string> _constants = new();
     private readonly List<string> _errors = [];
     private SuruType? _currentFunctionReturnType = null;
     private bool _currentFunctionIsVoid = false;
@@ -54,7 +52,7 @@ public sealed class SemanticAnalyzer
 
     private void RegisterFunction(FunctionDeclaration fn)
     {
-        if (_functions.ContainsKey(fn.Name))
+        if (_scopes.FunctionExistsInCurrent(fn.Name))
         {
             _errors.Add($"{_module.SourcePath}: function '{fn.Name}' is already declared");
             return;
@@ -77,7 +75,7 @@ public sealed class SemanticAnalyzer
         if (fn.ReturnType.Name is not "void" && returnType is null)
             _errors.Add($"{_module.SourcePath}: unknown return type '{fn.ReturnType}' for function '{fn.Name}'");
 
-        _functions[fn.Name] = (paramTypes, returnType);
+        _scopes.RegisterFunction(fn.Name, new FunctionSig(paramTypes, returnType));
     }
 
     // Resolves a type annotation to a SuruType.
@@ -151,7 +149,7 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeAssignmentStatement(AssignmentStatement assign)
     {
-        if (_constants.Contains(assign.Name))
+        if (_scopes.IsConstant(assign.Name))
             _errors.Add($"{_module.SourcePath}: cannot reassign constant '{assign.Name}'");
         else if (_scopes.Lookup(assign.Name) is null)
             _errors.Add($"{_module.SourcePath}: undefined variable '{assign.Name}'");
@@ -183,7 +181,7 @@ public sealed class SemanticAnalyzer
                     ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
             }
             if (_scopes.Count == 1)
-                _constants.Add(let.Name);
+                _scopes.MarkConstant(let.Name);
         }
     }
 
@@ -210,14 +208,14 @@ public sealed class SemanticAnalyzer
     {
         _scopes.Enter();
 
-        _functions.TryGetValue(fn.Name, out var sig);
+        var sig = _scopes.LookupFunction(fn.Name);
         for (int i = 0; i < fn.Parameters.Count; i++)
         {
-            if (i < sig.ParamTypes.Count)
+            if (sig is not null && i < sig.ParamTypes.Count)
                 _scopes.DeclareInCurrent(fn.Parameters[i].Name, sig.ParamTypes[i]);
         }
 
-        _currentFunctionReturnType = sig.ReturnType;
+        _currentFunctionReturnType = sig?.ReturnType;
         _currentFunctionIsVoid     = fn.ReturnType.Name == "void";
 
         bool hasReturn = CheckHasReturn(fn.Body);
@@ -291,7 +289,8 @@ public sealed class SemanticAnalyzer
                   && _module.Namespaces.Contains(nsRef.Name):
                 {
                     var qualifiedName = nsRef.Name + "." + nsCall.MethodName;
-                    if (_functions.TryGetValue(qualifiedName, out var nsSig))
+                    var nsSig = _scopes.LookupFunction(qualifiedName);
+                    if (nsSig is not null)
                     {
                         if (nsCall.Args.Count != nsSig.ParamTypes.Count)
                             _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {nsSig.ParamTypes.Count}");
@@ -360,7 +359,8 @@ public sealed class SemanticAnalyzer
                 break;
 
             case CallExpression call:
-                if (call.Name != "printLn" && call.Name != "printError" && _functions.TryGetValue(call.Name, out var callSig))
+                var callSig = _scopes.LookupFunction(call.Name);
+                if (call.Name != "printLn" && call.Name != "printError" && callSig is not null)
                 {
                     if (call.Args.Count != callSig.ParamTypes.Count)
                         _errors.Add($"{_module.SourcePath}: function '{call.Name}' called with {call.Args.Count} argument(s), expected {callSig.ParamTypes.Count}");
@@ -453,7 +453,7 @@ public sealed class SemanticAnalyzer
         MethodCallExpression nsCall
             when nsCall.Receiver is VariableReferenceExpression nsRef2
               && _module.Namespaces.Contains(nsRef2.Name)
-              && _functions.TryGetValue(nsRef2.Name + "." + nsCall.MethodName, out var nsFnSig)
+              && _scopes.LookupFunction(nsRef2.Name + "." + nsCall.MethodName) is { } nsFnSig
             => nsFnSig.ReturnType,
         MethodCallExpression m => InferType(m.Receiver),
         UnaryExpression        => SuruType.Bool,
@@ -464,7 +464,7 @@ public sealed class SemanticAnalyzer
         CallExpression { Name: "exit" }      => null,
         CallExpression { Name: "readFile" }  => SuruType.String,
         CallExpression { Name: "writeFile" } => null,
-        CallExpression call when _functions.TryGetValue(call.Name, out var fnSig) => fnSig.ReturnType,
+        CallExpression call when _scopes.LookupFunction(call.Name) is { } fnSig => fnSig.ReturnType,
         _                                    => null,
     };
 }

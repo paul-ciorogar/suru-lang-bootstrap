@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### FunctionSignatures refactor — scoped function signatures and constants (internal)
+
+Moved function-signature tracking and module-level constant tracking out of flat dictionaries in `SemanticAnalyzer` and into the scope stack so nested function declarations will be supported without additional plumbing.
+
+**New file `FunctionSig.cs`:** `internal sealed record FunctionSig(IReadOnlyList<SuruType> ParamTypes, SuruType? ReturnType)` — replaces the anonymous tuple `(IReadOnlyList<SuruType>, SuruType?)` that was stored in `_functions`.
+
+**`Scope.cs` extended:** each scope frame now holds three separate dictionaries: variable symbols (existing), function signatures (`Dictionary<string, FunctionSig>`), and a constant marker set (`HashSet<string>`). New methods: `DeclareFunction`, `TryGetFunction`, `ContainsFunction`, `MarkConstant`, `IsConstant`.
+
+**`Scopes.cs` extended:** stack-walking methods added for function signatures (`RegisterFunction`, `FunctionExistsInCurrent`, `LookupFunction`) and constants (`MarkConstant`, `IsConstant`). All four follow the same top-to-bottom stack-walk pattern as the existing `Lookup` for variables.
+
+**`SemanticAnalyzer.cs` simplified:** `_functions` and `_constants` fields removed. All call sites updated to use `_scopes.RegisterFunction`, `_scopes.LookupFunction`, `_scopes.FunctionExistsInCurrent`, `_scopes.MarkConstant`, and `_scopes.IsConstant`.
+
+**`InternalsVisibleTo.cs` added:** `[assembly: InternalsVisibleTo("Suru.Tests")]` so the test project can directly unit-test `internal` infrastructure classes.
+
+**New test file `FunctionSignaturesTests.cs`:** 23 tests covering `FunctionSig` record behaviour, `Scope`/`Scopes` unit tests for function and constant storage, and semantic integration tests verifying all existing checks (arg-count validation, duplicate function detection, constant reassignment) continue to work through the new scoped API.
+
+All 106 tests pass.
+
+---
+
+### SuruType class hierarchy refactor (internal)
+
+Replaced the flat `SuruType` enum with a class hierarchy so every type value carries its full static information.
+
+**`SuruType` is now an abstract class** with eight sealed subclasses: `BoolType` (tag 0), `Int32Type` (tag 1), `Int64Type` (tag 2), `Float64Type` (tag 3), `NamedType(string Name)` (tag 4), `ArrayType(SuruType Element)` (tag 5), `StringType` (tag 6), `VoidType` (no tag — only used for void function returns in codegen). The six primitive singletons (`SuruType.Bool`, `.Int32`, `.Int64`, `.Float64`, `.String`, `.Void`) are `static readonly` fields.
+
+**Three side-dictionaries eliminated:**
+- `_arrayElementTypeNames: Dictionary<string, string>` in `SemanticAnalyzer` — element type now lives in `SuruType.ArrayType.Element`
+- `_varStructTypeNames: Dictionary<string, string>` in `SemanticAnalyzer` — struct type name now lives in `SuruType.NamedType.Name`
+- `_arrayElementTypes: Dictionary<string, SuruType>` in `IRCodeGenerator` — element type carried by the `SuruType.ArrayType` stored in `_vars`
+
+**`SemanticAnalyzer` changes:** `ResolveTypeAnnotation` returns `new SuruType.ArrayType(inner)` and `new SuruType.NamedType(name)`; `InferType` resolves field access types via `.Element` and `.Name` rather than flat dictionary lookups. Scope infrastructure refactored into `Scope.cs` / `Scopes.cs`.
+
+**`IRCodeGenerator` changes:** `FnReturnSuruType` returns `SuruType.Void` for void functions (was `SuruType.Struct`). `IsScalar` / `LlvmType` / `UnboxScalar` use C# type patterns. `EmitArrayAt` reads the element type from `SuruType.ArrayType.Element` in `_vars`.
+
+All 83 tests pass.
+
+---
+
 ### Stage 13b — Semantic Analyzer in Suru: Declaration Pre-passes
 
 Implements the two declaration pre-passes of the Suru semantic analyzer in Suru itself (`tests/fixtures/suru-semantic/suru-semantic-passes.suru`), building on the Stage 13a scope-chain data structures.
