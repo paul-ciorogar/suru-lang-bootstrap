@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13c — Semantic Analyzer in Suru: Statement Analysis
+
+Implements statement-level analysis in Suru itself (`tests/fixtures/suru-semantic/suru-semantic-stmts.suru`), building on the Stage 13a scope-chain data structures and the Stage 13b declaration pre-passes.
+
+**New Suru file `suru-semantic-stmts.suru`** (211 lines):
+- `analyzeLetStatement` — duplicate-in-scope check, type resolution via `resolveTypeName`, module-scope constant marking
+- `analyzeAssignmentStatement` — constant-reassignment check (takes priority), undefined-variable check
+- `analyzeFieldAssignmentStatement` — undefined receiver check for `NODE_VAR_REF` receivers
+- `analyzeReturnStatement` — bare-return-in-non-void check (defers return-type mismatch to Stage 13e)
+- `analyzeWhileStatement` — pushes a fresh scope around the body so sequential while loops can reuse variable names
+- `analyzeStatement` — dispatch over `NODE_LET`, `NODE_ASSIGN`, `NODE_FIELD_ASSIGN`, `NODE_RETURN`, `NODE_WHILE`; `NODE_TYPE_DECL` and `NODE_FN_DECL` handled by pre-passes; `NODE_EXPR_STMT` deferred to Stage 13e
+- `analyzeStatements` — iterates an `Array<AstNode>` and calls `analyzeStatement` on each; mutually recursive with `analyzeWhileStatement`
+- Helpers: `isConstant`, `addConstant`, `markConstantIfModuleScope`, `checkBareReturn`
+
+**`main.suru` extended** with 11 new unit tests for Stage 13c: `let_declares_symbol`, `let_duplicate_in_scope_reports_error`, `let_unknown_type_reports_error`, `let_at_module_scope_is_constant`, `assign_undefined_reports_error`, `assign_constant_reports_error`, `assign_valid_no_error`, `return_bare_in_nonvoid_reports_error`, `return_bare_in_void_no_error`, `while_scopes_do_not_leak`, `while_sequential_allow_same_name`.
+
+**`IRSuruSemanticTests.cs` extended** — 11 new `Assert.Contains` checks (one per Stage 13c test case).
+
+**Key codegen observations documented in file header:** `stmt.hasValue` and `stmt.body` are undeclared fields on `AstNode`; `hasValue` returns a `NamedType("")` ptr that `EmitMatchTestChain` correctly unboxes via `UnboxInt64` before `icmp eq i64 1`; `stmt.body` requires an explicit `let body Array<AstNode>: stmt.body` binding so the array annotation propagates to `body.len()` and `body.at(i)`.
+
+---
+
 ### Transitive namespace propagation in include resolution
 
 `ResolveIncludes` now propagates transitive namespaces and their function declarations into any importing module, lifting a constraint that prevented included files from calling functions in their own included namespaces.

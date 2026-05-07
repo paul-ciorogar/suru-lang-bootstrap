@@ -1,5 +1,6 @@
 include "suru-semantic.suru" as semantic
 include "suru-semantic-passes.suru" as passes
+include "suru-semantic-stmts.suru" as analysis
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -168,6 +169,132 @@ fn testRunPrePassesCrossPass() Bool {
     return typeNames.len().equals(1) and functions.len().equals(1) and errors.len().equals(0)
 }
 
+// ─── Stage 13c: statement analysis unit tests ────────────────────────────────
+
+// let_declares_symbol: after analyzing a NODE_LET, the name is visible via lookupSymbol.
+fn testLetDeclaresSymbol() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64" })
+    analysis.analyzeStatements(state, stmts)
+    let result String: semantic.lookupSymbol(state, "x")
+    return result.equals("Int64")
+}
+
+// let_duplicate_in_scope_reports_error: declaring the same name twice in one scope gives 1 error.
+fn testLetDuplicateInScopeReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64" })
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64" })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// let_unknown_type_reports_error: unknown type annotation produces exactly one error.
+fn testLetUnknownTypeReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "UnknownType" })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// let_at_module_scope_is_constant: let at module scope (scopes.len()==1) adds to state.constants.
+fn testLetAtModuleScopeIsConstant() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "PI", typeName: "Int64" })
+    analysis.analyzeStatements(state, stmts)
+    let constants Array<String>: state.constants
+    return constants.len().equals(1)
+}
+
+// assign_undefined_reports_error: assigning to an undeclared variable gives one error.
+fn testAssignUndefinedReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_ASSIGN, name: "x" })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// assign_constant_reports_error: reassigning a module-level constant gives one error.
+fn testAssignConstantReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "MAX", typeName: "Int64" })
+    stmts.add({ kind: NODE_ASSIGN, name: "MAX" })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// assign_valid_no_error: assigning to a declared mutable (non-module-scope) variable is clean.
+// An extra pushScope simulates being inside a function so the let is not marked constant.
+fn testAssignValidNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.pushScope(state)
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64" })
+    stmts.add({ kind: NODE_ASSIGN, name: "x" })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// return_bare_in_nonvoid_reports_error: bare return when currentReturnType is non-void gives 1 error.
+fn testReturnBareInNonvoidReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    state.currentReturnType: "Int64"
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// return_bare_in_void_no_error: bare return in void function context produces no error.
+fn testReturnBareInVoidNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    state.currentReturnType: "void"
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// while_scopes_do_not_leak: variable declared inside a while body is not visible after the loop.
+fn testWhileScopesDoNotLeak() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_LET, name: "inner", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_WHILE, body: body })
+    analysis.analyzeStatements(state, stmts)
+    let result String: semantic.lookupSymbol(state, "inner")
+    return result.equals("")
+}
+
+// while_sequential_allow_same_name: same variable name in two successive while bodies is fine.
+fn testWhileSequentialAllowSameName() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body1 Array<AstNode>: []
+    body1.add({ kind: NODE_LET, name: "i", typeName: "Int64" })
+    let body2 Array<AstNode>: []
+    body2.add({ kind: NODE_LET, name: "i", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_WHILE, body: body1 })
+    stmts.add({ kind: NODE_WHILE, body: body2 })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 fn main(args Array<String>) {
@@ -184,4 +311,17 @@ fn main(args Array<String>) {
     passOrFail("collectFnDecls_duplicate",      testCollectFnDeclsDuplicate())
     passOrFail("collectFnDecls_unknown_param",  testCollectFnDeclsUnknownParam())
     passOrFail("runPrePasses_cross_pass",       testRunPrePassesCrossPass())
+
+    // Stage 13c — statement analysis
+    passOrFail("let_declares_symbol",               testLetDeclaresSymbol())
+    passOrFail("let_duplicate_in_scope_reports_error", testLetDuplicateInScopeReportsError())
+    passOrFail("let_unknown_type_reports_error",    testLetUnknownTypeReportsError())
+    passOrFail("let_at_module_scope_is_constant",   testLetAtModuleScopeIsConstant())
+    passOrFail("assign_undefined_reports_error",    testAssignUndefinedReportsError())
+    passOrFail("assign_constant_reports_error",     testAssignConstantReportsError())
+    passOrFail("assign_valid_no_error",             testAssignValidNoError())
+    passOrFail("return_bare_in_nonvoid_reports_error", testReturnBareInNonvoidReportsError())
+    passOrFail("return_bare_in_void_no_error",      testReturnBareInVoidNoError())
+    passOrFail("while_scopes_do_not_leak",          testWhileScopesDoNotLeak())
+    passOrFail("while_sequential_allow_same_name",  testWhileSequentialAllowSameName())
 }

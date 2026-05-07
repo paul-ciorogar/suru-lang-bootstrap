@@ -1,6 +1,6 @@
 namespace Suru.Tests;
 
-// Verifies Stage-13a and Stage-13b milestones for the Suru semantic analyzer
+// Verifies Stage-13a, Stage-13b, and Stage-13c milestones for the Suru semantic analyzer
 // written in Suru itself (tests/fixtures/suru-semantic/).
 //
 // Stage 13a (suru-semantic.suru): scope-chain data structures — AnalyzerState,
@@ -9,6 +9,10 @@ namespace Suru.Tests;
 //
 // Stage 13b (suru-semantic-passes.suru): declaration pre-passes — resolveTypeName,
 // collectTypeDeclarations (pass 1), collectFunctionDeclarations (pass 2), runPrePasses.
+//
+// Stage 13c (suru-semantic-stmts.suru): statement-level analysis — analyzeLetStatement,
+// analyzeAssignmentStatement, analyzeFieldAssignmentStatement, analyzeReturnStatement,
+// analyzeWhileStatement, analyzeStatement, analyzeStatements.
 //
 // main.suru runs all unit tests and prints "PASS: <name>" or "FAIL: <name>" for each.
 [Collection("IntegrationIR")]
@@ -43,6 +47,19 @@ public class IRSuruSemanticTests(CompiledFixturesIR fixtures) : IntegrationTestB
         Assert.Contains(lines, l => l.Contains("PASS: collectFnDecls_duplicate"));
         Assert.Contains(lines, l => l.Contains("PASS: collectFnDecls_unknown_param"));
         Assert.Contains(lines, l => l.Contains("PASS: runPrePasses_cross_pass"));
+
+        // Stage 13c — statement analysis
+        Assert.Contains(lines, l => l.Contains("PASS: let_declares_symbol"));
+        Assert.Contains(lines, l => l.Contains("PASS: let_duplicate_in_scope_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: let_unknown_type_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: let_at_module_scope_is_constant"));
+        Assert.Contains(lines, l => l.Contains("PASS: assign_undefined_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: assign_constant_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: assign_valid_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: return_bare_in_nonvoid_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: return_bare_in_void_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: while_scopes_do_not_leak"));
+        Assert.Contains(lines, l => l.Contains("PASS: while_sequential_allow_same_name"));
 
         _testPassed = true;
     }
