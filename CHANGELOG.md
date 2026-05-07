@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #3 — Guard unchecked dictionary accesses in codegen
+
+Replaced four bare `[]` indexer accesses in the IR codegen partial files with `TryGetValue` guards
+that throw `InvalidOperationException` with a descriptive message naming the missing symbol:
+- `EmitLoad` (`IRCodeGenerator.cs`) — `_globalVars[name]`
+- `PeekType` switch (`IRMatchCodeGenerator.cs`) — `_globalVars[v.Name].Type`
+- `PeekMethodType` (`IRMatchCodeGenerator.cs`) — `_userFunctions[$"{ns}.{fn}"]`
+- `AssignmentStatement` case (`IRFunctionCodeGenerator.cs`) — `_vars[assignName]`
+
+Previously these would throw opaque `KeyNotFoundException`s if the semantic analyzer ever failed
+to catch an undefined reference.
+
 ### Compiler audit #2 — `printLn`/`printError` arity check
 
 Added explicit arity validation for `printLn` and `printError` in `SemanticAnalyzer.AnalyzeExpression`,

@@ -221,7 +221,9 @@ public sealed partial class IRCodeGenerator
                 break;
 
             case AssignmentStatement { Name: var assignName, Value: var assignExpr }:
-                var (assignPtrAddr, assignVarType) = _vars[assignName];
+                if (!_vars.TryGetValue(assignName, out var assignEntry))
+                    throw new InvalidOperationException($"IR codegen: assignment to undeclared variable '{assignName}'");
+                var (assignPtrAddr, assignVarType) = assignEntry;
                 var (assignVal, assignExprType)    = EmitValue(assignExpr);
                 var storeVal  = IsScalar(assignVarType) && !IsScalar(assignExprType)
                     ? UnboxScalar(assignVal, assignVarType)

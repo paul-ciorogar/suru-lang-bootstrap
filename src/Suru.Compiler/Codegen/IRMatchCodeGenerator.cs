@@ -94,7 +94,9 @@ public sealed partial class IRCodeGenerator
         UnaryExpression               => SuruType.Bool,
         BinaryExpression              => SuruType.Bool,
         VariableReferenceExpression v =>
-            _vars.TryGetValue(v.Name, out var ve) ? ve.type : _globalVars[v.Name].Type,
+            _vars.TryGetValue(v.Name, out var ve) ? ve.type
+            : _globalVars.TryGetValue(v.Name, out var gve) ? gve.Type
+            : throw new InvalidOperationException($"IR codegen: undefined variable '{v.Name}' in match pattern"),
         MatchExpression match         => PeekMatchType(match),
         MethodCallExpression m        => PeekMethodType(m),
         CallExpression { Name: "readFile" } => SuruType.String,
@@ -113,7 +115,12 @@ public sealed partial class IRCodeGenerator
     {
         if (m.Receiver is VariableReferenceExpression { Name: var nsName2 } &&
             _module.Namespaces.Contains(nsName2))
-            return _userFunctions[$"{nsName2}.{m.MethodName}"].ReturnType;
+        {
+            var qualifiedName = $"{nsName2}.{m.MethodName}";
+            if (!_userFunctions.TryGetValue(qualifiedName, out var nsFn))
+                throw new InvalidOperationException($"IR codegen: undefined namespace function '{qualifiedName}'");
+            return nsFn.ReturnType;
+        }
 
         if (m.Receiver is VariableReferenceExpression { Name: var typeName }
             && typeName is "Int32" or "Int64" or "Float64" or "Bool" or "String")

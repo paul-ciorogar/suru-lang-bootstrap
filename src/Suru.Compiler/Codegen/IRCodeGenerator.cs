@@ -226,7 +226,9 @@ public sealed partial class IRCodeGenerator
     {
         if (!_vars.TryGetValue(name, out var entry))
         {
-            var (gName, gType) = _globalVars[name];
+            if (!_globalVars.TryGetValue(name, out var gEntry))
+                throw new InvalidOperationException($"IR codegen: undefined variable '{name}'");
+            var (gName, gType) = gEntry;
             var rawTmp = NextTmp();
             _funcs.AppendLine($"  {rawTmp} = load {LlvmType(gType)}, ptr {gName}");
             return (rawTmp, gType);
