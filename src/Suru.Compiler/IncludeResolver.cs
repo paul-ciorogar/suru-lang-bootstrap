@@ -35,10 +35,10 @@ internal static class IncludeResolver
             .Where(s => s is not IncludeDirective)
             .ToList();
 
-        var namespaces  = new HashSet<string>(module.Namespaces);
-        var externalFns = new Dictionary<string, string>();
         var seenPaths   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var paths       = new List<string>();
+        var aliases     = new AliasMap();
+        var registry    = new ExternalDeclarationRegistry();
 
         // Seed deduplication sets from the main module so merged content cannot
         // shadow declarations the user already wrote.
@@ -46,6 +46,9 @@ internal static class IncludeResolver
             module.Statements.OfType<LetStatement>().Select(ls => ls.Name));
         var seenTypes = new HashSet<string>(
             module.Statements.OfType<TypeDeclaration>().Select(td => td.Name));
+        // (path, unqualifiedName) pairs — guards against duplicate function declarations
+        // in the merged statement list when multiple includes share transitive dependencies.
+        var seenFns = new HashSet<(string, string)>();
 
         // Constants and types are prepended so they precede function declarations —
         // SemanticAnalyzer's first pass registers types before it enters any function body.
@@ -60,21 +63,35 @@ internal static class IncludeResolver
             if (graph.IsActive(fullPath))
                 throw new Exception($"Circular include detected: {fullPath}");
 
-            // Diamond: fully resolved by a sibling branch — register alias, skip content.
+            // Diamond: fully resolved by a sibling branch — register the new alias and
+            // merge the cached module's transitive Aliases and ExternalDeclarationRegistry
+            // so the current context is as complete as if the module had been included first.
+            // MergeFrom uses TryAdd semantics throughout, so this is idempotent.
             if (graph.IsResolved(fullPath))
             {
-                namespaces.Add(directive.NamespaceName);
+                aliases.Register(directive.NamespaceName, fullPath);
+                if (graph.GetCachedModule(fullPath) is { } cached)
+                {
+                    aliases.MergeFrom(cached.Aliases);
+                    registry.MergeFrom(cached.ExternalDeclarationRegistry);
+                }
                 continue;
             }
 
             graph.Enter(fullPath);
             var included = LoadModule(fullPath, graph);
+            graph.CacheModule(fullPath, included);
             graph.Exit(fullPath);
 
+            aliases.Register(directive.NamespaceName, fullPath);
+            aliases.MergeFrom(included.Aliases);
+            registry.MergeFrom(included.ExternalDeclarationRegistry);
+
             CollectPaths(fullPath, included, seenPaths, paths);
-            MergeModule(included, directive.NamespaceName,
-                mergedStatements, externalFns, namespaces,
-                seenConstants, seenTypes, pendingConstants, pendingTypes);
+            MergeModule(included, directive.NamespaceName, fullPath,
+                mergedStatements, seenFns,
+                seenConstants, seenTypes, pendingConstants, pendingTypes,
+                registry);
         }
 
         // Prepend types then constants so both appear before all function declarations.
@@ -84,10 +101,10 @@ internal static class IncludeResolver
         {
             SourcePath          = module.SourcePath,
             Statements          = mergedStatements,
-            Namespaces          = namespaces,
-            ExternalFunctions   = externalFns,
             IncludedSourcePaths = paths,
             TypeDeclarations    = BuildTypeDict(mergedStatements),
+            Aliases             = aliases,
+            ExternalDeclarationRegistry = registry,
         };
     }
 
@@ -140,43 +157,43 @@ internal static class IncludeResolver
 
     /// <summary>
     /// Folds all declarations from <paramref name="included"/> into the accumulator
-    /// collections, applying the <paramref name="ns"/> prefix to functions that
-    /// originate in <paramref name="included"/> itself (transitive functions keep
-    /// their existing qualified name so they are not double-prefixed).
+    /// collections. Functions from <paramref name="included"/> itself are merged with
+    /// their original unqualified name and <see cref="FunctionDeclaration.SourcePath"/>
+    /// set to <paramref name="fullPath"/>. Transitive functions (already carrying a
+    /// non-null <see cref="FunctionDeclaration.SourcePath"/>) are forwarded as-is.
+    /// Deduplication is handled by <paramref name="seenFns"/> (keyed by path + name).
+    /// The canonical registry is already populated via
+    /// <see cref="ExternalDeclarationRegistry.MergeFrom"/> before this method runs.
     /// </summary>
     private static void MergeModule(
-        Module included, string ns,
-        List<Statement> statements, Dictionary<string, string> externalFns,
-        HashSet<string> namespaces,
+        Module included, string ns, string fullPath,
+        List<Statement> statements, HashSet<(string, string)> seenFns,
         HashSet<string> seenConstants, HashSet<string> seenTypes,
-        List<Statement> pendingConstants, List<Statement> pendingTypes)
+        List<Statement> pendingConstants, List<Statement> pendingTypes,
+        ExternalDeclarationRegistry registry)
     {
-        namespaces.Add(ns);
-        // Propagate transitive namespaces so that calls like `sem.foo()` inside an
-        // included file's bodies remain valid in the importing module.
-        foreach (var transitiveNs in included.Namespaces)
-            namespaces.Add(transitiveNs);
-
         foreach (var stmt in included.Statements)
         {
             if (stmt is FunctionDeclaration fn)
             {
-                if (included.ExternalFunctions.TryGetValue(fn.Name, out var llvmSymbol))
+                if (fn.SourcePath != null)
                 {
-                    // Transitive function — propagate as-is; TryAdd prevents duplicates
-                    // when multiple siblings share the same transitive dependency.
-                    if (externalFns.TryAdd(fn.Name, llvmSymbol))
+                    // Transitive function — already in registry via MergeFrom.
+                    // Forward the declaration so codegen can emit a `declare` stub.
+                    if (seenFns.Add((fn.SourcePath, fn.Name)))
                         statements.Add(fn);
                 }
                 else
                 {
-                    // Function declared in the included file itself — prefix with ns.
-                    // Record the original LLVM symbol so codegen emits `declare @fn`
-                    // and `call @fn` (not `@ns.fn`) at call sites.
-                    var qualified = ns + "." + fn.Name;
-                    externalFns[qualified] = fn.Name;
-                    statements.Add(new FunctionDeclaration(
-                        qualified, fn.Parameters, fn.ReturnType, fn.Body));
+                    // Function declared in the included file itself.
+                    // Use the original unqualified name; SourcePath identifies the origin.
+                    if (seenFns.Add((fullPath, fn.Name)))
+                    {
+                        statements.Add(new FunctionDeclaration(
+                            fn.Name, fn.Parameters, fn.ReturnType, fn.Body)
+                            { SourcePath = fullPath });
+                        registry.Register(fullPath, fn);
+                    }
                 }
             }
             else if (stmt is LetStatement constant && seenConstants.Add(constant.Name))
@@ -186,7 +203,10 @@ internal static class IncludeResolver
                 // cannot be emitted as simple LLVM globals and are only needed in the
                 // included file's own translation unit.
                 if (constant.Value is BoolLiteral or IntLiteral or FloatLiteral)
+                {
                     pendingConstants.Add(stmt);
+                    registry.Register(fullPath, constant);
+                }
             }
             else if (stmt is TypeDeclaration td && seenTypes.Add(td.Name))
             {
@@ -194,6 +214,7 @@ internal static class IncludeResolver
                 // metadata. Merging them lets the importing file use the type name in
                 // annotations, struct literals, and function signatures.
                 pendingTypes.Add(stmt);
+                registry.Register(fullPath, td);
             }
         }
     }

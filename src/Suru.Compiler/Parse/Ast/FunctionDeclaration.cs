@@ -19,4 +19,6 @@ public sealed class FunctionDeclaration(
     public IReadOnlyList<FunctionParameter> Parameters { get; } = parameters;
     public TypeAnnotation ReturnType                    { get; } = returnType;
     public IReadOnlyList<Statement> Body               { get; } = body;
+    // null = declared in the current file; absolute path for every function merged from an include.
+    public string? SourcePath                           { get; init; }
 }

@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Module system — Chunk 6: remove `Namespaces`/`ExternalFunctions`; eliminate `ns.fn` rename
+
+`Module.Namespaces` and `Module.ExternalFunctions` are removed; all callers now use
+`Module.Aliases` (`AliasMap`) and `Module.ExternalDeclarationRegistry` exclusively.
+The `ns.fn` qualified-name rename in `MergeModule` is also removed — merged functions
+carry their original unqualified names with `FunctionDeclaration.SourcePath` set to
+their origin file.
+
+- `Module`: removed `Namespaces` (`IReadOnlySet<string>`) and `ExternalFunctions`
+  (`IReadOnlyDictionary<string,string>`).
+- `IncludeResolver.MergeModule`: removed `namespaces`/`externalFns` parameters;
+  replaced `seenFns` deduplication keyed by `(path, name)`; direct functions merged
+  with original name + `SourcePath`; transitive functions forwarded as-is.
+- `IRMatchCodeGenerator.PeekMethodType`: replaced `_module.Namespaces.Contains` +
+  `_userFunctions` lookup with `_module.Aliases.Resolve` +
+  `_module.ExternalDeclarationRegistry.LookupFunction` + `FnReturnSuruType`.
+- `IncludeResolverTests`: updated assertions to use `Aliases.All`, `Aliases.Contains`,
+  and `ExternalDeclarationRegistry.LookupFunction`; renamed
+  `TransitiveFunction_PropagatedWithOriginalQualifiedName` →
+  `TransitiveFunction_PropagatedInRegistry`.
+- All 127 tests pass; zero references to `Namespaces`/`ExternalFunctions` remain in source.
+
+### Module system — Chunk 5: diamond-include registry propagation
+
+Diamond includes now propagate their cached module's `Aliases` and
+`ExternalDeclarationRegistry` into the current context, making the registry
+complete regardless of include ordering.
+
+- `IncludeGraph`: added `CacheModule` / `GetCachedModule` to store each resolved
+  `Module` by absolute path after `LoadModule` returns.
+- `IncludeResolver.Resolve`: calls `graph.CacheModule(fullPath, included)` after
+  each non-diamond resolution.
+- Diamond branch: after registering the new alias, calls `aliases.MergeFrom` and
+  `registry.MergeFrom` on the cached module — both use TryAdd semantics so the
+  operation is idempotent.
+
+### Module system — Chunk 4: codegen uses `Aliases` + `ExternalDeclarationRegistry`
+
+The IR code generator now dispatches cross-module calls via canonical
+`(absoluteSourcePath, unqualifiedName)` lookups instead of `ExternalFunctions` dictionary.
+
+- `EmitFunction`: detects external functions via `fn.SourcePath != null`; strips the `"ns."` prefix to recover the unqualified LLVM symbol name.
+- Pre-pass: registers only same-file functions (`SourcePath == null`) into `_userFunctions`; externals are resolved through `ExternalDeclarationRegistry` at call sites.
+- `EmitMethodCall`: uses `_module.Aliases.Contains(ns)` instead of `_module.Namespaces.Contains(ns)`.
+- `EmitUserFunctionCall`: detects cross-module calls by a dot in the name, resolves via `Aliases.Resolve(ns)` → `ExternalDeclarationRegistry.LookupFunction(path, fn)`, and uses the unqualified name as the LLVM symbol.
+
+### Module system — Chunk 3: semantic analyzer uses `Aliases` + `ExternalDeclarationRegistry`
+
+Renamed `DeclarationRegistry` → `ExternalDeclarationRegistry` throughout for clarity.
+The semantic analyzer now dispatches cross-module calls via canonical
+`(absoluteSourcePath, unqualifiedName)` lookups instead of alias-string scope lookups.
+
+- `DeclarationRegistry` renamed to `ExternalDeclarationRegistry` (class, file, `Module`
+  property, all `IncludeResolver` references).
+- `RegisterFunction` skips functions with `SourcePath != null` — external functions live in
+  `ExternalDeclarationRegistry` and are not injected into the scope stack.
+- `AnalyzeFunctionDeclaration` returns early for external functions — their bodies are
+  analyzed in their own module's context, not re-analyzed in the importing module.
+- `AnalyzeExpression` VarRef check: `Namespaces.Contains` → `Aliases.Contains`.
+- `AnalyzeExpression` namespace MethodCall: `Namespaces` + `_scopes.LookupFunction(qualified)`
+  → `Aliases.Resolve` + `ExternalDeclarationRegistry.LookupFunction(path, name)`.
+- `InferType` namespace MethodCall: same substitution; return type derived from
+  `ResolveTypeAnnotation(fnDecl.ReturnType)` instead of `FunctionSig.ReturnType`.
+
+`Namespaces` and `ExternalFunctions` remain on `Module` for codegen (Chunk 4 removes them).
+
+### Module system — Chunk 2: wire `AliasMap`/`DeclarationRegistry` into the pipeline
+
+`AliasMap` and `DeclarationRegistry` are now populated by `IncludeResolver` and carried on
+`Module` alongside the existing `Namespaces`/`ExternalFunctions` dictionaries (which are
+unchanged — old code paths remain active until Chunk 6 cleanup).
+
+- `FunctionDeclaration.SourcePath` — new `init` property; set to the absolute path of the
+  source file that declared the function when a function is merged from an include; `null`
+  for functions declared in the current file.
+- `Module.Aliases` (`internal AliasMap`) — populated by `IncludeResolver.Resolve`:
+  `aliases.Register(ns, fullPath)` for each direct include (including diamond re-entries),
+  plus `aliases.MergeFrom(included.Aliases)` for transitive propagation.
+- `Module.DeclarationRegistry` (`internal DeclarationRegistry`) — populated by
+  `IncludeResolver.MergeModule`: `registry.Register(fullPath, decl)` for each direct
+  `FunctionDeclaration`, scalar `LetStatement`, and `TypeDeclaration` merged from an
+  included file; transitive entries arrive via `registry.MergeFrom(included.DeclarationRegistry)`
+  called in `Resolve` before `MergeModule`.
+
+### Module system — Chunk 1: `AliasMap` + `DeclarationRegistry` (foundation only)
+
+Two new internal classes added to `Parse/Ast/` as the foundation for canonical name
+resolution (replacing alias-string function lookup with `(absoluteSourcePath, name)` identity).
+Neither class is wired into the pipeline yet — this chunk just gets the types in place.
+
+- `AliasMap` — maps namespace aliases to absolute source paths; `Register`, `Contains`,
+  `Resolve`, `MergeFrom` (TryAdd semantics for transitive propagation).
+- `DeclarationRegistry` — canonical `(sourcePath, unqualifiedName) → Statement` table covering
+  `FunctionDeclaration`, `TypeDeclaration`, and scalar `LetStatement` constants; `Register`,
+  `Lookup`, `LookupFunction`, `Contains`, `MergeFrom`.
+
 ### Compiler audit #13 — Struct field name globals use `@.field_N` prefix
 
 Field name strings used as struct field identifiers are now interned in a separate

@@ -122,12 +122,11 @@ public sealed partial class IRCodeGenerator
     private SuruType PeekMethodType(MethodCallExpression m)
     {
         if (m.Receiver is VariableReferenceExpression { Name: var nsName2 } &&
-            _module.Namespaces.Contains(nsName2))
+            _module.Aliases.Resolve(nsName2) is { } nsPath2)
         {
-            var qualifiedName = $"{nsName2}.{m.MethodName}";
-            if (!_userFunctions.TryGetValue(qualifiedName, out var nsFn))
-                throw new InvalidOperationException($"IR codegen: undefined namespace function '{qualifiedName}'");
-            return nsFn.ReturnType;
+            var fnDecl = _module.ExternalDeclarationRegistry.LookupFunction(nsPath2, m.MethodName)
+                ?? throw new InvalidOperationException($"IR codegen: undefined namespace function '{nsName2}.{m.MethodName}'");
+            return FnReturnSuruType(fnDecl);
         }
 
         if (m.Receiver is VariableReferenceExpression { Name: var typeName }

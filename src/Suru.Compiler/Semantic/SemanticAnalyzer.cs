@@ -52,6 +52,9 @@ public sealed class SemanticAnalyzer
 
     private void RegisterFunction(FunctionDeclaration fn)
     {
+        // External functions live in ExternalDeclarationRegistry; analyzed in their own module.
+        if (fn.SourcePath is not null) return;
+
         if (_scopes.FunctionExistsInCurrent(fn.Name))
         {
             _errors.Add($"{_module.SourcePath}: function '{fn.Name}' is already declared");
@@ -197,6 +200,9 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeFunctionDeclaration(FunctionDeclaration fn)
     {
+        // External functions are analyzed in their own module; skip re-analysis here.
+        if (fn.SourcePath is not null) return;
+
         _scopes.Enter();
 
         var sig = _scopes.LookupFunction(fn.Name);
@@ -252,7 +258,7 @@ public sealed class SemanticAnalyzer
             case VariableReferenceExpression varRef:
                 if (varRef.Name is not (BuiltinNames.Int32 or BuiltinNames.Int64 or BuiltinNames.Float64 or BuiltinNames.Bool)
                     && _scopes.Lookup(varRef.Name) is null
-                    && !_module.Namespaces.Contains(varRef.Name))
+                    && !_module.Aliases.Contains(varRef.Name))
                     _errors.Add($"{_module.SourcePath}: undefined variable '{varRef.Name}'");
                 break;
 
@@ -290,14 +296,14 @@ public sealed class SemanticAnalyzer
 
             case MethodCallExpression nsCall
                 when nsCall.Receiver is VariableReferenceExpression nsRef
-                  && _module.Namespaces.Contains(nsRef.Name):
+                  && _module.Aliases.Resolve(nsRef.Name) is { } nsSourcePath:
                 {
+                    var fnDecl = _module.ExternalDeclarationRegistry.LookupFunction(nsSourcePath, nsCall.MethodName);
                     var qualifiedName = nsRef.Name + "." + nsCall.MethodName;
-                    var nsSig = _scopes.LookupFunction(qualifiedName);
-                    if (nsSig is not null)
+                    if (fnDecl is not null)
                     {
-                        if (nsCall.Args.Count != nsSig.ParamTypes.Count)
-                            _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {nsSig.ParamTypes.Count}");
+                        if (nsCall.Args.Count != fnDecl.Parameters.Count)
+                            _errors.Add($"{_module.SourcePath}: function '{qualifiedName}' called with {nsCall.Args.Count} argument(s), expected {fnDecl.Parameters.Count}");
                         else
                             for (int i = 0; i < nsCall.Args.Count; i++)
                                 AnalyzeExpression(nsCall.Args[i]);
@@ -463,9 +469,9 @@ public sealed class SemanticAnalyzer
             when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Float64 }  => SuruType.Float64,
         MethodCallExpression nsCall
             when nsCall.Receiver is VariableReferenceExpression nsRef2
-              && _module.Namespaces.Contains(nsRef2.Name)
-              && _scopes.LookupFunction(nsRef2.Name + "." + nsCall.MethodName) is { } nsFnSig
-            => nsFnSig.ReturnType,
+              && _module.Aliases.Resolve(nsRef2.Name) is { } nsPath2
+              && _module.ExternalDeclarationRegistry.LookupFunction(nsPath2, nsCall.MethodName) is { } nsFnDecl
+            => ResolveTypeAnnotation(nsFnDecl.ReturnType),
         MethodCallExpression m => InferType(m.Receiver),
         UnaryExpression        => SuruType.Bool,
         BinaryExpression       => SuruType.Bool,

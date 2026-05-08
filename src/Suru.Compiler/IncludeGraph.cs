@@ -1,3 +1,5 @@
+using Suru.Compiler.Parse.Ast;
+
 namespace Suru.Compiler;
 
 /// <summary>
@@ -13,6 +15,8 @@ namespace Suru.Compiler;
 ///              alias must still be registered.
 ///
 /// Enter/Exit must be called symmetrically around each recursive Resolve call.
+/// The module cache stores each fully-resolved Module so diamond branches can
+/// merge its Aliases and ExternalDeclarationRegistry idempotently.
 /// </summary>
 internal sealed class IncludeGraph
 {
@@ -22,6 +26,11 @@ internal sealed class IncludeGraph
 
     // Files whose recursive resolution is currently on the call stack.
     private readonly HashSet<string> _active = new(StringComparer.OrdinalIgnoreCase);
+
+    // Resolved Module objects keyed by absolute path; populated by CacheModule so
+    // the diamond branch can merge transitive Aliases and ExternalDeclarationRegistry.
+    private readonly Dictionary<string, Module> _cache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     internal IncludeGraph(string rootSourcePath)
     {
@@ -49,4 +58,14 @@ internal sealed class IncludeGraph
     /// <summary>Removes <paramref name="absolutePath"/> from the active set,
     /// leaving it in the resolved set.</summary>
     internal void Exit(string absolutePath) => _active.Remove(absolutePath);
+
+    /// <summary>Stores <paramref name="module"/> so the diamond branch can
+    /// retrieve it later via <see cref="GetCachedModule"/>.</summary>
+    internal void CacheModule(string absolutePath, Module module) =>
+        _cache[absolutePath] = module;
+
+    /// <summary>Returns the previously cached module for
+    /// <paramref name="absolutePath"/>, or <c>null</c> if not yet cached.</summary>
+    internal Module? GetCachedModule(string absolutePath) =>
+        _cache.TryGetValue(absolutePath, out var m) ? m : null;
 }

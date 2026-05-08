@@ -103,9 +103,10 @@ public sealed partial class IRCodeGenerator
                 _globalVars[cName] = ($"@{cName}", cType);
             }
 
-        // Pre-pass: register all non-main function signatures.
+        // Pre-pass: register same-file non-main function signatures.
+        // External functions (SourcePath != null) are resolved via ExternalDeclarationRegistry.
         foreach (var stmt in _module.Statements)
-            if (stmt is FunctionDeclaration { Name: not BuiltinNames.Main } fn)
+            if (stmt is FunctionDeclaration { Name: not BuiltinNames.Main, SourcePath: null } fn)
                 _userFunctions[fn.Name] = (fn.Parameters, FnReturnSuruType(fn));
 
         // Pass 1: emit all function bodies.
@@ -258,7 +259,7 @@ public sealed partial class IRCodeGenerator
     {
         // Namespace calls: `lib.fn(args)` where `lib` is an include alias.
         if (m.Receiver is VariableReferenceExpression { Name: var nsName } &&
-            _module.Namespaces.Contains(nsName))
+            _module.Aliases.Contains(nsName))
             return EmitUserFunctionCall(new CallExpression($"{nsName}.{m.MethodName}", m.Args));
 
         // Static methods on type names.
@@ -352,11 +353,33 @@ public sealed partial class IRCodeGenerator
     // User-defined function call: scalar params/returns use raw LLVM types.
     private (string val, SuruType type) EmitUserFunctionCall(CallExpression call)
     {
-        var (paramDefs, returnType) = _userFunctions[call.Name];
+        IReadOnlyList<FunctionParameter> paramDefs;
+        SuruType returnType;
+        string llvmName;
+
+        var dotIdx = call.Name.IndexOf('.');
+        if (dotIdx >= 0)
+        {
+            // Cross-module call: resolve ns alias → canonical path → ExternalDeclarationRegistry.
+            var ns         = call.Name[..dotIdx];
+            var fn         = call.Name[(dotIdx + 1)..];
+            var sourcePath = _module.Aliases.Resolve(ns)!;
+            var fnDecl     = _module.ExternalDeclarationRegistry.LookupFunction(sourcePath, fn)!;
+            paramDefs  = fnDecl.Parameters;
+            returnType = FnReturnSuruType(fnDecl);
+            llvmName   = fn;  // unqualified name IS the LLVM symbol
+        }
+        else
+        {
+            // Same-file call.
+            (paramDefs, returnType) = _userFunctions[call.Name];
+            llvmName = call.Name;
+        }
+
         var argParts = new List<string>(call.Args.Count);
         for (int i = 0; i < call.Args.Count; i++)
         {
-            var pType = SuruTypeFromAnnotation(paramDefs[i].TypeAnnotation);
+            var pType    = SuruTypeFromAnnotation(paramDefs[i].TypeAnnotation);
             var (argVal, argType) = EmitValue(call.Args[i]);
             var finalVal = IsScalar(pType) && !IsScalar(argType)
                 ? UnboxScalar(argVal, pType)
@@ -364,7 +387,6 @@ public sealed partial class IRCodeGenerator
             argParts.Add($"{LlvmType(pType)} {finalVal}");
         }
         var retLlvmType = returnType is SuruType.VoidType ? "ptr" : LlvmType(returnType);
-        var llvmName    = _module.ExternalFunctions.TryGetValue(call.Name, out var orig) ? orig : call.Name;
         var callTmp     = NextTmp();
         _funcs.AppendLine($"  {callTmp} = call {retLlvmType} @{llvmName}({string.Join(", ", argParts)})");
         return (callTmp, returnType);

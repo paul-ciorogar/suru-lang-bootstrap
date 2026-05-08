@@ -10,13 +10,15 @@ public sealed partial class IRCodeGenerator
 
     private void EmitFunction(FunctionDeclaration fn)
     {
-        if (_module.ExternalFunctions.TryGetValue(fn.Name, out var originalName))
+        if (fn.SourcePath is not null)
         {
             var retSuruType = FnReturnSuruType(fn);
             var retLlvmType = fn.ReturnType.Name == BuiltinNames.Void ? "void" : LlvmType(retSuruType);
             var paramTypes  = string.Join(", ", fn.Parameters.Select(p =>
                 LlvmType(SuruTypeFromAnnotation(p.TypeAnnotation))));
-            _funcs.AppendLine($"declare {retLlvmType} @{originalName}({paramTypes})");
+            // fn.Name is the unqualified LLVM symbol (e.g. "tokenize").
+            var llvmSymbol = fn.Name;
+            _funcs.AppendLine($"declare {retLlvmType} @{llvmSymbol}({paramTypes})");
             return;
         }
 

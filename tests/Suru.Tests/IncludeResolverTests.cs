@@ -46,9 +46,8 @@ public class IncludeResolverTests : IDisposable
     {
         var path = Write("main.suru", "fn main(args Array<String>) { }");
         var result = Resolve(path);
-        Assert.Empty(result.Namespaces);
+        Assert.Empty(result.Aliases.All);
         Assert.Empty(result.IncludedSourcePaths);
-        Assert.Empty(result.ExternalFunctions);
     }
 
     // ─── Error cases ─────────────────────────────────────────────────────────
@@ -83,9 +82,9 @@ public class IncludeResolverTests : IDisposable
     // ─── Namespace / function merging ─────────────────────────────────────────
 
     [Fact]
-    public void SingleInclude_AddsNamespaceAndQualifiesFunction()
+    public void SingleInclude_AddsAliasAndMergesFunction()
     {
-        Write("lib.suru", "fn double(n Int64) Int64 { return n.multiply(2) }");
+        var libPath = Write("lib.suru", "fn double(n Int64) Int64 { return n.multiply(2) }");
         var mainPath = Write("main.suru", """
             include "lib.suru" as lib
             fn main(args Array<String>) { }
@@ -93,13 +92,13 @@ public class IncludeResolverTests : IDisposable
 
         var result = Resolve(mainPath);
 
-        Assert.Contains("lib", result.Namespaces);
-        // Function should be qualified as "lib.double" in the merged statement list.
-        var fns = result.Statements.OfType<FunctionDeclaration>().Select(f => f.Name).ToList();
-        Assert.Contains("lib.double", fns);
-        // ExternalFunctions maps the qualified name to the original LLVM symbol.
-        Assert.True(result.ExternalFunctions.TryGetValue("lib.double", out var sym));
-        Assert.Equal("double", sym);
+        Assert.True(result.Aliases.Contains("lib"));
+        // Function is merged with its unqualified name; SourcePath identifies origin.
+        var fns = result.Statements.OfType<FunctionDeclaration>().ToList();
+        Assert.Contains(fns, f => f.Name == "double" && f.SourcePath != null);
+        // Registry maps the canonical (path, name) identity.
+        var absLib = Path.GetFullPath(libPath);
+        Assert.NotNull(result.ExternalDeclarationRegistry.LookupFunction(absLib, "double"));
     }
 
     [Fact]
@@ -156,7 +155,7 @@ public class IncludeResolverTests : IDisposable
         var result = Resolve(mainPath);
 
         var count = result.Statements.OfType<FunctionDeclaration>()
-            .Count(f => f.Name == "com.shared" || f.Name == "shared");
+            .Count(f => f.Name == "shared");
         Assert.Equal(1, count);
     }
 
@@ -251,7 +250,7 @@ public class IncludeResolverTests : IDisposable
     public void TransitiveNamespace_PropagatedToImporter()
     {
         // main includes mid, mid includes leaf as lns.
-        // After resolution, main's Namespaces should contain "lns".
+        // After resolution, main's AliasMap should contain "lns".
         Write("leaf.suru", "fn leafFn() Int64 { return 1 }");
         Write("mid.suru",  """include "leaf.suru" as lns""");
         var mainPath = Write("main.suru", """
@@ -261,15 +260,16 @@ public class IncludeResolverTests : IDisposable
 
         var result = Resolve(mainPath);
 
-        Assert.Contains("lns", result.Namespaces);
+        Assert.True(result.Aliases.Contains("lns"));
     }
 
     [Fact]
-    public void TransitiveFunction_PropagatedWithOriginalQualifiedName()
+    public void TransitiveFunction_PropagatedInRegistry()
     {
         // main includes mid, mid includes leaf as lns.
-        // leaf's function "leafFn" should be accessible as "lns.leafFn" in main's merged module.
-        Write("leaf.suru", "fn leafFn() Int64 { return 1 }");
+        // leaf's "leafFn" should appear in statements with its unqualified name
+        // and be resolvable from the registry via the leaf file's canonical path.
+        var leafPath = Write("leaf.suru", "fn leafFn() Int64 { return 1 }");
         Write("mid.suru",  """include "leaf.suru" as lns""");
         var mainPath = Write("main.suru", """
             include "mid.suru" as mid
@@ -279,9 +279,9 @@ public class IncludeResolverTests : IDisposable
         var result = Resolve(mainPath);
 
         var fns = result.Statements.OfType<FunctionDeclaration>().Select(f => f.Name).ToList();
-        Assert.Contains("lns.leafFn", fns);
-        Assert.True(result.ExternalFunctions.TryGetValue("lns.leafFn", out var sym));
-        Assert.Equal("leafFn", sym);
+        Assert.Contains("leafFn", fns);
+        var absLeaf = Path.GetFullPath(leafPath);
+        Assert.NotNull(result.ExternalDeclarationRegistry.LookupFunction(absLeaf, "leafFn"));
     }
 
     [Fact]
