@@ -1,6 +1,6 @@
 namespace Suru.Tests;
 
-// Verifies Stage-13a, Stage-13b, and Stage-13c milestones for the Suru semantic analyzer
+// Verifies Stage-13a through Stage-13d milestones for the Suru semantic analyzer
 // written in Suru itself (tests/fixtures/suru-semantic/).
 //
 // Stage 13a (suru-semantic.suru): scope-chain data structures — AnalyzerState,
@@ -13,6 +13,10 @@ namespace Suru.Tests;
 // Stage 13c (suru-semantic-stmts.suru): statement-level analysis — analyzeLetStatement,
 // analyzeAssignmentStatement, analyzeFieldAssignmentStatement, analyzeReturnStatement,
 // analyzeWhileStatement, analyzeStatement, analyzeStatements.
+//
+// Stage 13d (suru-semantic-fns.suru): function declaration analysis — checkHasReturn,
+// analyzeFunctionDeclaration (push scope, inject params, set return type, analyze body,
+// verify return paths, restore context).
 //
 // main.suru runs all unit tests and prints "PASS: <name>" or "FAIL: <name>" for each.
 [Collection("IntegrationIR")]
@@ -60,6 +64,15 @@ public class IRSuruSemanticTests(CompiledFixturesIR fixtures) : IntegrationTestB
         Assert.Contains(lines, l => l.Contains("PASS: return_bare_in_void_no_error"));
         Assert.Contains(lines, l => l.Contains("PASS: while_scopes_do_not_leak"));
         Assert.Contains(lines, l => l.Contains("PASS: while_sequential_allow_same_name"));
+
+        // Stage 13d — function declaration analysis
+        Assert.Contains(lines, l => l.Contains("PASS: fn_void_no_return_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_nonvoid_has_return_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_nonvoid_missing_return_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_bare_return_in_nonvoid_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_params_visible_in_scope"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_scope_not_leaked"));
+        Assert.Contains(lines, l => l.Contains("PASS: fn_return_in_while_counts"));
 
         _testPassed = true;
     }

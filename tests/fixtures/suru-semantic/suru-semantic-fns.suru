@@ -1,0 +1,115 @@
+// Stage 13d — Semantic Analyzer in Suru: Function Declaration Analysis
+//
+// Implements analyzeFunctionDeclaration and the checkHasReturn helper suite.
+// Mirrors AnalyzeFunctionDeclaration in SemanticAnalyzer.cs:201–226 and
+// CheckHasReturn in SemanticAnalyzer.cs:228–237.
+//
+// analyzeFunctionDeclaration:
+//   push fresh scope → inject params → set currentReturnType → analyze body →
+//   verify non-void has return → pop scope → restore context.
+//
+// checkHasReturn:
+//   linear scan of a statement list; returns true on NODE_RETURN or on
+//   a NODE_WHILE whose body transitively contains a return. The exit()
+//   path is deferred to Stage 13e (requires expression analysis).
+//
+// All function names here are distinct from those in suru-semantic-stmts.suru
+// to avoid LLVM link-time symbol collisions — each included file compiles to
+// its own .o and names are not prefixed by their include alias.
+
+include "suru-semantic.suru" as semantic
+include "suru-semantic-passes.suru" as passes
+include "suru-semantic-stmts.suru" as analysis
+
+// ─── checkHasReturn ───────────────────────────────────────────────────────────
+
+// checkHasReturnInWhile — reads the NODE_WHILE body and delegates to
+// checkHasReturnAt so the two functions can be mutually recursive.
+// Uses typed intermediate variable (same pattern as analyzeWhileStatement).
+fn checkHasReturnInWhile(stmt AstNode) Bool {
+    let body Array<AstNode>: stmt.body
+    return checkHasReturnAt(body, 0)
+}
+
+// checkHasReturnAt — linear scan starting at index i.
+// Returns true on the first NODE_RETURN found, or when a NODE_WHILE body
+// transitively contains a return. Mirrors CheckHasReturn (lines 228–237).
+fn checkHasReturnAt(stmts Array<AstNode>, i Int64) Bool {
+    return match i.lt(stmts.len()) {
+        true: match stmts.at(i).kind {
+            NODE_RETURN: true
+            NODE_WHILE: match checkHasReturnInWhile(stmts.at(i)) {
+                true: true
+                _: checkHasReturnAt(stmts, i.add(1))
+            }
+            _: checkHasReturnAt(stmts, i.add(1))
+        }
+        _: false
+    }
+}
+
+// checkHasReturn — public entry point; starts from index 0.
+fn checkHasReturn(stmts Array<AstNode>) Bool {
+    return checkHasReturnAt(stmts, 0)
+}
+
+// ─── analyzeFunctionDeclaration ───────────────────────────────────────────────
+
+// analyzeFunctionDeclaration — mirrors SemanticAnalyzer.AnalyzeFunctionDeclaration
+// (SemanticAnalyzer.cs:201–226).
+//
+// stmt fields accessed (all undeclared in type AstNode; typed intermediates used):
+//   stmt.name        String  — function name for error messages
+//   stmt.returnType  String  — determines void vs non-void; set on state.currentReturnType
+//   stmt.params      Array<Param> — injected as symbols in the fresh function scope
+//   stmt.body        Array<AstNode> — analyzed via analysis.analyzeStatements
+//
+// Module-scope constants and symbols remain visible inside the function through
+// the parent-chain traversal in lookupSymbol: the new function scope's parent
+// index points to the module scope, so lookupSymbolAt walks up naturally.
+//
+// Nested NODE_FN_DECL inside a function body falls through to _:{} in
+// analysis.analyzeStatement — nested functions are not used in Suru programs.
+fn analyzeFunctionDeclaration(state AnalyzerState, stmt AstNode) AnalyzerState {
+    // 1. Save outer context for restoration after body analysis.
+    let savedReturnType String: state.currentReturnType
+    let savedInsideFunction Int64: state.insideFunction
+
+    // 2. Push a fresh scope so param names and body locals are scoped to this function.
+    semantic.pushScope(state)
+
+    // 3. Inject parameters as symbols in the new scope.
+    //    Uses typed intermediate to ensure correct array dispatch (same as registerFnDecl).
+    let params Array<Param>: stmt.params
+    let pi Int64: 0
+    while pi.lt(params.len()) {
+        let p Param: params.at(pi)
+        semantic.declareSymbol(state, p.name, p.typeName)
+        pi: pi.add(1)
+    }
+
+    // 4. Set function context; analyzeReturnStatement reads currentReturnType to
+    //    detect bare returns in non-void functions.
+    let returnType String: stmt.returnType
+    state.currentReturnType: returnType
+    state.insideFunction: 1
+
+    // 5. Analyze the function body using the Stage-13c statement analyzer.
+    let body Array<AstNode>: stmt.body
+    analysis.analyzeStatements(state, body)
+
+    // 6. Non-void functions must have at least one reachable return path.
+    //    exit() counting is deferred to Stage 13e (expression analysis required).
+    let isVoid Bool: returnType.equals("void") or returnType.equals("")
+    match not isVoid and not checkHasReturn(body) {
+        true: semantic.addError(state, "function '".append(stmt.name).append("' has no return statement"))
+        _: {}
+    }
+
+    // 7. Pop function scope and restore context for the enclosing scope.
+    semantic.popScope(state)
+    state.currentReturnType: savedReturnType
+    state.insideFunction: savedInsideFunction
+
+    return state
+}

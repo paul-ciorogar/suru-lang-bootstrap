@@ -1,6 +1,7 @@
 include "suru-semantic.suru" as semantic
 include "suru-semantic-passes.suru" as passes
 include "suru-semantic-stmts.suru" as analysis
+include "suru-semantic-fns.suru" as fns
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -295,6 +296,117 @@ fn testWhileSequentialAllowSameName() Bool {
     return errors.len().equals(0)
 }
 
+// ─── Stage 13d: function declaration analysis unit tests ─────────────────────
+//
+// Each test builds a minimal NODE_FN_DECL AstNode and calls
+// fns.analyzeFunctionDeclaration directly. Extra struct fields (name, returnType,
+// params, body) are added via array.add() to bypass ValidateStructLiteralFields
+// (only enforced on let-bound struct literals with a declared type annotation).
+
+// fn_void_no_return_no_error: void function with empty body produces no error.
+fn testFnVoidNoReturnNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "doStuff", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_nonvoid_has_return_no_error: Int64 function with a return statement — no error.
+fn testFnNonvoidHasReturnNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_RETURN, hasValue: true, value: {} })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_nonvoid_missing_return_reports_error: Int64 function with empty body — 1 error.
+fn testFnNonvoidMissingReturnReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// fn_bare_return_in_nonvoid_reports_error: Int64 function with a bare return (no value)
+// reports exactly 1 error. checkHasReturn finds the NODE_RETURN so the "missing return"
+// error is suppressed; only the "bare return in non-void" error fires.
+fn testFnBareReturnInNonvoidReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// fn_params_visible_in_scope: param x is declared in the function scope so an
+// assignment to x inside the body produces no "undefined variable" error.
+fn testFnParamsVisibleInScope() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_ASSIGN, name: "x" })
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_scope_not_leaked: a let declared inside the function body is not visible
+// via lookupSymbol after analyzeFunctionDeclaration returns (scope was popped).
+fn testFnScopeNotLeaked() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_LET, name: "inner", typeName: "Int64" })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let result String: semantic.lookupSymbol(state, "inner")
+    return result.equals("")
+}
+
+// fn_return_in_while_counts: return inside a while body satisfies the non-void
+// return requirement — checkHasReturn recurses into NODE_WHILE bodies.
+fn testFnReturnInWhileCounts() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let whileBody Array<AstNode>: []
+    whileBody.add({ kind: NODE_RETURN, hasValue: true, value: {} })
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_WHILE, body: whileBody })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 fn main(args Array<String>) {
@@ -324,4 +436,13 @@ fn main(args Array<String>) {
     passOrFail("return_bare_in_void_no_error",      testReturnBareInVoidNoError())
     passOrFail("while_scopes_do_not_leak",          testWhileScopesDoNotLeak())
     passOrFail("while_sequential_allow_same_name",  testWhileSequentialAllowSameName())
+
+    // Stage 13d — function declaration analysis
+    passOrFail("fn_void_no_return_no_error",              testFnVoidNoReturnNoError())
+    passOrFail("fn_nonvoid_has_return_no_error",          testFnNonvoidHasReturnNoError())
+    passOrFail("fn_nonvoid_missing_return_reports_error", testFnNonvoidMissingReturnReportsError())
+    passOrFail("fn_bare_return_in_nonvoid_reports_error", testFnBareReturnInNonvoidReportsError())
+    passOrFail("fn_params_visible_in_scope",              testFnParamsVisibleInScope())
+    passOrFail("fn_scope_not_leaked",                     testFnScopeNotLeaked())
+    passOrFail("fn_return_in_while_counts",               testFnReturnInWhileCounts())
 }

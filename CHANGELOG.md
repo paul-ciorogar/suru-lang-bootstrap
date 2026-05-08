@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13d — Semantic Analyzer in Suru: Function Declaration Analysis
+
+New file `tests/fixtures/suru-semantic/suru-semantic-fns.suru` implements function body
+analysis for the Suru semantic analyzer written in Suru.
+
+- `checkHasReturnInWhile` / `checkHasReturnAt` / `checkHasReturn` — mutually recursive
+  scan that finds `NODE_RETURN` in a statement list, recursing into `NODE_WHILE` bodies.
+  Mirrors `CheckHasReturn` in SemanticAnalyzer.cs:228–237.
+- `analyzeFunctionDeclaration` — pushes a fresh scope, injects parameters as symbols,
+  sets `state.currentReturnType` and `state.insideFunction`, analyzes the body via
+  `analysis.analyzeStatements`, checks non-void functions have at least one return path,
+  then pops the scope and restores context. Mirrors `AnalyzeFunctionDeclaration` in
+  SemanticAnalyzer.cs:201–226. Module-scope constants remain visible through parent-chain
+  traversal without re-injection.
+- 7 unit tests added to `main.suru` and `IRSuruSemanticTests.cs`: void no-return,
+  non-void with return, missing return error, bare-return-in-non-void error, params
+  visible in scope, scope not leaked after analysis, return-in-while counts.
+- 127/127 tests green.
+
 ### Module system — Chunk 6: remove `Namespaces`/`ExternalFunctions`; eliminate `ns.fn` rename
 
 `Module.Namespaces` and `Module.ExternalFunctions` are removed; all callers now use
