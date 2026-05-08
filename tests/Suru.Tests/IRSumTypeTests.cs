@@ -203,3 +203,25 @@ public class IRSumTypeTests
         return SemanticAnalyzer.Analyze(module);
     }
 }
+
+// Stage 13i: variant creation and field access codegen.
+//
+// Verifies that `let c Circle: { radius: 2283 }` wraps the struct in
+// @suru_variant_create, and that `c.radius` unwraps via @suru_variant_inner
+// before calling @suru_find_field to load the field.
+[Collection("IntegrationIR")]
+public class IRSumTypeIntegrationTests(CompiledFixturesIR fixtures) : IntegrationTestBase, IDisposable
+{
+    private readonly string _exe = fixtures.GetExecutable("sum-types");
+    private bool _testPassed;
+
+    [Fact]
+    public void SumType_VariantCreation_FieldAccess_PrintsRadius()
+    {
+        var output = Run(_exe);
+        Assert.Equal("2283\n", output);
+        _testPassed = true;
+    }
+
+    public void Dispose() { if (!_testPassed) fixtures.RecordFailure("sum-types"); }
+}

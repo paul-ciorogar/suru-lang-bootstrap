@@ -140,8 +140,18 @@ public sealed partial class IRCodeGenerator
                 break;
 
             // let name NamedType: { fields } — thread type name into EmitStructLiteral.
+            // When the annotation names a variant, wrap the emitted struct in suru_variant_create.
             case LetStatement { Name: var name, Value: StructLiteralExpression sl, TypeAnnotation: var slAnn }:
                 var (slVal, slType) = EmitStructLiteral(sl, slAnn.Name);
+                if (IsVariant(slAnn.Name))
+                {
+                    var parent  = FindParentSumType(slAnn.Name)!;
+                    var idx     = GetVariantIndex(slAnn.Name, parent);
+                    _runtimeDecls.AddVariantCreate();
+                    var wrapTmp = NextTmp();
+                    _funcs.AppendLine($"  {wrapTmp} = call ptr @suru_variant_create(i64 {idx}, ptr {slVal})");
+                    slVal = wrapTmp;
+                }
                 var slPtr = $"%{name}.{_tmp++}";
                 _funcs.AppendLine($"  {slPtr} = alloca ptr");
                 _funcs.AppendLine($"  store ptr {slVal}, ptr {slPtr}");

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13i — Variant Creation & Field Access Codegen
+
+Wires codegen so user code can create variant values and transparently access their fields. Given `type Circle: { radius Int64 }` and `type Shape: Circle, Square`, writing `let c Circle: { radius: 2283 }` now wraps the struct in `@suru_variant_create`, and `c.radius` unwraps via `@suru_variant_inner` before `@suru_find_field`.
+
+- **`src/Suru.Compiler/Codegen/IRCodeGenerator.cs`**: Added three helpers — `IsVariant(string)` (checks if a type name is a variant in any declared sum type), `FindParentSumType(string)` (returns the owning `SumTypeDeclaration`), `GetVariantIndex(string, SumTypeDeclaration)` (0-based index within the variant list).
+
+- **`src/Suru.Compiler/Codegen/IRFunctionCodeGenerator.cs`**: `EmitStmt` struct-literal `let` case now checks `IsVariant(slAnn.Name)`; when true, calls `@suru_variant_create(i64 idx, ptr structPtr)` and stores the wrapper ptr. The variable's `SuruType` stays `NamedType("Circle")` so downstream `EmitFieldAccess` can detect the variant via `IsVariant`.
+
+- **`src/Suru.Compiler/Codegen/IRStructCodeGenerator.cs`**: `EmitFieldAccess` now checks if the receiver type is a variant; when true, calls `@suru_variant_inner(ptr)` to extract the inner struct pointer before calling `@suru_find_field`. No change to the rest of the field-load path — scalar unboxing and ptr returns work unchanged.
+
+- **`tests/fixtures/sum-types/main.suru`** (new): Integration fixture — declares `Circle`, `Square`, and `Shape`; creates a `Circle` value; accesses `.radius`; prints the result.
+
+- **`tests/Suru.Tests/IRSumTypeTests.cs`**: Added `IRSumTypeIntegrationTests` class (Stage 13i) with one integration test asserting `c.radius.toString()` prints `2283`.
+
+No semantic changes needed: `Circle` is already a `TypeDeclaration`, so `InferType` for `var.field` resolves field types correctly without modification. All 150 tests pass.
+
+---
+
+### Stage 13h — Sum Type Runtime Module
+
+Adds the `suru_variant.ll` LLVM IR runtime module, compiled to `suru_variant.o` and linked unconditionally into every Suru binary. No user-visible language changes — this is the infrastructure that Stages 13i and 13j will build on for variant creation, field access, and match dispatch.
+
+- **`src/Suru.Compiler/Codegen/SuruVariantRuntime.cs`** (new): `SuruRuntime.GenerateVariantRuntime()` returns the full LLVM IR text for `suru_variant.ll`. Defines `%suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner }` (24 bytes) and four functions: `@suru_variant_create(i64, ptr) ptr`, `@suru_variant_tag(ptr) i64`, `@suru_variant_inner(ptr) ptr`, `@suru_variant_drop(ptr) void`. `suru_variant_drop` frees only the 24-byte wrapper; inner struct drop is the caller's responsibility.
+
+- **`src/Suru.Compiler/Codegen/SuruRuntimeDeclarations.cs`**: Added four idempotent `AddVariant*` methods (`AddVariantCreate`, `AddVariantTag`, `AddVariantInner`, `AddVariantDrop`) following the existing bool-flag declare-stub pattern.
+
+- **`src/Suru.Compiler/Compiler.cs`**: `CompileIR()` now generates and compiles five runtime modules (was four); `suru_variant` added to the tuple array. Updated comments to reflect five modules.
+
+- **`src/Suru.Compiler/Codegen/SuruRuntime.cs`**: Updated file-header comment to list tag=7 in the type_tag enum, add `suru_variant.ll` module description, and reference `SuruVariantRuntime.cs` in the partial class split list.
+
+All 149 existing tests pass unchanged.
+
+---
+
 ### Stage 13g — Sum Type Declarations
 
 Adds the `type Shape: Circle, Square` sum type declaration syntax end-to-end through the AST, parser, type system, semantic analyzer, and include resolver. No codegen yet — this stage makes sum type declarations a first-class compile-time construct for Stage 13h–13j to build on.

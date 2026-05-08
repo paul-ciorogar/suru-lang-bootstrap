@@ -235,6 +235,23 @@ public sealed partial class IRCodeGenerator
         return (tmp, SuruType.Bool);
     }
 
+    // ─── Variant helpers ─────────────────────────────────────────────────────
+
+    // Returns true when typeName is a variant name in any declared sum type.
+    private bool IsVariant(string typeName)
+        => _module.SumTypeDeclarations.Values.Any(s => s.Variants.Contains(typeName));
+
+    // Returns the SumTypeDeclaration whose Variants list contains variantName, or null.
+    private SumTypeDeclaration? FindParentSumType(string variantName)
+        => _module.SumTypeDeclarations.Values.FirstOrDefault(s => s.Variants.Contains(variantName));
+
+    // Returns the 0-based index of variantName within parent.Variants.
+    private static int GetVariantIndex(string variantName, SumTypeDeclaration parent)
+        => Enumerable.Range(0, parent.Variants.Count)
+                     .First(i => parent.Variants[i] == variantName);
+
+    // ─── Variable load ───────────────────────────────────────────────────────
+
     // Load from a local alloca or module-level constant global.
     private (string val, SuruType type) EmitLoad(string name)
     {

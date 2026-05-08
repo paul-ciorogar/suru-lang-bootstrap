@@ -117,8 +117,18 @@ partial class IRCodeGenerator
 
     private (string val, SuruType type) EmitFieldAccess(FieldAccessExpression fa)
     {
-        var (headPtr, _) = EmitValue(fa.Receiver);
-        var node         = EmitFindFieldCall(headPtr, fa.FieldName);
+        var (headPtr, receiverType) = EmitValue(fa.Receiver);
+
+        // Variant: unwrap to inner struct ptr before field lookup.
+        if (receiverType is SuruType.NamedType nt && IsVariant(nt.Name))
+        {
+            _runtimeDecls.AddVariantInner();
+            var innerTmp = NextTmp();
+            _funcs.AppendLine($"  {innerTmp} = call ptr @suru_variant_inner(ptr {headPtr})");
+            headPtr = innerTmp;
+        }
+
+        var node = EmitFindFieldCall(headPtr, fa.FieldName);
 
         var valGep = NextTmp();
         var raw    = NextTmp();
