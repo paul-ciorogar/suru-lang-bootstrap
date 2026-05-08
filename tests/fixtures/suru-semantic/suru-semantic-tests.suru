@@ -1,0 +1,424 @@
+// Stage 13a–13d unit test functions — extracted from main.suru so that the
+// main.suru driver can stay under 500 lines while Stage 13e tests are added.
+//
+// All test functions return Bool and are called from main.suru via the `t`
+// namespace alias. This file includes the semantic analyzer files directly so
+// the same namespace aliases are available inside the test bodies.
+//
+// IMPORTANT: After Stage 13e wired expression analysis into all statement
+// analyzers, test AstNodes for statements that carry an expression (NODE_LET,
+// NODE_ASSIGN, NODE_WHILE) must include the relevant fields so analyzeExpr is
+// not called on a null pointer:
+//
+//   NODE_LET    → include `value: { kind: NODE_INT_LIT }`
+//   NODE_ASSIGN → include `value: { kind: NODE_INT_LIT }`
+//   NODE_WHILE  → include `condition: { kind: NODE_BOOL_LIT, value: true }`
+//   NODE_RETURN { hasValue: true } → `value: { kind: NODE_INT_LIT }`
+//     (inferType returns "Int64" for NODE_INT_LIT; matches "Int64" return type
+//      so no spurious return-type-mismatch error is produced)
+
+include "suru-semantic.suru" as semantic
+include "suru-semantic-passes.suru" as passes
+include "suru-semantic-stmts.suru" as analysis
+include "suru-semantic-fns.suru" as fns
+
+// ─── Stage 13a: scope-chain unit tests ───────────────────────────────────────
+
+// push_pop_roundtrip: push 3 scopes beyond the module scope, verify count, pop all, verify restored.
+fn testPushPopRoundtrip() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    let s1 Array<Scope>: state.scopes
+    let afterPush Bool: s1.len().equals(4)
+    semantic.popScope(state)
+    semantic.popScope(state)
+    semantic.popScope(state)
+    let s2 Array<Scope>: state.scopes
+    let afterPop Bool: s2.len().equals(1)
+    return afterPush and afterPop
+}
+
+// lookup_finds_nearest: same name declared in outer and inner scope; inner wins.
+fn testLookupFindsNearest() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.declareSymbol(state, "x", "Int64")
+    semantic.pushScope(state)
+    semantic.declareSymbol(state, "x", "Bool")
+    let result String: semantic.lookupSymbol(state, "x")
+    return result.equals("Bool")
+}
+
+// lookup_walks_parent: symbol declared only in module scope; visible from deep nested scope.
+fn testLookupWalksParent() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.declareSymbol(state, "y", "String")
+    semantic.pushScope(state)
+    semantic.pushScope(state)
+    let result String: semantic.lookupSymbol(state, "y")
+    return result.equals("String")
+}
+
+// lookup_returns_empty: undeclared name yields "".
+fn testLookupReturnsEmpty() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let result String: semantic.lookupSymbol(state, "undeclared")
+    return result.equals("")
+}
+
+// add_error: two addError calls produce two entries in state.errors.
+fn testAddError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.addError(state, "error one")
+    semantic.addError(state, "error two")
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(2)
+}
+
+// ─── Stage 13b: declaration pre-pass unit tests ───────────────────────────────
+//
+// AstNode only declares { kind Int64 }. Extra fields (name, params, returnType)
+// are added in struct literals passed directly to array.add() — these skip
+// ValidateStructLiteralFields because they are call arguments, not let bindings.
+
+// resolveTypeName_builtin: built-in types are known; unknown names are not.
+fn testResolveTypeNameBuiltin() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let r1 Bool: passes.resolveTypeName(state, "Int64")
+    let r2 Bool: passes.resolveTypeName(state, "Bool")
+    let r3 Bool: passes.resolveTypeName(state, "String")
+    let r4 Bool: passes.resolveTypeName(state, "Float64")
+    let r5 Bool: passes.resolveTypeName(state, "Array")
+    let r6 Bool: passes.resolveTypeName(state, "Unknown")
+    return r1 and r2 and r3 and r4 and r5 and not r6
+}
+
+// resolveTypeName_user_declared: a name added to state.typeNames resolves correctly.
+fn testResolveTypeNameUserDeclared() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let typeNames Array<String>: state.typeNames
+    typeNames.add("MyType")
+    let r1 Bool: passes.resolveTypeName(state, "MyType")
+    let r2 Bool: passes.resolveTypeName(state, "OtherType")
+    return r1 and not r2
+}
+
+// collectTypeDecls_registers: two NODE_TYPE_DECL stmts populate typeNames; no errors.
+fn testCollectTypeDeclsRegisters() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Bar" })
+    stmts.add({ kind: NODE_LET, name: "x" })
+    passes.collectTypeDeclarations(state, stmts)
+    let typeNames Array<String>: state.typeNames
+    let errors Array<AnalysisError>: state.errors
+    return typeNames.len().equals(2) and errors.len().equals(0)
+}
+
+// collectTypeDecls_duplicate: duplicate name produces exactly one error.
+fn testCollectTypeDeclsDuplicate() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Foo" })
+    passes.collectTypeDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// collectFnDecls_registers: one NODE_FN_DECL with valid param type registers cleanly.
+fn testCollectFnDeclsRegisters() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Bool" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let functions Array<FunctionSig>: state.functions
+    let errors Array<AnalysisError>: state.errors
+    return functions.len().equals(1) and errors.len().equals(0)
+}
+
+// collectFnDecls_duplicate: same function name twice produces exactly one error.
+fn testCollectFnDeclsDuplicate() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// collectFnDecls_unknown_param: unknown param type produces exactly one error.
+fn testCollectFnDeclsUnknownParam() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "UnknownType" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void" })
+    passes.collectFunctionDeclarations(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// runPrePasses_cross_pass: type declared in pass1 is valid as param type in pass2.
+fn testRunPrePassesCrossPass() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let params Array<Param>: []
+    params.add({ name: "p", typeName: "Point" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_TYPE_DECL, name: "Point" })
+    stmts.add({ kind: NODE_FN_DECL, name: "usePoint", params: params, returnType: "void" })
+    passes.runPrePasses(state, stmts)
+    let typeNames Array<String>: state.typeNames
+    let functions Array<FunctionSig>: state.functions
+    let errors Array<AnalysisError>: state.errors
+    return typeNames.len().equals(1) and functions.len().equals(1) and errors.len().equals(0)
+}
+
+// ─── Stage 13c: statement analysis unit tests ────────────────────────────────
+//
+// NODE_LET nodes include `value: { kind: NODE_INT_LIT }` so analyzeLetStatement
+// can call analyzeExpr on the RHS without dereferencing null.
+// NODE_ASSIGN nodes include `value: { kind: NODE_INT_LIT }` for the same reason.
+// NODE_WHILE nodes include `condition: { kind: NODE_BOOL_LIT, value: true }`.
+
+// let_declares_symbol: after analyzing a NODE_LET, the name is visible via lookupSymbol.
+fn testLetDeclaresSymbol() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let result String: semantic.lookupSymbol(state, "x")
+    return result.equals("Int64")
+}
+
+// let_duplicate_in_scope_reports_error: declaring the same name twice in one scope gives 1 error.
+fn testLetDuplicateInScopeReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// let_unknown_type_reports_error: unknown type annotation produces exactly one error.
+fn testLetUnknownTypeReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "UnknownType", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// let_at_module_scope_is_constant: let at module scope (scopes.len()==1) adds to state.constants.
+fn testLetAtModuleScopeIsConstant() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "PI", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let constants Array<String>: state.constants
+    return constants.len().equals(1)
+}
+
+// assign_undefined_reports_error: assigning to an undeclared variable gives one error.
+fn testAssignUndefinedReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_ASSIGN, name: "x", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// assign_constant_reports_error: reassigning a module-level constant gives one error.
+fn testAssignConstantReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "MAX", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    stmts.add({ kind: NODE_ASSIGN, name: "MAX", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// assign_valid_no_error: assigning to a declared mutable (non-module-scope) variable is clean.
+// An extra pushScope simulates being inside a function so the let is not marked constant.
+fn testAssignValidNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    semantic.pushScope(state)
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_LET, name: "x", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    stmts.add({ kind: NODE_ASSIGN, name: "x", value: { kind: NODE_INT_LIT } })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// return_bare_in_nonvoid_reports_error: bare return when currentReturnType is non-void gives 1 error.
+fn testReturnBareInNonvoidReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    state.currentReturnType: "Int64"
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// return_bare_in_void_no_error: bare return in void function context produces no error.
+fn testReturnBareInVoidNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    state.currentReturnType: "void"
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// while_scopes_do_not_leak: variable declared inside a while body is not visible after the loop.
+fn testWhileScopesDoNotLeak() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_LET, name: "inner", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_WHILE, condition: { kind: NODE_BOOL_LIT, value: true }, body: body })
+    analysis.analyzeStatements(state, stmts)
+    let result String: semantic.lookupSymbol(state, "inner")
+    return result.equals("")
+}
+
+// while_sequential_allow_same_name: same variable name in two successive while bodies is fine.
+fn testWhileSequentialAllowSameName() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body1 Array<AstNode>: []
+    body1.add({ kind: NODE_LET, name: "i", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    let body2 Array<AstNode>: []
+    body2.add({ kind: NODE_LET, name: "i", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_WHILE, condition: { kind: NODE_BOOL_LIT, value: true }, body: body1 })
+    stmts.add({ kind: NODE_WHILE, condition: { kind: NODE_BOOL_LIT, value: true }, body: body2 })
+    analysis.analyzeStatements(state, stmts)
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// ─── Stage 13d: function declaration analysis unit tests ─────────────────────
+//
+// NODE_RETURN { hasValue: true } uses `value: { kind: NODE_INT_LIT }` so that
+// analyzeReturnStatement can call analyzeExpr and inferType on it.
+// inferType returns "Int64" for NODE_INT_LIT, matching the "Int64" return type
+// in the test functions, so no spurious return-type-mismatch error is produced.
+// NODE_WHILE within fn bodies also include condition field.
+
+// fn_void_no_return_no_error: void function with empty body produces no error.
+fn testFnVoidNoReturnNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "doStuff", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_nonvoid_has_return_no_error: Int64 function with a return statement — no error.
+fn testFnNonvoidHasReturnNoError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_RETURN, hasValue: true, value: { kind: NODE_INT_LIT } })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_nonvoid_missing_return_reports_error: Int64 function with empty body — 1 error.
+fn testFnNonvoidMissingReturnReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// fn_bare_return_in_nonvoid_reports_error: Int64 function with a bare return (no value)
+// reports exactly 1 error. checkHasReturn finds the NODE_RETURN so the "missing return"
+// error is suppressed; only the "bare return in non-void" error fires.
+fn testFnBareReturnInNonvoidReportsError() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_RETURN, hasValue: false, value: {} })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(1)
+}
+
+// fn_params_visible_in_scope: param x is declared in the function scope so an
+// assignment to x inside the body produces no "undefined variable" error.
+fn testFnParamsVisibleInScope() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_ASSIGN, name: "x", value: { kind: NODE_INT_LIT } })
+    let params Array<Param>: []
+    params.add({ name: "x", typeName: "Int64" })
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}
+
+// fn_scope_not_leaked: a let declared inside the function body is not visible
+// via lookupSymbol after analyzeFunctionDeclaration returns (scope was popped).
+fn testFnScopeNotLeaked() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_LET, name: "inner", typeName: "Int64", value: { kind: NODE_INT_LIT } })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "void", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let result String: semantic.lookupSymbol(state, "inner")
+    return result.equals("")
+}
+
+// fn_return_in_while_counts: return inside a while body satisfies the non-void
+// return requirement — checkHasReturn recurses into NODE_WHILE bodies.
+fn testFnReturnInWhileCounts() Bool {
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let whileBody Array<AstNode>: []
+    whileBody.add({ kind: NODE_RETURN, hasValue: true, value: { kind: NODE_INT_LIT } })
+    let body Array<AstNode>: []
+    body.add({ kind: NODE_WHILE, condition: { kind: NODE_BOOL_LIT, value: true }, body: whileBody })
+    let params Array<Param>: []
+    let stmts Array<AstNode>: []
+    stmts.add({ kind: NODE_FN_DECL, name: "myFn", params: params, returnType: "Int64", body: body })
+    passes.runPrePasses(state, stmts)
+    fns.analyzeFunctionDeclaration(state, stmts.at(0))
+    let errors Array<AnalysisError>: state.errors
+    return errors.len().equals(0)
+}

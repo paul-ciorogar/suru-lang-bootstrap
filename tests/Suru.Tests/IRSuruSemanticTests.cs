@@ -1,6 +1,6 @@
 namespace Suru.Tests;
 
-// Verifies Stage-13a through Stage-13d milestones for the Suru semantic analyzer
+// Verifies Stage-13a through Stage-13e milestones for the Suru semantic analyzer
 // written in Suru itself (tests/fixtures/suru-semantic/).
 //
 // Stage 13a (suru-semantic.suru): scope-chain data structures — AnalyzerState,
@@ -17,6 +17,10 @@ namespace Suru.Tests;
 // Stage 13d (suru-semantic-fns.suru): function declaration analysis — checkHasReturn,
 // analyzeFunctionDeclaration (push scope, inject params, set return type, analyze body,
 // verify return paths, restore context).
+//
+// Stage 13e (suru-semantic-exprs.suru): expression analysis — inferType (literal/var-ref/
+// method-call/call inference), analyzeExpr (undefined variable, arity, namespace alias
+// heuristic, recursive sub-expression analysis); wired into all statement analyzers.
 //
 // main.suru runs all unit tests and prints "PASS: <name>" or "FAIL: <name>" for each.
 [Collection("IntegrationIR")]
@@ -73,6 +77,22 @@ public class IRSuruSemanticTests(CompiledFixturesIR fixtures) : IntegrationTestB
         Assert.Contains(lines, l => l.Contains("PASS: fn_params_visible_in_scope"));
         Assert.Contains(lines, l => l.Contains("PASS: fn_scope_not_leaked"));
         Assert.Contains(lines, l => l.Contains("PASS: fn_return_in_while_counts"));
+
+        // Stage 13e — expression analysis
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_bool_literal"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_int_literal"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_float_literal"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_str_literal"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_var_ref"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_method_call_equals"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_method_call_len"));
+        Assert.Contains(lines, l => l.Contains("PASS: inferType_unknown_returns_empty"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_undefined_var_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_defined_var_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_builtin_type_var_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_fn_arity_mismatch_reports_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_fn_arity_correct_no_error"));
+        Assert.Contains(lines, l => l.Contains("PASS: analyzeExpr_builtin_arity_error"));
 
         _testPassed = true;
     }

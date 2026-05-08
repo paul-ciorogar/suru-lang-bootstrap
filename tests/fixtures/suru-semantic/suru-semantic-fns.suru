@@ -31,14 +31,34 @@ fn checkHasReturnInWhile(stmt AstNode) Bool {
     return checkHasReturnAt(body, 0)
 }
 
+// isExitCall — true when a NODE_EXPR_STMT contains a direct call to exit().
+// Extracted so checkHasReturnAt can use it as a single expression in a match
+// expression arm (match expression arms cannot contain block bodies).
+// Typed intermediate `innerName String` is required: `innerExpr.name` returns
+// NamedType("") (name is not declared in AstNode), so without the annotation
+// the codegen emits an icmp eq i64 comparison instead of suru_string_equals.
+fn isExitCall(stmt AstNode) Bool {
+    let innerExpr AstNode: stmt.expr
+    let innerName String: innerExpr.name
+    return match innerExpr.kind {
+        NODE_CALL: innerName.equals("exit")
+        _: false
+    }
+}
+
 // checkHasReturnAt — linear scan starting at index i.
-// Returns true on the first NODE_RETURN found, or when a NODE_WHILE body
-// transitively contains a return. Mirrors CheckHasReturn (lines 228–237).
+// Returns true on NODE_RETURN, NODE_WHILE that transitively contains a return,
+// or NODE_EXPR_STMT that is a direct call to exit().
+// Mirrors CheckHasReturn (SemanticAnalyzer.cs:253–268).
 fn checkHasReturnAt(stmts Array<AstNode>, i Int64) Bool {
     return match i.lt(stmts.len()) {
         true: match stmts.at(i).kind {
             NODE_RETURN: true
             NODE_WHILE: match checkHasReturnInWhile(stmts.at(i)) {
+                true: true
+                _: checkHasReturnAt(stmts, i.add(1))
+            }
+            NODE_EXPR_STMT: match isExitCall(stmts.at(i)) {
                 true: true
                 _: checkHasReturnAt(stmts, i.add(1))
             }

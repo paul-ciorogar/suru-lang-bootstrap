@@ -1,0 +1,343 @@
+// Stage 13e — Semantic Analyzer in Suru: Expression Analysis
+//
+// Implements inferType and analyzeExpr, the expression-analysis layer that
+// completes the semantic analyzer. Mirrors InferType and AnalyzeExpression
+// in SemanticAnalyzer.cs:456–517 and 285–451.
+//
+// Key design decisions:
+//   - inferType returns a String type name ("Bool", "Int64", etc.) or "" for
+//     unknown/context-dependent types (array/struct literals, field access).
+//     This matches the C# "return null" path, which suppresses type-mismatch
+//     errors rather than reporting false positives.
+//
+//   - Namespace alias detection: when a NODE_METHOD_CALL receiver is a
+//     NODE_VAR_REF whose name is not in scope and not a static builtin type
+//     receiver (Int32/Int64/Float64/Bool), the receiver is assumed to be a
+//     namespace alias (e.g. `semantic.pushScope`). The call is silently
+//     skipped — no "undefined variable" error and no arity check — matching
+//     the C# `_module.Aliases.Contains(nsRef.Name)` guard.
+//
+//   - All function names are unique across the semantic analyzer files to
+//     avoid LLVM link-time symbol collisions (each .suru compiles to its own .o).
+
+include "suru-semantic.suru" as semantic
+include "suru-semantic-passes.suru" as passes
+
+// ─── Function signature lookup helpers ───────────────────────────────────────
+
+// lookupFnReturnTypeAt — linear search from index i.
+// Returns the returnType of the matching FunctionSig, or "" when not found.
+fn lookupFnReturnTypeAt(fns Array<FunctionSig>, name String, i Int64) String {
+    return match i.lt(fns.len()) {
+        true: match fns.at(i).name.equals(name) {
+            true: fns.at(i).returnType
+            _: lookupFnReturnTypeAt(fns, name, i.add(1))
+        }
+        _: ""
+    }
+}
+
+// lookupFnReturnType — returns the declared return type of a user function,
+// or "" if no such function exists in state.functions.
+fn lookupFnReturnType(state AnalyzerState, name String) String {
+    let fns Array<FunctionSig>: state.functions
+    return lookupFnReturnTypeAt(fns, name, 0)
+}
+
+// getParamCountOf — returns the param count for one FunctionSig.
+// Extracted helper so lookupFnParamCountAt can use it in a match expression arm
+// (match expression arms must be single expressions, not block bodies).
+fn getParamCountOf(sig FunctionSig) Int64 {
+    let pts Array<String>: sig.paramTypes
+    return pts.len()
+}
+
+// lookupFnParamCountAt — linear search from index i.
+// Returns the param count of the matching FunctionSig, or -1 when not found.
+fn lookupFnParamCountAt(fns Array<FunctionSig>, name String, i Int64) Int64 {
+    return match i.lt(fns.len()) {
+        true: match fns.at(i).name.equals(name) {
+            true: getParamCountOf(fns.at(i))
+            _: lookupFnParamCountAt(fns, name, i.add(1))
+        }
+        _: -1
+    }
+}
+
+// lookupFnParamCount — returns the param count for a user function,
+// or -1 if not registered in state.functions.
+fn lookupFnParamCount(state AnalyzerState, name String) Int64 {
+    let fns Array<FunctionSig>: state.functions
+    return lookupFnParamCountAt(fns, name, 0)
+}
+
+// ─── Type inference ───────────────────────────────────────────────────────────
+
+// inferTypeFromMethod — infers the return type of a method call expression
+// from the method name and, for "from" conversions, the static receiver name.
+// Mirrors the MethodCallExpression cases in InferType (SemanticAnalyzer.cs:483–506).
+//
+// Returns "" for unknown or context-dependent results (e.g. "at" on arrays,
+// "slice" — element type propagation requires type declarations table).
+fn inferTypeFromMethod(state AnalyzerState, expr AstNode) String {
+    let m String: expr.methodName
+    // Int64-returning methods
+    match m {
+        "compare": { return "Int64" }
+        "len":     { return "Int64" }
+        "ord":     { return "Int64" }
+        _: {}
+    }
+    // Bool-returning methods
+    match m {
+        "equals": { return "Bool" }
+        "lt":     { return "Bool" }
+        "gt":     { return "Bool" }
+        "lte":    { return "Bool" }
+        "gte":    { return "Bool" }
+        _: {}
+    }
+    // String-returning methods
+    match m.equals("toString") {
+        true: { return "String" }
+        _: {}
+    }
+    // Type conversion: X.from(...) where X is a static builtin receiver name.
+    match m.equals("from") {
+        true: {
+            let rcv AstNode: expr.receiver
+            match rcv.kind {
+                NODE_VAR_REF: {
+                    let rcvName String: rcv.name
+                    match rcvName.equals("Int32")   { true: { return "Int32"   } _: {} }
+                    match rcvName.equals("Int64")   { true: { return "Int64"   } _: {} }
+                    match rcvName.equals("Float64") { true: { return "Float64" } _: {} }
+                }
+                _: {}
+            }
+            return ""
+        }
+        _: {}
+    }
+    // Unknown method — return "" (no false-positive type assertion).
+    return ""
+}
+
+// inferTypeFromFirstArm — returns the type of the first match arm body,
+// or "" when the arms array is empty. Used by inferType for NODE_MATCH.
+fn inferTypeFromFirstArm(state AnalyzerState, arms Array<AstNode>) String {
+    return match arms.len().gt(0) {
+        true: inferType(state, arms.at(0).body)
+        _: ""
+    }
+}
+
+// inferType — infers the type of an expression node as a String type name.
+// Returns "" for unknowns rather than reporting errors (callers suppress
+// checks when the type is empty, matching the C# `null` convention).
+//
+// Mirrors InferType in SemanticAnalyzer.cs:456–517.
+fn inferType(state AnalyzerState, expr AstNode) String {
+    match expr.kind {
+        NODE_BOOL_LIT:  { return "Bool"    }
+        NODE_INT_LIT:   { return "Int64"   }
+        NODE_FLOAT_LIT: { return "Float64" }
+        NODE_STR_LIT:   { return "String"  }
+        NODE_VAR_REF: {
+            // Return the declared type name from the scope chain, or "" if undeclared
+            // (e.g. a builtin type receiver like Int64 — caller decides).
+            return semantic.lookupSymbol(state, expr.name)
+        }
+        NODE_UNARY:  { return "Bool" }
+        NODE_BINARY: { return "Bool" }
+        NODE_METHOD_CALL: { return inferTypeFromMethod(state, expr) }
+        NODE_CALL: {
+            let name String: expr.name
+            // readFile is the only builtin whose return type is non-void and inferrable.
+            match name.equals("readFile") { true: { return "String" } _: {} }
+            // User-defined functions: look up return type in registered sigs.
+            return lookupFnReturnType(state, name)
+        }
+        NODE_MATCH: {
+            // Type of a match expression is the type of the first arm body.
+            let arms Array<AstNode>: expr.arms
+            return inferTypeFromFirstArm(state, arms)
+        }
+        _: {}
+    }
+    // Array/struct literals, field access, and unrecognised kinds → unknown.
+    return ""
+}
+
+// ─── Expression recursion helpers ─────────────────────────────────────────────
+
+// analyzeExprAt — iterates an Array<AstNode> from index i, calling analyzeExpr
+// on each element. Uses a match statement (not `return match`) so the true arm
+// can contain multiple statements without a block-body-in-expression-position issue.
+fn analyzeExprAt(state AnalyzerState, nodes Array<AstNode>, i Int64) AnalyzerState {
+    match i.lt(nodes.len()) {
+        true: {
+            analyzeExpr(state, nodes.at(i))
+            analyzeExprAt(state, nodes, i.add(1))
+        }
+        _: {}
+    }
+    return state
+}
+
+// analyzeMatchArmsAt — iterates match arms from index i.
+// For each non-wildcard arm: analyzes the pattern expression (variable
+// references in patterns must be in scope). Always analyzes the arm body.
+fn analyzeMatchArmsAt(state AnalyzerState, arms Array<AstNode>, i Int64) AnalyzerState {
+    match i.lt(arms.len()) {
+        true: {
+            let arm AstNode: arms.at(i)
+            let isWildcard Bool: arm.isWildcard
+            match not isWildcard {
+                true: {
+                    let pat AstNode: arm.pattern
+                    analyzeExpr(state, pat)
+                }
+                _: {}
+            }
+            let body AstNode: arm.body
+            analyzeExpr(state, body)
+            analyzeMatchArmsAt(state, arms, i.add(1))
+        }
+        _: {}
+    }
+    return state
+}
+
+// ─── Expression analysis ──────────────────────────────────────────────────────
+
+// isBuiltinTypeName — true for the static type-receiver names that appear as
+// NODE_VAR_REF without being declared in scope (e.g. Int64.from, Bool.toString).
+fn isBuiltinTypeName(name String) Bool {
+    return name.equals("Int32") or name.equals("Int64") or name.equals("Float64") or name.equals("Bool") or name.equals("String") or name.equals("Array")
+}
+
+// analyzeExpr — analyzes one expression node, mutating state.errors for any
+// semantic violations found. Recurses into sub-expressions.
+//
+// Mirrors AnalyzeExpression in SemanticAnalyzer.cs:285–451.
+//
+// Namespace alias heuristic: a NODE_METHOD_CALL whose receiver is a NODE_VAR_REF
+// not in scope and not a static builtin type is treated as a namespace call
+// (e.g. `semantic.makeAnalyzerState()`). The receiver is silently skipped — no
+// "undefined variable" error and no arity check — because the Suru semantic
+// analyzer does not have access to the module's alias map at runtime.
+fn analyzeExpr(state AnalyzerState, expr AstNode) AnalyzerState {
+    match expr.kind {
+        NODE_VAR_REF: {
+            let name String: expr.name
+            let inScope Bool: not semantic.lookupSymbol(state, name).equals("")
+            match not isBuiltinTypeName(name) and not inScope {
+                true: semantic.addError(state, "undefined variable '".append(name).append("'"))
+                _: {}
+            }
+        }
+
+        NODE_METHOD_CALL: {
+            let rcv AstNode: expr.receiver
+            match rcv.kind {
+                NODE_VAR_REF: {
+                    let rcvName String: rcv.name
+                    let isStaticRcv Bool: rcvName.equals("Int32") or rcvName.equals("Int64") or rcvName.equals("Float64") or rcvName.equals("Bool")
+                    let rcvInScope Bool: not semantic.lookupSymbol(state, rcvName).equals("")
+                    // If receiver is not in scope and not a static builtin → namespace alias;
+                    // skip to avoid false "undefined variable" errors.
+                    match not isStaticRcv and not rcvInScope {
+                        true: {}
+                        _: {
+                            analyzeExpr(state, rcv)
+                            let args Array<AstNode>: expr.args
+                            analyzeExprAt(state, args, 0)
+                        }
+                    }
+                }
+                _: {
+                    analyzeExpr(state, rcv)
+                    let args Array<AstNode>: expr.args
+                    analyzeExprAt(state, args, 0)
+                }
+            }
+        }
+
+        NODE_CALL: {
+            let name String: expr.name
+            let args Array<AstNode>: expr.args
+            let argCount Int64: args.len()
+            // Check arity for known 1-argument builtins.
+            let is1ArgBuiltin Bool: name.equals("printLn") or name.equals("printError") or name.equals("exit") or name.equals("readFile") or name.equals("clone") or name.equals("drop")
+            match is1ArgBuiltin and not argCount.equals(1) {
+                true: semantic.addError(state, "'".append(name).append("' expects exactly 1 argument"))
+                _: {}
+            }
+            // writeFile expects 2 arguments.
+            match name.equals("writeFile") and not argCount.equals(2) {
+                true: semantic.addError(state, "'writeFile' expects exactly 2 arguments")
+                _: {}
+            }
+            // User-defined functions: check arity against registered signature.
+            let paramCount Int64: lookupFnParamCount(state, name)
+            match not is1ArgBuiltin and not name.equals("writeFile") and paramCount.gte(0) and not argCount.equals(paramCount) {
+                true: semantic.addError(state, "function '".append(name).append("' called with ").append(argCount.toString()).append(" argument(s), expected ").append(paramCount.toString()))
+                _: {}
+            }
+            // Always analyze args regardless of arity result.
+            analyzeExprAt(state, args, 0)
+        }
+
+        NODE_MATCH: {
+            let cond AstNode: expr.condition
+            analyzeExpr(state, cond)
+            let condType String: inferType(state, cond)
+            // Only report invalid condition type when we can definitively infer it
+            // (non-empty) and it is not one of the four allowed match condition types.
+            let isValidCondType Bool: condType.equals("") or condType.equals("Bool") or condType.equals("Int64") or condType.equals("Float64") or condType.equals("String")
+            match not isValidCondType {
+                true: semantic.addError(state, "match condition must be Bool, Int64, Float64, or String, got ".append(condType))
+                _: {}
+            }
+            let arms Array<AstNode>: expr.arms
+            analyzeMatchArmsAt(state, arms, 0)
+        }
+
+        NODE_FIELD_ACCESS: {
+            let rcv AstNode: expr.receiver
+            analyzeExpr(state, rcv)
+        }
+
+        NODE_ARRAY_LIT: {
+            let elems Array<AstNode>: expr.elems
+            analyzeExprAt(state, elems, 0)
+        }
+
+        NODE_STRUCT_LIT: {
+            let fields Array<AstNode>: expr.fields
+            analyzeExprAt(state, fields, 0)
+        }
+
+        NODE_STRUCT_FIELD: {
+            let val AstNode: expr.value
+            analyzeExpr(state, val)
+        }
+
+        NODE_UNARY: {
+            let operand AstNode: expr.operand
+            analyzeExpr(state, operand)
+        }
+
+        NODE_BINARY: {
+            let left AstNode: expr.left
+            analyzeExpr(state, left)
+            let right AstNode: expr.right
+            analyzeExpr(state, right)
+        }
+
+        // Literals, unknown kinds, and other nodes that need no recursive analysis.
+        _: {}
+    }
+    return state
+}

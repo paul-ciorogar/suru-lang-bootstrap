@@ -142,7 +142,7 @@ public sealed partial class IRCodeGenerator
             // let name NamedType: { fields } — thread type name into EmitStructLiteral.
             case LetStatement { Name: var name, Value: StructLiteralExpression sl, TypeAnnotation: var slAnn }:
                 var (slVal, slType) = EmitStructLiteral(sl, slAnn.Name);
-                var slPtr = $"%{name}.addr";
+                var slPtr = $"%{name}.{_tmp++}";
                 _funcs.AppendLine($"  {slPtr} = alloca ptr");
                 _funcs.AppendLine($"  store ptr {slVal}, ptr {slPtr}");
                 _vars[name] = (slPtr, slType);
@@ -177,7 +177,7 @@ public sealed partial class IRCodeGenerator
                     }
                 }
                 var llvmT    = LlvmType(letType);
-                var allocPtr = $"%{name}.addr";
+                var allocPtr = $"%{name}.{_tmp++}";
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
                 _funcs.AppendLine($"  store {llvmT} {letVal}, ptr {allocPtr}");
                 _vars[name] = (allocPtr, annType);

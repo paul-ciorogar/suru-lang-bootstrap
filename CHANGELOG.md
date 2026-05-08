@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13e — Semantic Analyzer in Suru: Expression Analysis
+
+Completes the expression-analysis layer of the Suru-written semantic analyzer. All
+statement analyzers now recurse into expressions; inferType + analyzeExpr are fully
+implemented in the new `suru-semantic-exprs.suru` file.
+
+- **`suru-semantic-exprs.suru`** (new, ~300 lines): `inferType` returns a String type
+  name for literals (Bool/Int64/Float64/String), variable refs (scope lookup), method
+  calls (equals/lt/gt/etc. → Bool; len/compare/ord → Int64; toString → String; from →
+  receiver type), call expressions (readFile → String; user functions via state.functions),
+  and match expressions (first arm type); returns `""` for unknown/context-dependent types,
+  mirroring the C# `null` convention to suppress false-positive type errors.
+  `analyzeExpr` recurses into all composite expression kinds: undefined variable check
+  (builtin type names exempt); arity check for 1-arg builtins (printLn/printError/exit/
+  readFile/clone/drop), writeFile (2 args), and user functions via state.functions;
+  namespace alias heuristic (METHOD_CALL receiver not in scope + not static builtin →
+  silently skip, avoids false "undefined variable" errors for calls like
+  `semantic.makeAnalyzerState()`); match condition type check; NODE_FIELD_ACCESS,
+  NODE_ARRAY_LIT, NODE_STRUCT_LIT, NODE_UNARY, NODE_BINARY sub-expression recursion.
+
+- **`suru-semantic-stmts.suru`** (updated): wired `exprs.analyzeExpr` into every statement
+  analyzer; `analyzeReturnStatement` now performs return-type mismatch checking when both
+  the inferred return type and the declared type are known; `analyzeWhileStatement` now
+  checks the condition is Bool; `analyzeStatement` gained a `NODE_EXPR_STMT` case.
+
+- **`suru-semantic-fns.suru`** (updated): `checkHasReturnAt` extended with a
+  `NODE_EXPR_STMT` case that calls `isExitCall` to detect `exit()` terminal statements;
+  `isExitCall` extracted as a separate helper to keep match expression arm bodies
+  single-expression.
+
+- **`suru-semantic-tests.suru`** (new, ~450 lines): all Stage 13a–13d test functions
+  extracted from `main.suru` to keep `main.suru` under 500 lines; test AstNodes updated
+  to include `value: { kind: NODE_INT_LIT }` and `condition: { kind: NODE_BOOL_LIT }`
+  fields required after expression analysis was wired into statement analyzers.
+
+- **`main.suru`** (rewritten): thin driver including all semantic files; 14 Stage 13e unit
+  tests for `inferType` (each literal kind, var ref, method call equals/len, unknown →
+  empty) and `analyzeExpr` (undefined var, defined var no error, builtin type receiver no
+  error, arity mismatch, correct arity, builtin arity error).
+
+- **Codegen fix** (`IRFunctionCodeGenerator.cs`): duplicate `let` variable names in sibling
+  match arm scopes generated duplicate LLVM alloca names (`%name.addr`). Fixed by using
+  `_tmp++` counter for all let-binding alloca names — each alloca now has a unique name
+  independent of the variable's Suru name.
+
+- **Codegen fix** (`suru-semantic-fns.suru`): chaining `.equals()` directly on an
+  undeclared field access (e.g. `innerExpr.name.equals("exit")`) caused the codegen to
+  emit `icmp eq i64` instead of `suru_string_equals` because the field's type was
+  `NamedType("")`. Fixed by using a typed intermediate `let innerName String: innerExpr.name`
+  to force correct String dispatch.
+
+- 128/128 tests green.
+
+---
+
 ### Match statement block bodies
 
 `match` at statement level now supports `{ stmt* }` block arm bodies, enabling early returns, `let` bindings, and multi-statement logic inside arms.
