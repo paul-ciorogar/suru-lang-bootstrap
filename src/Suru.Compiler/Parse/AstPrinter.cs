@@ -86,6 +86,10 @@ public static class AstPrinter
                     sb.AppendLine($"{indent}  Field [{field}] Type [{type}]");
                 break;
 
+            case SumTypeDeclaration std:
+                sb.AppendLine($"{indent}SumType [{std.Name}] Variants: [{string.Join(", ", std.Variants)}]");
+                break;
+
             case MatchStatement ms:
             {
                 sb.AppendLine($"{indent}MatchStatement [{ms.Arms.Count} arms]");

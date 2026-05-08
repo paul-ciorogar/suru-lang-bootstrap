@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13g — Sum Type Declarations
+
+Adds the `type Shape: Circle, Square` sum type declaration syntax end-to-end through the AST, parser, type system, semantic analyzer, and include resolver. No codegen yet — this stage makes sum type declarations a first-class compile-time construct for Stage 13h–13j to build on.
+
+- **`src/Suru.Compiler/Parse/Ast/SumTypeDeclaration.cs`** (new): `SumTypeDeclaration(string Name, IReadOnlyList<string> Variants)` AST node, a `Statement` subclass. Each variant name must refer to a declared struct type.
+
+- **`src/Suru.Compiler/Types/SuruType.cs`**: Added `SumType` sealed class (`Tag = 7`, carries `Name` and `Variants`). Fixed `VoidType.GetHashCode()` from `7` → `8` to avoid collision. Updated file-header comment.
+
+- **`src/Suru.Compiler/Types/SuruTypeSystem.cs`**: `TryResolve` accepts an optional `sumTypeDecls` parameter; returns `SuruType.SumType` for declared sum type names.
+
+- **`src/Suru.Compiler/Parse/Parser.cs`**: `ParseTypeDeclaration()` now dispatches on the token after `:` — `{` → struct (existing path), identifier → sum type (new `ParseSumTypeBody` helper). `_Parse()` builds `SumTypeDeclarations` alongside `TypeDeclarations`.
+
+- **`src/Suru.Compiler/Parse/Ast/Module.cs`**: Added `SumTypeDeclarations: IReadOnlyDictionary<string, SumTypeDeclaration>`.
+
+- **`src/Suru.Compiler/Semantic/SemanticAnalyzer.cs`**: Sum type registration pass between struct and function passes. `RegisterSumTypeDeclaration` validates: no duplicates, non-empty variant list, all variant names are declared struct types. `ResolveTypeAnnotation` passes `_sumTypeDeclarations` to `TryResolve`. `AnalyzeStatement` has a no-op case for `SumTypeDeclaration`.
+
+- **`src/Suru.Compiler/IncludeResolver.cs`**: `MergeModule` handles `SumTypeDeclaration` nodes (deduplication + registry registration). `BuildSumTypeDict` helper. Merged module includes `SumTypeDeclarations`. Sum types prepended before struct types in merged statement list.
+
+- **`src/Suru.Compiler/Parse/Ast/ExternalDeclarationRegistry.cs`**: `Register()` now accepts `SumTypeDeclaration`.
+
+- **`src/Suru.Compiler/Parse/AstPrinter.cs`**: Prints `SumType [Name] Variants: [A, B]`.
+
+- **`tests/Suru.Tests/IRSumTypeTests.cs`** (new, 13 tests): parser tests (2-variant, single-variant, module index, struct unaffected, both indexed), AstPrinter test, semantic tests (valid, duplicate name, unknown variant, all unknown, sum type as param type, type system resolution, TypeTag value).
+
+- 149/149 tests green.
+
+---
+
 ### Stage 13f — Semantic Cross-Validation CLI
 
 Completes the Suru-implemented semantic analyzer by wiring it into a CLI tool (`suru-check`) and cross-validating its output against the C# `SemanticAnalyzer` on a shared corpus of valid and invalid programs.

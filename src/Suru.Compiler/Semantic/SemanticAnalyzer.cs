@@ -13,6 +13,7 @@ public sealed class SemanticAnalyzer
     // null = void or unknown return type (suppress return-path checks); non-null = known non-void type
     private SuruType? _currentReturnType = null;
     private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
+    private readonly Dictionary<string, SumTypeDeclaration> _sumTypeDeclarations = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -30,6 +31,9 @@ public sealed class SemanticAnalyzer
         _scopes.Enter(); // module scope — lives for the entire analysis pass
         foreach (var stmt in _module.Statements)
             if (stmt is TypeDeclaration td) RegisterTypeDeclaration(td);
+        // Sum type pass runs after struct types so variant name validation can succeed.
+        foreach (var stmt in _module.Statements)
+            if (stmt is SumTypeDeclaration std) RegisterSumTypeDeclaration(std);
         foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration fn) RegisterFunction(fn);
         foreach (var stmt in _module.Statements)
@@ -48,6 +52,26 @@ public sealed class SemanticAnalyzer
             return;
         }
         _typeDeclarations[td.Name] = td;
+    }
+
+    private void RegisterSumTypeDeclaration(SumTypeDeclaration std)
+    {
+        if (_sumTypeDeclarations.ContainsKey(std.Name))
+        {
+            _errors.Add($"{_module.SourcePath}: type '{std.Name}' is already declared");
+            return;
+        }
+        if (std.Variants.Count == 0)
+        {
+            _errors.Add($"{_module.SourcePath}: sum type '{std.Name}' must have at least one variant");
+            return;
+        }
+        foreach (var variant in std.Variants)
+        {
+            if (!_typeDeclarations.ContainsKey(variant))
+                _errors.Add($"{_module.SourcePath}: sum type '{std.Name}' variant '{variant}' is not a declared struct type");
+        }
+        _sumTypeDeclarations[std.Name] = std;
     }
 
     private void RegisterFunction(FunctionDeclaration fn)
@@ -84,7 +108,7 @@ public sealed class SemanticAnalyzer
     // Resolves a type annotation to a SuruType.
     // Returns null when the name is unrecognised (caller reports the error).
     private SuruType? ResolveTypeAnnotation(TypeAnnotation ann)
-        => SuruTypeSystem.TryResolve(ann, _typeDeclarations);
+        => SuruTypeSystem.TryResolve(ann, _typeDeclarations, _sumTypeDeclarations);
 
     // ─── Statement analysis ───────────────────────────────────────────────────
 
@@ -93,6 +117,7 @@ public sealed class SemanticAnalyzer
         switch (stmt)
         {
             case TypeDeclaration:
+            case SumTypeDeclaration:
                 break;
 
             case FunctionDeclaration fn:

@@ -4,7 +4,7 @@ namespace Suru.Compiler.Types;
 //
 // TypeTag ordinals at offset 0 of every heap object must stay in sync with the
 // unified enum in the four suru_*.ll runtime modules: 0=Bool 1=Int32 2=Int64
-// 3=Float64 4=Struct/Named 5=Array 6=String.
+// 3=Float64 4=Struct/Named 5=Array 6=String 7=SumType.
 //
 // All types are fully resolved at compile time — no unknown/sentinel variants.
 public abstract class SuruType
@@ -93,6 +93,22 @@ public abstract class SuruType
         public override string ToString() => BuiltinNames.String;
     }
 
+    // Sum type — declared via `type Shape: Circle, Square`.
+    // Each variant name refers to a declared struct type (TypeDeclaration).
+    // Carries the variant list so downstream passes (13h+) can compute variant indices
+    // without re-querying the module's SumTypeDeclarations dictionary.
+    public sealed class SumType : SuruType
+    {
+        public const int Tag = 7;
+        public string Name { get; }
+        public IReadOnlyList<string> Variants { get; }
+        public SumType(string name, IReadOnlyList<string> variants) { Name = name; Variants = variants; }
+        public override int TypeTag => Tag;
+        public override bool Equals(object? obj) => obj is SumType st && Name == st.Name;
+        public override int GetHashCode() => HashCode.Combine(Tag, Name);
+        public override string ToString() => Name;
+    }
+
     // Represents the absence of a return value (void functions).
     // VoidType has no TypeTag — void values are never heap-allocated.
     // In LLVM IR, void Suru functions emit `ret ptr null` as a codegen convention.
@@ -101,7 +117,7 @@ public abstract class SuruType
         public override int TypeTag =>
             throw new InvalidOperationException("VoidType has no type_tag");
         public override bool Equals(object? obj) => obj is VoidType;
-        public override int GetHashCode() => 7;
+        public override int GetHashCode() => 8; // 7 is taken by SumType.Tag
         public override string ToString() => BuiltinNames.Void;
     }
 }

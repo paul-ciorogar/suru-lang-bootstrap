@@ -46,14 +46,17 @@ internal static class IncludeResolver
             module.Statements.OfType<LetStatement>().Select(ls => ls.Name));
         var seenTypes = new HashSet<string>(
             module.Statements.OfType<TypeDeclaration>().Select(td => td.Name));
+        var seenSumTypes = new HashSet<string>(
+            module.Statements.OfType<SumTypeDeclaration>().Select(std => std.Name));
         // (path, unqualifiedName) pairs — guards against duplicate function declarations
         // in the merged statement list when multiple includes share transitive dependencies.
         var seenFns = new HashSet<(string, string)>();
 
-        // Constants and types are prepended so they precede function declarations —
+        // Constants, types, and sum types are prepended so they precede function declarations —
         // SemanticAnalyzer's first pass registers types before it enters any function body.
         var pendingConstants = new List<Statement>();
         var pendingTypes     = new List<Statement>();
+        var pendingSumTypes  = new List<Statement>();
 
         foreach (var directive in directives)
         {
@@ -90,20 +93,23 @@ internal static class IncludeResolver
             CollectPaths(fullPath, included, seenPaths, paths);
             MergeModule(included, directive.NamespaceName, fullPath,
                 mergedStatements, seenFns,
-                seenConstants, seenTypes, pendingConstants, pendingTypes,
+                seenConstants, seenTypes, seenSumTypes,
+                pendingConstants, pendingTypes, pendingSumTypes,
                 registry);
         }
 
-        // Prepend types then constants so both appear before all function declarations.
-        mergedStatements.InsertRange(0, pendingTypes.Concat(pendingConstants));
+        // Prepend sum types, then struct types, then constants — all before function declarations.
+        // Sum types depend on struct types so struct types go first.
+        mergedStatements.InsertRange(0, pendingSumTypes.Concat(pendingTypes).Concat(pendingConstants));
 
         return new Module
         {
-            SourcePath          = module.SourcePath,
-            Statements          = mergedStatements,
-            IncludedSourcePaths = paths,
-            TypeDeclarations    = BuildTypeDict(mergedStatements),
-            Aliases             = aliases,
+            SourcePath           = module.SourcePath,
+            Statements           = mergedStatements,
+            IncludedSourcePaths  = paths,
+            TypeDeclarations     = BuildTypeDict(mergedStatements),
+            SumTypeDeclarations  = BuildSumTypeDict(mergedStatements),
+            Aliases              = aliases,
             ExternalDeclarationRegistry = registry,
         };
     }
@@ -168,8 +174,8 @@ internal static class IncludeResolver
     private static void MergeModule(
         Module included, string ns, string fullPath,
         List<Statement> statements, HashSet<(string, string)> seenFns,
-        HashSet<string> seenConstants, HashSet<string> seenTypes,
-        List<Statement> pendingConstants, List<Statement> pendingTypes,
+        HashSet<string> seenConstants, HashSet<string> seenTypes, HashSet<string> seenSumTypes,
+        List<Statement> pendingConstants, List<Statement> pendingTypes, List<Statement> pendingSumTypes,
         ExternalDeclarationRegistry registry)
     {
         foreach (var stmt in included.Statements)
@@ -210,11 +216,18 @@ internal static class IncludeResolver
             }
             else if (stmt is TypeDeclaration td && seenTypes.Add(td.Name))
             {
-                // Type declarations produce no LLVM IR — they are purely compile-time
+                // Struct type declarations produce no LLVM IR — they are purely compile-time
                 // metadata. Merging them lets the importing file use the type name in
                 // annotations, struct literals, and function signatures.
                 pendingTypes.Add(stmt);
                 registry.Register(fullPath, td);
+            }
+            else if (stmt is SumTypeDeclaration std && seenSumTypes.Add(std.Name))
+            {
+                // Sum type declarations are also purely compile-time metadata (codegen from 13h).
+                // Merged so the importing file can use the sum type name in annotations.
+                pendingSumTypes.Add(stmt);
+                registry.Register(fullPath, std);
             }
         }
     }
@@ -225,6 +238,15 @@ internal static class IncludeResolver
         var dict = new Dictionary<string, TypeDeclaration>();
         foreach (var td in stmts.OfType<TypeDeclaration>())
             dict[td.Name] = td;
+        return dict;
+    }
+
+    private static Dictionary<string, SumTypeDeclaration> BuildSumTypeDict(IEnumerable<Statement> stmts)
+    {
+        // Duplicates are intentionally allowed; the semantic analyzer reports them.
+        var dict = new Dictionary<string, SumTypeDeclaration>();
+        foreach (var std in stmts.OfType<SumTypeDeclaration>())
+            dict[std.Name] = std;
         return dict;
     }
 }

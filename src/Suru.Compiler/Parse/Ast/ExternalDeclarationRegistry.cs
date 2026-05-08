@@ -2,7 +2,7 @@ namespace Suru.Compiler.Parse.Ast;
 
 // Canonical lookup table for all imported declarations in one compiled module.
 // Key: (absoluteSourcePath, unqualifiedName) — independent of any namespace alias.
-// Covers FunctionDeclaration, TypeDeclaration, and scalar LetStatement constants.
+// Covers FunctionDeclaration, TypeDeclaration, SumTypeDeclaration, and scalar LetStatement constants.
 internal sealed class ExternalDeclarationRegistry
 {
     private readonly Dictionary<(string, string), Statement> _map = new();
@@ -12,9 +12,10 @@ internal sealed class ExternalDeclarationRegistry
     {
         var name = decl switch
         {
-            FunctionDeclaration fn => fn.Name,
-            TypeDeclaration td    => td.Name,
-            LetStatement ls       => ls.Name,
+            FunctionDeclaration fn  => fn.Name,
+            TypeDeclaration td      => td.Name,
+            SumTypeDeclaration std  => std.Name,
+            LetStatement ls         => ls.Name,
             _ => throw new ArgumentException(
                 $"Unsupported declaration kind: {decl.GetType().Name}")
         };

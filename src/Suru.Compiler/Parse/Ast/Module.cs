@@ -11,11 +11,17 @@ public sealed class Module
     // chains reach it.
     public IReadOnlyList<string> IncludedSourcePaths { get; init; } = [];
 
-    // Named type declarations indexed by type name (e.g. "Point" → TypeDeclaration).
-    // Populated by the parser from top-level `type` statements and preserved through
-    // include resolution so the semantic analyzer and codegen can look up field layouts.
+    // Named struct type declarations indexed by type name (e.g. "Point" → TypeDeclaration).
+    // Populated by the parser from top-level `type Name: { ... }` statements and preserved
+    // through include resolution so the semantic analyzer and codegen can look up field layouts.
     public IReadOnlyDictionary<string, TypeDeclaration> TypeDeclarations { get; init; }
         = new Dictionary<string, TypeDeclaration>();
+
+    // Named sum type declarations indexed by type name (e.g. "Shape" → SumTypeDeclaration).
+    // Populated by the parser from top-level `type Name: Variant, ...` statements.
+    // Consumed by the semantic analyzer for variant validation; codegen support from Stage 13h.
+    public IReadOnlyDictionary<string, SumTypeDeclaration> SumTypeDeclarations { get; init; }
+        = new Dictionary<string, SumTypeDeclaration>();
 
     // Alias-independent canonical maps populated by IncludeResolver.
     internal AliasMap                      Aliases                      { get; init; } = new();

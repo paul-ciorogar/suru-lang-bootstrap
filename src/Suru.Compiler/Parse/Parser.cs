@@ -38,17 +38,22 @@ public sealed class Parser
 
         _ = Consume(TokenKind.Eof);
 
-        // Build type declaration index; duplicates are intentionally allowed here —
-        // the semantic analyzer reports the error. Last definition wins in the dict.
+        // Build type declaration indexes; duplicates are intentionally allowed here —
+        // the semantic analyzer reports the error. Last definition wins in each dict.
         var typeDecls = new Dictionary<string, TypeDeclaration>();
         foreach (var td in stmts.OfType<TypeDeclaration>())
             typeDecls[td.Name] = td;
 
+        var sumTypeDecls = new Dictionary<string, SumTypeDeclaration>();
+        foreach (var std in stmts.OfType<SumTypeDeclaration>())
+            sumTypeDecls[std.Name] = std;
+
         return new Module
         {
-            SourcePath       = _tokens.SourcePath,
-            Statements       = stmts,
-            TypeDeclarations = typeDecls,
+            SourcePath           = _tokens.SourcePath,
+            Statements           = stmts,
+            TypeDeclarations     = typeDecls,
+            SumTypeDeclarations  = sumTypeDecls,
         };
     }
 
@@ -175,13 +180,30 @@ public sealed class Parser
         return new IncludeDirective(pathToken.Text, nsToken.Text);
     }
 
-    // Parses:  type Name: { field Type [, field Type]* }
-    // Fields may be separated by commas or newlines (the lexer discards whitespace,
-    // so newline-separated fields just have no comma token between them).
-    private TypeDeclaration ParseTypeDeclaration()
+    // Parses either a struct type or a sum type declaration, dispatching on what
+    // follows the colon:
+    //   type Point: { x Int64, y Int64 }    → TypeDeclaration (struct)
+    //   type Shape: Circle, Square           → SumTypeDeclaration (sum type)
+    private Statement ParseTypeDeclaration()
     {
         var nameToken = Consume(TokenKind.Identifier);
         Consume(TokenKind.Colon);
+
+        if (_tokens.Current().Kind == TokenKind.LeftBrace)
+            return ParseStructTypeBody(nameToken.Text);
+
+        if (_tokens.Current().Kind == TokenKind.Identifier)
+            return ParseSumTypeBody(nameToken.Text);
+
+        throw new ParseException(
+            $"Expected '{{' (struct) or identifier (sum type) after 'type {nameToken.Text}:'");
+    }
+
+    // Parses:  { field Type [, field Type]* }
+    // Fields may be separated by commas or newlines (the lexer discards whitespace,
+    // so newline-separated fields just have no comma token between them).
+    private TypeDeclaration ParseStructTypeBody(string name)
+    {
         Consume(TokenKind.LeftBrace);
 
         var fields = new List<(string Field, TypeAnnotation Type)>();
@@ -194,7 +216,18 @@ public sealed class Parser
         }
 
         Consume(TokenKind.RightBrace);
-        return new TypeDeclaration(nameToken.Text, fields);
+        return new TypeDeclaration(name, fields);
+    }
+
+    // Parses:  VariantA, VariantB [, VariantC]*
+    // Variants are comma-separated struct type names on a single logical line.
+    private SumTypeDeclaration ParseSumTypeBody(string name)
+    {
+        var variants = new List<string>();
+        variants.Add(Consume(TokenKind.Identifier).Text);
+        while (CanConsume(TokenKind.Comma))
+            variants.Add(Consume(TokenKind.Identifier).Text);
+        return new SumTypeDeclaration(name, variants);
     }
 
     private FunctionDeclaration ParseFunctionDeclaration()
