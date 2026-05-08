@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13f — Semantic Cross-Validation CLI
+
+Completes the Suru-implemented semantic analyzer by wiring it into a CLI tool (`suru-check`) and cross-validating its output against the C# `SemanticAnalyzer` on a shared corpus of valid and invalid programs.
+
+- **`tests/fixtures/suru-check/main.suru`** (new): reads a `.suru` source file, runs the full pipeline (Suru lexer → Suru parser → pre-passes → statement analysis including function bodies), prints each error on its own line prefixed with the source path (`<path>: <message>` format matching C# output), and exits with code 1 on any error. `analyzeModuleStatement` extends `stmts.analyzeStatement` with a `NODE_FN_DECL` arm that calls `fns.analyzeFunctionDeclaration`.
+
+- **`tests/fixtures/suru-check/corpus/`** (new): five include-free test programs used for cross-validation:
+  - `valid_hello.suru`, `valid_functions.suru` — valid programs; expect 0 errors
+  - `invalid_undef_var.suru`, `invalid_dup_type.suru`, `invalid_arity.suru` — each triggers one known semantic error
+
+- **`tests/Suru.Tests/IRSuruSemanticCrossValidationTests.cs`** (new, 8 tests): cross-validates the Suru and C# analyzers. Valid corpus tests assert exit code 0 and empty output. Invalid corpus tests assert exit code 1, a keyword match on the output, and that the error message body (path prefix stripped) matches C# output exactly. Milestone tests assert no false positives on `arithmetic`, `fibonacci`, and `control-flow` fixtures.
+
+- **Bug fix** (`suru-semantic-fns.suru`): `isExitCall` accessed `innerExpr.name` unconditionally before checking the node kind. For `NODE_MATCH` nodes (no `name` field), `suru_find_field` would walk off the end of the linked list and segfault. Fixed by moving the `name` access inside the `NODE_CALL` arm of a match statement so it is only evaluated when the field is guaranteed to exist.
+
+- **Enhancement** (`suru-semantic-passes.suru`): `isBuiltinType` extended with `isArrayGeneric` helper that recognises generic array type names like `"Array<Int64>"` (stored as flat strings by the Suru parser) as valid builtin types.
+
+- 136/136 tests green.
+
+---
+
 ### Stage 13e — Semantic Analyzer in Suru: Expression Analysis
 
 Completes the expression-analysis layer of the Suru-written semantic analyzer. All
