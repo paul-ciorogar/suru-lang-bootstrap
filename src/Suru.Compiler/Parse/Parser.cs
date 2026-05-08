@@ -108,7 +108,60 @@ public sealed class Parser
             return new ExpressionStatement(expr);
         }
 
+        // match at statement level → MatchStatement with block-body arms.
+        // match in expression position (let RHS, return value) still goes through
+        // ParsePrimary → MatchExpression.
+        if (Is(TokenKind.Match))
+            return ParseMatchStatement();
+
         return new ExpressionStatement(ParseExpression());
+    }
+
+    // match <cond> { <pattern>: <body> ... }
+    //
+    // Arm body dispatch (backward-compatible):
+    //   { stmts }  — block body (enables early returns, let bindings, etc.)
+    //   }          — empty body (arm is the last one, closes the match)
+    //   <expr>     — single-expression body for backward compat with existing code
+    private MatchStatement ParseMatchStatement()
+    {
+        Consume(TokenKind.Match);
+        var condition = ParseExpression();
+        Consume(TokenKind.LeftBrace);
+
+        var arms = new List<MatchStatementArm>();
+        while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+        {
+            var pattern = ParseMatchPattern();
+            Consume(TokenKind.Colon);
+
+            List<Statement> body;
+            if (Is(TokenKind.LeftBrace))
+            {
+                // Block body: { stmt* }
+                Consume(TokenKind.LeftBrace);
+                body = new List<Statement>();
+                while (IsNot(TokenKind.RightBrace) && IsNot(TokenKind.Eof))
+                    body.Add(ParseStatement());
+                Consume(TokenKind.RightBrace);
+            }
+            else if (Is(TokenKind.RightBrace))
+            {
+                // Bare colon followed immediately by the closing } of the match → empty body.
+                body = [];
+            }
+            else
+            {
+                // Backward-compat: single expression arm body (e.g. printLn(x), 42).
+                body = [new ExpressionStatement(ParseExpression())];
+            }
+
+            arms.Add(new MatchStatementArm(pattern, body));
+            CanConsume(TokenKind.Comma);
+        }
+
+        Consume(TokenKind.RightBrace);
+        return new MatchStatement(condition, arms);
     }
 
     private IncludeDirective ParseIncludeDirective()

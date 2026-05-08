@@ -157,7 +157,7 @@ public sealed partial class IRCodeGenerator
         };
     }
 
-    // Match test chain: scalars arrive as raw values from EmitValue.
+    // Match test chain for expression-context match (MatchExpression).
     private (List<MatchArm> PatternArms, MatchArm? WildcardArm, int N) EmitMatchTestChain(
         MatchExpression match)
     {
@@ -168,6 +168,34 @@ public sealed partial class IRCodeGenerator
         var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
         var missLabel   = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
 
+        EmitPatternComparisons(condVal, condType, patternArms.Select(a => a.Pattern).ToList(), missLabel, n);
+
+        return (patternArms, wildcardArm, n);
+    }
+
+    // Match test chain for statement-context match (MatchStatement).
+    private (List<MatchStatementArm> PatternArms, MatchStatementArm? WildcardArm, int N)
+        EmitMatchStatementTestChain(MatchStatement match)
+    {
+        var (condVal, condType) = EmitValue(match.Condition);
+        int n = _matchCounter++;
+
+        var patternArms = match.Arms.Where(a => a.Pattern != null).ToList();
+        var wildcardArm = match.Arms.FirstOrDefault(a => a.Pattern == null);
+        var missLabel   = wildcardArm != null ? $"match_wildcard_{n}" : $"match_merge_{n}";
+
+        EmitPatternComparisons(condVal, condType, patternArms.Select(a => a.Pattern).ToList(), missLabel, n);
+
+        return (patternArms, wildcardArm, n);
+    }
+
+    // Emits the icmp/fcmp/strcmp comparison chain for a list of pattern expressions.
+    // Each comparison branches to match_arm_{n}_{i} on match or to the next test/missLabel on miss.
+    private void EmitPatternComparisons(
+        string condVal, SuruType condType,
+        IReadOnlyList<Expression?> patterns,
+        string missLabel, int n)
+    {
         string rawCond;
         if (condType is SuruType.StringType)
             rawCond = condVal;
@@ -176,14 +204,14 @@ public sealed partial class IRCodeGenerator
         else
             rawCond = UnboxInt64(condVal);   // NamedType → unbox as i64
 
-        for (int i = 0; i < patternArms.Count; i++)
+        for (int i = 0; i < patterns.Count; i++)
         {
             var cmpTmp = NextTmp();
 
             if (condType is SuruType.StringType)
             {
                 _externals.AddStrcmp();
-                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var (patternVal, _) = EmitValue(patterns[i]!);
                 var condData    = EmitExtractStringData(rawCond);
                 var patternData = EmitExtractStringData(patternVal);
                 var strcmpTmp   = NextTmp();
@@ -192,34 +220,68 @@ public sealed partial class IRCodeGenerator
             }
             else if (condType is SuruType.Float64Type)
             {
-                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var (patternVal, _) = EmitValue(patterns[i]!);
                 _funcs.AppendLine($"  {cmpTmp} = fcmp oeq double {rawCond}, {patternVal}");
             }
             else if (condType is SuruType.NamedType)
             {
-                var (patternVal, patType) = EmitValue(patternArms[i].Pattern!);
+                var (patternVal, patType) = EmitValue(patterns[i]!);
                 var rawPat = IsScalar(patType) ? patternVal : UnboxInt64(patternVal);
                 _funcs.AppendLine($"  {cmpTmp} = icmp eq i64 {rawCond}, {rawPat}");
             }
             else
             {
-                var (patternVal, _) = EmitValue(patternArms[i].Pattern!);
+                var (patternVal, _) = EmitValue(patterns[i]!);
                 _funcs.AppendLine($"  {cmpTmp} = icmp eq {LlvmType(condType)} {rawCond}, {patternVal}");
             }
 
-            var nextLabel = (i + 1 < patternArms.Count)
+            var nextLabel = (i + 1 < patterns.Count)
                 ? $"match_test_{n}_{i + 1}"
                 : missLabel;
 
             _funcs.AppendLine($"  br i1 {cmpTmp}, label %match_arm_{n}_{i}, label %{nextLabel}");
 
-            if (i + 1 < patternArms.Count)
+            if (i + 1 < patterns.Count)
                 _funcs.AppendLine($"match_test_{n}_{i + 1}:");
         }
 
-        if (patternArms.Count == 0)
+        if (patterns.Count == 0)
             _funcs.AppendLine($"  br label %{missLabel}");
+    }
 
-        return (patternArms, wildcardArm, n);
+    // Emits a MatchStatement: arms carry block bodies (IReadOnlyList<Statement>).
+    // _blockOpen is checked before each merge branch so arms ending with return/exit
+    // do not produce a double-terminator in the IR.
+    internal void EmitMatchStatement(MatchStatement stmt)
+    {
+        var (patternArms, wildcardArm, n) = EmitMatchStatementTestChain(stmt);
+
+        for (int i = 0; i < patternArms.Count; i++)
+        {
+            _funcs.AppendLine($"match_arm_{n}_{i}:");
+            _blockOpen = true;
+            foreach (var s in patternArms[i].Body)
+                EmitStmt(s);
+            if (_blockOpen)
+                _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        if (wildcardArm != null)
+        {
+            _funcs.AppendLine($"match_wildcard_{n}:");
+            _blockOpen = true;
+            foreach (var s in wildcardArm.Body)
+                EmitStmt(s);
+            if (_blockOpen)
+                _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+        else
+        {
+            _funcs.AppendLine($"match_wildcard_{n}:");
+            _funcs.AppendLine($"  br label %match_merge_{n}");
+        }
+
+        _funcs.AppendLine($"match_merge_{n}:");
+        _blockOpen = true;
     }
 }

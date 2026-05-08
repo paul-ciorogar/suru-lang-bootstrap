@@ -1,0 +1,37 @@
+fn classify(n Int64) String {
+    match n {
+        0: { return "zero" }
+        1: { return "one" }
+        _: {}
+    }
+    return "many"
+}
+
+fn describeSign(n Int64) String {
+    match n.lt(0) {
+        true: {
+            let msg String: "negative"
+            return msg
+        }
+        _: {}
+    }
+    return "non-negative"
+}
+
+fn voidMatch(flag Bool) {
+    match flag {
+        true: { printLn("yes") }
+        _: { printLn("no") }
+    }
+}
+
+fn main(args Array<String>) {
+    printLn(classify(0))
+    printLn(classify(1))
+    printLn(classify(99))
+    printLn(describeSign(-5))
+    printLn(describeSign(3))
+    voidMatch(true)
+    voidMatch(false)
+    match true { true: printLn("backward-compat"), _: printLn("nope") }
+}

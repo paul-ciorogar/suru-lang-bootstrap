@@ -96,21 +96,34 @@ printLn(not true)         // false
 
 ### Control flow — match
 
-`match` is an expression that tests a condition against a list of arms. Each arm is `pattern: body`. The wildcard `_` catches any unmatched case.
+`match` has two forms depending on context.
 
-Statement form (arms produce side effects):
+**Match statement** — used at statement level; each arm has a `{ }` block body that can contain multiple statements, `let` bindings, and early `return`. An empty arm is written `{}` or left empty after `:`.
 
 ```suru
-let x Bool: true
-match x { true: printLn(1), _: printLn(0) }
+fn classify(n Int64) String {
+    match n {
+        0: { return "zero" }
+        1: {
+            let msg String: "one"
+            return msg
+        }
+        _: {}   // empty arm — falls through to the statement below
+    }
+    return "many"
+}
 ```
 
-Expression form (arms produce a value):
+A match statement satisfies the non-void return requirement when every arm (including the wildcard) contains a return or exit.
+
+**Match expression** — used on the right-hand side of `let`, `return`, or any expression position; each arm body is a single expression that produces the result value.
 
 ```suru
 let y Int64: match x { true: 1, _: 0 }
 printLn(y)
 ```
+
+Both forms use the same arm syntax (`pattern: body`) and support the same pattern types: `Bool` literals, integer/float literals (including negative), string literals, and identifier patterns (variable or constant lookup).
 
 Match on integers (negative literals supported):
 

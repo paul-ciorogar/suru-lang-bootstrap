@@ -86,6 +86,23 @@ public static class AstPrinter
                     sb.AppendLine($"{indent}  Field [{field}] Type [{type}]");
                 break;
 
+            case MatchStatement ms:
+            {
+                sb.AppendLine($"{indent}MatchStatement [{ms.Arms.Count} arms]");
+                PrintExpression(sb, indent + "  ", ms.Condition);
+                foreach (var arm in ms.Arms)
+                {
+                    var patLabel = arm.Pattern is null ? "_" : ArmPatternLabel(arm.Pattern);
+                    sb.AppendLine($"{indent}  Arm [{patLabel}]");
+                    if (arm.Body.Count == 0)
+                        sb.AppendLine($"{indent}    (empty)");
+                    else
+                        foreach (var s in arm.Body)
+                            PrintStatement(sb, indent + "    ", s);
+                }
+                break;
+            }
+
             case ExpressionStatement es:
                 sb.AppendLine($"{indent}ExpressionStatement");
                 PrintExpression(sb, indent + "  ", es.Expression);

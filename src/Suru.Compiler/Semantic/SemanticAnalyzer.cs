@@ -119,9 +119,34 @@ public sealed class SemanticAnalyzer
                 AnalyzeWhileStatement(whileStmt);
                 break;
 
+            case MatchStatement ms:
+                AnalyzeMatchStatement(ms);
+                break;
+
             case ExpressionStatement expr:
                 AnalyzeExpression(expr.Expression);
                 break;
+        }
+    }
+
+    private void AnalyzeMatchStatement(MatchStatement ms)
+    {
+        AnalyzeExpression(ms.Condition);
+        var condType = InferType(ms.Condition);
+        if (condType is not null
+            and not SuruType.BoolType
+            and not SuruType.Int64Type
+            and not SuruType.Float64Type
+            and not SuruType.StringType)
+            _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType}");
+
+        foreach (var arm in ms.Arms)
+        {
+            if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
+            _scopes.Enter();
+            foreach (var bodyStmt in arm.Body)
+                AnalyzeStatement(bodyStmt);
+            _scopes.Exit();
         }
     }
 
@@ -232,6 +257,12 @@ public sealed class SemanticAnalyzer
             if (stmt is ReturnStatement) return true;
             if (stmt is ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.Exit } }) return true;
             if (stmt is WhileStatement ws && CheckHasReturn(ws.Body)) return true;
+            // MatchStatement satisfies the return requirement only when a wildcard arm is
+            // present (exhaustive) and every arm body itself contains a return/exit.
+            if (stmt is MatchStatement ms
+                && ms.Arms.Any(a => a.Pattern == null)
+                && ms.Arms.All(a => CheckHasReturn(a.Body)))
+                return true;
         }
         return false;
     }

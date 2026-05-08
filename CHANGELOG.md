@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Match statement block bodies
+
+`match` at statement level now supports `{ stmt* }` block arm bodies, enabling early returns, `let` bindings, and multi-statement logic inside arms.
+
+- New AST node `MatchStatement` / `MatchStatementArm` (`Parse/Ast/MatchStatement.cs`) — arm body is `IReadOnlyList<Statement>` (empty list for `{}` or bare colon).
+- Parser: `match` at statement level dispatches to `ParseMatchStatement()`; `match` in expression position (let RHS, return, etc.) continues to parse as `MatchExpression` (unchanged).
+- Arm body dispatch: `{` → block, `}` immediately after `:` → empty, otherwise → single expression (backward-compat).
+- Semantic analyzer: `AnalyzeMatchStatement` — same condition-type guard as expression form; each arm body analyzed in a fresh scope. `CheckHasReturn` extended: `MatchStatement` satisfies return requirement when wildcard arm is present and every arm body contains a return/exit.
+- Codegen: `EmitPatternComparisons` extracted as a shared helper; `EmitMatchStatementTestChain` + `EmitMatchStatement` added to `IRMatchCodeGenerator.cs`. Branch terminators guarded by `_blockOpen` to avoid double-terminator IR when an arm body ends with `return`/`exit`.
+- AstPrinter: prints `MatchStatement` with per-arm block contents.
+- New fixture `tests/fixtures/match-statement/` + `IRMatchStatementTests` (128/128 green).
+
 ### Stage 13d — Semantic Analyzer in Suru: Function Declaration Analysis
 
 New file `tests/fixtures/suru-semantic/suru-semantic-fns.suru` implements function body

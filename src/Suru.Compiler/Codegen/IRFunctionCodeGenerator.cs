@@ -86,6 +86,10 @@ public sealed partial class IRCodeGenerator
     {
         switch (stmt)
         {
+            case MatchStatement matchBlockStmt:
+                EmitMatchStatement(matchBlockStmt);
+                break;
+
             case ExpressionStatement { Expression: MatchExpression matchStmt }:
                 EmitMatchAsStatement(matchStmt);
                 break;
