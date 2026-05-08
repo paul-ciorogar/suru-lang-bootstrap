@@ -1,6 +1,6 @@
 # Suru Lang
 
-> A minimalist, library-driven, general-purpose programming language with structural typing and no garbage collection.
+> A minimalist, library-driven, general-purpose programming language with static typing and no garbage collection.
 
 ## Overview
 
@@ -548,7 +548,8 @@ Suru is being implemented in stages toward compiling its own source. Each stage 
 | 12.5g | **Semantic analysis re-enabled** — block-level scope stack; semantic errors on every compile path | ✅ Complete |
 | 13a | **Semantic analyzer data structures in Suru** (`tests/fixtures/suru-semantic/`) — scope chain, symbol lookup, error accumulation | ✅ Complete |
 | 13b | **Declaration pre-passes in Suru** (`suru-semantic-passes.suru`) — type resolution, type/function table population | ✅ Complete |
-| 13c–e | Semantic Analyzer in Suru (statement analysis, function analysis, expression analysis) | ⬜ Planned |
+| 13c–e | **Semantic Analyzer in Suru** (statement, function, and expression analysis) | ✅ Complete |
+| 13f | **Semantic cross-validation CLI** (`tests/fixtures/suru-check/`) — `suru-check` validates Suru programs; output matches C# reference | ✅ Complete |
 | 14 | Code Generator in Suru | ⬜ Planned |
 | 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |
 
@@ -616,6 +617,44 @@ passes.resolveTypeName(state, "Int64")  // true — built-in
 passes.resolveTypeName(state, "Point")  // true — user-declared
 passes.resolveTypeName(state, "Nope")   // false — unknown
 ```
+
+### Stage 13f — Semantic Cross-Validation CLI (`suru-check`)
+
+`tests/fixtures/suru-check/main.suru` is a complete semantic-analysis CLI written in Suru. It wires together all earlier semantic stages into a single tool that can report semantic errors on any Suru source file.
+
+```bash
+# Compile suru-check
+dotnet run --project src/Suru.CLI -- build tests/fixtures/suru-check/main.suru
+
+# Check a Suru source file for semantic errors
+./tests/fixtures/suru-check/build/main path/to/file.suru
+# (prints errors to stdout in "<path>: <message>" format; exit code 1 on errors)
+
+# Example: valid program
+./tests/fixtures/suru-check/build/main tests/fixtures/arithmetic/main.suru
+# (no output, exit code 0)
+
+# Example: undefined variable
+./tests/fixtures/suru-check/build/main tests/fixtures/suru-check/corpus/invalid_undef_var.suru
+# .../invalid_undef_var.suru: undefined variable 'undeclared'
+# (exit code 1)
+```
+
+**Pipeline:** `lexer.tokenize(source)` → `parser.parse(tokens)` → `passes.runPrePasses(state, stmts)` → `analyzeModuleStatements(state, stmts)` → print errors → exit 1 if any.
+
+**Cross-validation:** `IRSuruSemanticCrossValidationTests.cs` runs `suru-check` and the C# compiler on the same programs and asserts that both agree on validity and, for invalid programs, that the first error message body matches exactly.
+
+**Corpus** (`tests/fixtures/suru-check/corpus/`):
+
+| File | Expected |
+|---|---|
+| `valid_hello.suru` | No errors |
+| `valid_functions.suru` | No errors |
+| `invalid_undef_var.suru` | `undefined variable 'undeclared'` |
+| `invalid_dup_type.suru` | `type 'Point' is already declared` |
+| `invalid_arity.suru` | `function 'greet' called with 2 argument(s), expected 1` |
+
+> **Limitation:** The Suru lexer does not support `//` line comments. Source files containing comments cannot be analysed by `suru-check`. All corpus files and the three milestone fixture files (`arithmetic`, `fibonacci`, `control-flow`) are comment-free.
 
 ### Stage 12 — Suru Parser
 

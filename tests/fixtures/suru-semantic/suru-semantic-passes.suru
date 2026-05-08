@@ -41,9 +41,19 @@ fn appendError(state AnalyzerState, message String) AnalyzerState {
 
 // ─── Type resolution ──────────────────────────────────────────────────────────
 
-// isBuiltinType — true for the six primitive type names recognised by the compiler.
+// isArrayGeneric — true when name is a generic Array type like "Array<Int64>".
+// The Suru parser stores generic type annotations as flat strings ("Array<T>"),
+// so we check the first 5 characters for "Array" when the name is long enough.
+fn isArrayGeneric(name String) Bool {
+    return match name.len().gt(5) {
+        true: name.slice(0, 5).equals("Array")
+        _: false
+    }
+}
+
+// isBuiltinType — true for the six primitive type names and generic Array forms.
 fn isBuiltinType(name String) Bool {
-    return name.equals("Bool") or name.equals("Int32") or name.equals("Int64") or name.equals("Float64") or name.equals("String") or name.equals("Array")
+    return name.equals("Bool") or name.equals("Int32") or name.equals("Int64") or name.equals("Float64") or name.equals("String") or name.equals("Array") or isArrayGeneric(name)
 }
 
 // typeNameExistsAt — linear search from index i; true if name is in typeNames.

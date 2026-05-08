@@ -1,0 +1,105 @@
+// Stage 13f — suru-check CLI tool
+//
+// Reads a .suru source file, runs the full semantic analysis pipeline
+// (lexer → parser → pre-passes → statement analysis), prints each error on its
+// own line prefixed with the source path, and exits with code 1 on any error.
+//
+// Pipeline wiring:
+//   lexer.tokenize(source)              → Array<Token>
+//   parser.parse(tokens)               → AstModule { stmts Array<AstNode> }
+//   passes.runPrePasses(state, stmts)  → registers types + function signatures
+//   analyzeModuleStatements(state, stmts) → full pass-3 statement analysis
+//
+// analyzeModuleStatements adds one dispatch case absent from
+// stmts.analyzeStatement: NODE_FN_DECL → fns.analyzeFunctionDeclaration.
+// NODE_TYPE_DECL is silently skipped (already handled by pre-passes).
+//
+// Error format: "<path>: <message>" — matches the C# SemanticAnalyzer output.
+//
+// Transitive includes (from suru-semantic-fns.suru → stmts → exprs → passes →
+// suru-parser.suru → suru-lexer.suru) make the following available without
+// explicit re-inclusion:
+//   lexer.*   — tokenize
+//   parser.*  — parse, AstModule, AstNode, NODE_* constants
+//   semantic.* — makeAnalyzerState, AnalyzerState, AnalysisError
+//   passes.*  — runPrePasses
+//   stmts.*   — analyzeStatement, analyzeStatements
+//   exprs.*   — analyzeExpr
+
+include "../suru-semantic/suru-semantic.suru" as semantic
+include "../suru-semantic/suru-semantic-passes.suru" as passes
+include "../suru-semantic/suru-semantic-stmts.suru" as stmts
+include "../suru-semantic/suru-semantic-fns.suru" as fns
+
+// ─── Module-level statement dispatcher ────────────────────────────────────────
+
+// analyzeModuleStatement — pass-3 dispatch for top-level statements.
+//
+// Extends stmts.analyzeStatement with a NODE_FN_DECL arm so function bodies
+// are fully analyzed. NODE_TYPE_DECL falls through to the wildcard (already
+// handled by pre-passes). All other kinds delegate to stmts.analyzeStatement.
+fn analyzeModuleStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+    match stmt.kind {
+        NODE_FN_DECL: fns.analyzeFunctionDeclaration(state, stmt)
+        NODE_TYPE_DECL: {}
+        _: stmts.analyzeStatement(state, stmt)
+    }
+    return state
+}
+
+// analyzeModuleStatements — iterates the module statement list.
+// Mirrors the C# SemanticAnalyzer _Analyze() pass-3 loop (line 37).
+fn analyzeModuleStatements(state AnalyzerState, moduleStmts Array<AstNode>) AnalyzerState {
+    let i Int64: 0
+    while i.lt(moduleStmts.len()) {
+        analyzeModuleStatement(state, moduleStmts.at(i))
+        i: i.add(1)
+    }
+    return state
+}
+
+// ─── Error printing ────────────────────────────────────────────────────────────
+
+// printErrorsFrom — recursive helper that prints errors starting at index i.
+// Prefixes each message with the source file path, matching C# output format.
+fn printErrorsFrom(state AnalyzerState, path String, i Int64) {
+    let errors Array<AnalysisError>: state.errors
+    match i.lt(errors.len()) {
+        true: {
+            let err AnalysisError: errors.at(i)
+            let line String: path.append(": ").append(err.message)
+            printLn(line)
+            printErrorsFrom(state, path, i.add(1))
+        }
+        _: {}
+    }
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+fn main(args Array<String>) {
+    let path String: args.at(1)
+    let source String: readFile(path)
+
+    // Stage 1: lex
+    let tokens Array<Token>: lexer.tokenize(source)
+
+    // Stage 2: parse
+    let ast AstModule: parser.parse(tokens)
+
+    // Stage 3a: pre-passes — collect type and function declarations
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    let moduleStmts Array<AstNode>: ast.stmts
+    passes.runPrePasses(state, moduleStmts)
+
+    // Stage 3b: analyze all module-level statements (incl. function bodies)
+    analyzeModuleStatements(state, moduleStmts)
+
+    // Report: print errors prefixed with path; exit 1 if any errors found
+    printErrorsFrom(state, path, 0)
+    let errors Array<AnalysisError>: state.errors
+    match errors.len().gt(0) {
+        true: exit(1)
+        _: {}
+    }
+}

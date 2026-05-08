@@ -1,0 +1,7 @@
+fn main(args Array<String>) {
+    let x Bool: true
+    let z Int64: 1
+    printLn(z)
+    match x { true: z, _: z }
+    printLn(z)
+}

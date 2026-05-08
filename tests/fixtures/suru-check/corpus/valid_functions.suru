@@ -1,0 +1,8 @@
+fn double(x Int64) Int64 {
+    return x.add(x)
+}
+
+fn main(args Array<String>) {
+    let y Int64: double(5)
+    printLn(y)
+}

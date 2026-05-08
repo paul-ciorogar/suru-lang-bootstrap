@@ -1,0 +1,7 @@
+fn greet(name String) {
+    printLn(name)
+}
+
+fn main(args Array<String>) {
+    greet("a", "b")
+}

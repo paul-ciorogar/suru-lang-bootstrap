@@ -34,16 +34,20 @@ fn checkHasReturnInWhile(stmt AstNode) Bool {
 // isExitCall — true when a NODE_EXPR_STMT contains a direct call to exit().
 // Extracted so checkHasReturnAt can use it as a single expression in a match
 // expression arm (match expression arms cannot contain block bodies).
-// Typed intermediate `innerName String` is required: `innerExpr.name` returns
-// NamedType("") (name is not declared in AstNode), so without the annotation
-// the codegen emits an icmp eq i64 comparison instead of suru_string_equals.
+//
+// IMPORTANT: innerExpr.name is only accessed inside the NODE_CALL arm.
+// Other node kinds (e.g. NODE_MATCH) have no `name` field; suru_find_field
+// walks off the end of the linked list and segfaults when the field is absent.
 fn isExitCall(stmt AstNode) Bool {
     let innerExpr AstNode: stmt.expr
-    let innerName String: innerExpr.name
-    return match innerExpr.kind {
-        NODE_CALL: innerName.equals("exit")
-        _: false
+    match innerExpr.kind {
+        NODE_CALL: {
+            let innerName String: innerExpr.name
+            return innerName.equals("exit")
+        }
+        _: {}
     }
+    return false
 }
 
 // checkHasReturnAt — linear scan starting at index i.
