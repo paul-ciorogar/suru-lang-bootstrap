@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compiler audit #13 — Struct field name globals use `@.field_N` prefix
+
+Field name strings used as struct field identifiers are now interned in a separate
+`_fieldNames` dictionary (previously shared with `_stringLiterals`) and emitted as
+`@.field_N` globals instead of `@.str_N`. This eliminates the theoretical collision
+between user string literals and field names, and makes the generated `.ll` easier to
+read. The two pools are emitted in distinct sections of the IR file. Three unit tests
+in `IRStructFieldNameGlobalsTests.cs` verify the separation.
+
+### Compiler audit #12 + #14 — Array element homogeneity validation and empty-array annotation enforcement
+
+Two related array-literal gaps have been closed.
+
+**#12 — Mixed-type array literals are now a compile error.** `SemanticAnalyzer.AnalyzeExpression`
+for `ArrayLiteralExpression` checks that all element `ResolvedType`s match the first non-null
+one after analyzing elements; the first mismatch emits
+`"array literal has mixed element types (element 0 is X, element N is Y)"`.
+
+**#14 — Empty array literals no longer silently default to `Int64`.** `IRArrayCodeGenerator`
+now reads `lit.ResolvedType` (an `ArrayType` with the element type set) for count == 0, and
+throws `InvalidOperationException` if it is not set. Three call sites propagate the annotation
+type into the empty array's `ResolvedType` before codegen runs:
+- `SemanticAnalyzer.AnalyzeLetStatement` — for `let xs Array<T>: []`
+- `IRStructCodeGenerator.EmitStructLiteral` — for struct fields like `{ scopes: [] }` where
+  the declared field type is `Array<T>`
+- `IRMatchCodeGenerator.EmitMatchArmValue` (new helper) — for struct literal match-arm bodies
+  like `true: { parser: parser, args: [] }` inside a function returning a named struct type;
+  threads `_currentFnReturnTypeName` into the struct so nested empty array fields resolve
+
+Three unit tests added to `SemanticAnalyzerTests`: mixed-type array (error), homogeneous
+array (no error), and empty array with annotation (no error).
+
+### Compiler audit #11 — Collapse redundant return-type state in `SemanticAnalyzer`
+
+`SemanticAnalyzer` previously tracked the current function's return type with two fields:
+`_currentFunctionReturnType` (nullable `SuruType`) and `_currentFunctionIsVoid` (bool).
+Both encoded the same concept and had to be kept in sync on every entry and exit of a
+function body, with a doubled reset at the end.
+
+They have been merged into a single `SuruType? _currentReturnType` where `null` means
+"void or unresolvable return type" and a non-null value means "known non-void type". The
+three usage sites in `AnalyzeFunctionDeclaration` and `AnalyzeReturnStatement` now perform
+a single null-check each. As a deliberate side-effect, the "non-void function has no return
+statement" and "bare return in non-void function" diagnostics are suppressed when the return
+type failed to resolve — the registration-pass error is sufficient, and suppressing these
+reduces redundant noise on already-invalid programs.
+
 ### Compiler audit #10 — Extract `IncludeResolver` and `IncludeGraph`
 
 `Compiler.ResolveIncludes` was a single 136-line method responsible for six distinct

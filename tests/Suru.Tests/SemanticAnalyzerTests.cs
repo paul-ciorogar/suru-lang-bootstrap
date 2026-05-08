@@ -223,4 +223,39 @@ public class SemanticAnalyzerTests
             """);
         Assert.Empty(errors);
     }
+
+    // ─── Array element type validation (audit items #12 and #14) ─────────────
+
+    [Fact]
+    public void MixedTypeArray_ReportsError()
+    {
+        var errors = Analyze("""
+            fn main(args Array<String>) {
+                let xs Array<Int64>: [1, true, 3]
+            }
+            """);
+        Assert.Contains(errors, e => e.Contains("mixed element types"));
+    }
+
+    [Fact]
+    public void HomogeneousArray_NoError()
+    {
+        var errors = Analyze("""
+            fn main(args Array<String>) {
+                let xs Array<Int64>: [1, 2, 3]
+            }
+            """);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void EmptyArrayWithAnnotation_NoError()
+    {
+        var errors = Analyze("""
+            fn main(args Array<String>) {
+                let xs Array<Int64>: []
+            }
+            """);
+        Assert.Empty(errors);
+    }
 }

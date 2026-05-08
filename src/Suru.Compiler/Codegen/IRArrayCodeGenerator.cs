@@ -58,11 +58,17 @@ partial class IRCodeGenerator
         _funcs.AppendLine($"  {hdrPtr} = call ptr @malloc(i64 40)");
 
         string dataPtr;
-        SuruType elemType = SuruType.Int64;
+        SuruType elemType;
         var count = lit.Elements.Count;
 
         if (count == 0)
         {
+            // Element type must be known from the annotation (propagated by SemanticAnalyzer).
+            // A silent Int64 default would misidentify elements at runtime.
+            elemType = lit.ResolvedType is SuruType.ArrayType { Element: var annotElem }
+                ? annotElem
+                : throw new InvalidOperationException(
+                    "empty array literal requires an explicit element-type annotation (e.g. 'let xs Array<T>: []')");
             dataPtr = "null";
         }
         else

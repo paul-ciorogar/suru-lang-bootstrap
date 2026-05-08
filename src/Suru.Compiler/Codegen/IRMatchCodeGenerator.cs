@@ -62,7 +62,7 @@ public sealed partial class IRCodeGenerator
         for (int i = 0; i < patternArms.Count; i++)
         {
             _funcs.AppendLine($"match_arm_{n}_{i}:");
-            var (armVal, _) = EmitValue(patternArms[i].Body);
+            var (armVal, _) = EmitMatchArmValue(patternArms[i].Body);
             _funcs.AppendLine($"  store {resultLlvmT} {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
@@ -70,7 +70,7 @@ public sealed partial class IRCodeGenerator
         if (wildcardArm != null)
         {
             _funcs.AppendLine($"match_wildcard_{n}:");
-            var (armVal, _) = EmitValue(wildcardArm.Body);
+            var (armVal, _) = EmitMatchArmValue(wildcardArm.Body);
             _funcs.AppendLine($"  store {resultLlvmT} {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
@@ -80,6 +80,14 @@ public sealed partial class IRCodeGenerator
         _funcs.AppendLine($"  {loadTmp} = load {resultLlvmT}, ptr {resultPtr}");
         return (loadTmp, resultType);
     }
+
+    // Struct literal arm bodies (e.g. `true: { field: [] }`) need the enclosing
+    // function's return type so EmitStructLiteral can look up the declaration and
+    // propagate element types to any empty array fields.
+    private (string val, SuruType type) EmitMatchArmValue(Expression body) =>
+        body is StructLiteralExpression sl
+            ? EmitStructLiteral(sl, _currentFnReturnTypeName)
+            : EmitValue(body);
 
     private SuruType PeekType(Expression expr) => expr switch
     {

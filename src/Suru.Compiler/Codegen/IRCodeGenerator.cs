@@ -43,6 +43,11 @@ public sealed partial class IRCodeGenerator
     private readonly Dictionary<string, (string name, int byteLen)> _stringLiterals = new();
     private int _strCount;
 
+    // Struct field name strings are interned separately from user string literals so
+    // the generated IR is easier to read and the two namespaces cannot collide.
+    private readonly Dictionary<string, (string name, int byteLen)> _fieldNames = new();
+    private int _fieldCount;
+
     // Per-function variable table: name → (alloca SSA name, SuruType).
     // ArrayType carries element type; NamedType carries struct name — no side dicts needed.
     private Dictionary<string, (string ptr, SuruType type)> _vars = new();
@@ -140,6 +145,14 @@ public sealed partial class IRCodeGenerator
         foreach (var (text, (name, byteLen)) in _stringLiterals)
         {
             var escaped = EscapeStringForIR(text);
+            sb.AppendLine($"{name} = private unnamed_addr constant [{byteLen} x i8] c\"{escaped}\\00\"");
+        }
+        if (_stringLiterals.Count > 0) sb.AppendLine();
+
+        // Struct field name globals — separate namespace (@.field_N) for readability.
+        foreach (var (fieldName, (name, byteLen)) in _fieldNames)
+        {
+            var escaped = EscapeStringForIR(fieldName);
             sb.AppendLine($"{name} = private unnamed_addr constant [{byteLen} x i8] c\"{escaped}\\00\"");
         }
         sb.AppendLine();

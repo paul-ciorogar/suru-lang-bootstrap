@@ -10,8 +10,8 @@ public sealed class SemanticAnalyzer
     private readonly Scopes _scopes = new();
 
     private readonly List<string> _errors = [];
-    private SuruType? _currentFunctionReturnType = null;
-    private bool _currentFunctionIsVoid = false;
+    // null = void or unknown return type (suppress return-path checks); non-null = known non-void type
+    private SuruType? _currentReturnType = null;
     private readonly Dictionary<string, TypeDeclaration> _typeDeclarations = new();
 
     private SemanticAnalyzer(Module module)
@@ -166,6 +166,10 @@ public sealed class SemanticAnalyzer
                 _scopes.DeclareInCurrent(let.Name, type);
                 if (type is SuruType.NamedType)
                     ValidateStructLiteralFields(let.Value, let.TypeAnnotation.Name);
+                // For `let xs Array<T>: []`, propagate the declared element type so codegen
+                // can emit the correct elem_tag without falling back to the Int64 default.
+                if (type is SuruType.ArrayType arrType && let.Value is ArrayLiteralExpression { Elements.Count: 0 } emptyArr)
+                    emptyArr.ResolvedType = arrType;
             }
             if (_scopes.Count == 1)
                 _scopes.MarkConstant(let.Name);
@@ -176,17 +180,17 @@ public sealed class SemanticAnalyzer
     {
         if (ret.Value is null)
         {
-            if (!_currentFunctionIsVoid)
+            if (_currentReturnType is not null)
                 _errors.Add($"{_module.SourcePath}: bare 'return' in non-void function");
         }
         else
         {
             AnalyzeExpression(ret.Value);
-            if (_currentFunctionReturnType is not null)
+            if (_currentReturnType is not null)
             {
                 var retType = InferType(ret.Value);
-                if (retType is not null && !retType.Equals(_currentFunctionReturnType))
-                    _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentFunctionReturnType}, got {retType}");
+                if (retType is not null && !retType.Equals(_currentReturnType))
+                    _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentReturnType}, got {retType}");
             }
         }
     }
@@ -202,19 +206,17 @@ public sealed class SemanticAnalyzer
                 _scopes.DeclareInCurrent(fn.Parameters[i].Name, sig.ParamTypes[i]);
         }
 
-        _currentFunctionReturnType = sig?.ReturnType;
-        _currentFunctionIsVoid     = fn.ReturnType.Name == BuiltinNames.Void;
+        _currentReturnType = sig?.ReturnType;
 
         bool hasReturn = CheckHasReturn(fn.Body);
         foreach (var bodyStmt in fn.Body)
             AnalyzeStatement(bodyStmt);
 
-        if (!_currentFunctionIsVoid && !hasReturn && fn.Name != BuiltinNames.Main)
+        if (_currentReturnType is not null && !hasReturn && fn.Name != BuiltinNames.Main)
             _errors.Add($"{_module.SourcePath}: non-void function '{fn.Name}' has no return statement");
 
         _scopes.Exit();
-        _currentFunctionReturnType = null;
-        _currentFunctionIsVoid     = false;
+        _currentReturnType = null;
     }
 
     private static bool CheckHasReturn(IReadOnlyList<Statement> stmts)
@@ -257,6 +259,21 @@ public sealed class SemanticAnalyzer
             case ArrayLiteralExpression arrLit:
                 foreach (var elem in arrLit.Elements)
                     AnalyzeExpression(elem);
+                // All elements must share the same type; catch the first mismatch.
+                if (arrLit.Elements.Count > 1)
+                {
+                    var firstElemType = arrLit.Elements[0].ResolvedType;
+                    if (firstElemType is not null)
+                        for (int i = 1; i < arrLit.Elements.Count; i++)
+                        {
+                            var t = arrLit.Elements[i].ResolvedType;
+                            if (t is not null && !t.Equals(firstElemType))
+                            {
+                                _errors.Add($"{_module.SourcePath}: array literal has mixed element types (element 0 is {firstElemType}, element {i} is {t})");
+                                break;
+                            }
+                        }
+                }
                 break;
 
             case StringLiteralExpression:

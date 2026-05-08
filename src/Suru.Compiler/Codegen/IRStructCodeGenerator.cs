@@ -24,12 +24,12 @@ partial class IRCodeGenerator
 
     private string EmitFieldNamePtr(string fieldName)
     {
-        if (!_stringLiterals.TryGetValue(fieldName, out var entry))
+        if (!_fieldNames.TryGetValue(fieldName, out var entry))
         {
-            var globalName = $"@.str_{_strCount++}";
+            var globalName = $"@.field_{_fieldCount++}";
             var byteLen    = fieldName.Length + 1;
             entry = (globalName, byteLen);
-            _stringLiterals[fieldName] = entry;
+            _fieldNames[fieldName] = entry;
         }
         return entry.name;
     }
@@ -70,6 +70,10 @@ partial class IRCodeGenerator
 
             if (fieldExpr is FieldAccessExpression { ResolvedType: null } faField)
                 faField.ResolvedType = fieldType;
+            // For `{ field: [] }` where the declared field is Array<T>, propagate the element
+            // type so EmitArrayLiteral can emit the correct elem_tag.
+            if (fieldExpr is ArrayLiteralExpression { Elements.Count: 0 } emptyArr && fieldType is SuruType.ArrayType)
+                emptyArr.ResolvedType = fieldType;
             var (fieldVal, inferredType) = EmitValue(fieldExpr);
 
             if (typeDecl == null)
