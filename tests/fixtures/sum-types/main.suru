@@ -2,7 +2,24 @@ type Circle: { radius Int64 }
 type Square: { side Int64 }
 type Shape: Circle, Square
 
+fn getCircleInfo(c Circle) String {
+    match c {
+        Circle: { return "circle" }
+        Square: { return "square" }
+    }
+}
+
+fn getSquareInfo(s Square) String {
+    match s {
+        Circle: { return "circle" }
+        Square: { return "square" }
+    }
+}
+
 fn main(args Array<String>) {
     let c Circle: { radius: 2283 }
+    let s Square: { side: 100 }
     printLn(c.radius.toString())
+    printLn(getCircleInfo(c))
+    printLn(getSquareInfo(s))
 }

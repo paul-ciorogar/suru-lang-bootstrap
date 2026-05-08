@@ -54,6 +54,14 @@ public sealed class SemanticAnalyzer
         _typeDeclarations[td.Name] = td;
     }
 
+    // True when name is a variant in any declared sum type.
+    private bool IsSumTypeVariant(string name)
+        => _sumTypeDeclarations.Values.Any(s => s.Variants.Contains(name));
+
+    // Returns the sum type whose variant list contains variantName.
+    private SumTypeDeclaration? FindParentForVariant(string variantName)
+        => _sumTypeDeclarations.Values.FirstOrDefault(s => s.Variants.Contains(variantName));
+
     private void RegisterSumTypeDeclaration(SumTypeDeclaration std)
     {
         if (_sumTypeDeclarations.ContainsKey(std.Name))
@@ -158,20 +166,57 @@ public sealed class SemanticAnalyzer
     {
         AnalyzeExpression(ms.Condition);
         var condType = InferType(ms.Condition);
-        if (condType is not null
-            and not SuruType.BoolType
-            and not SuruType.Int64Type
-            and not SuruType.Float64Type
-            and not SuruType.StringType)
-            _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType}");
 
-        foreach (var arm in ms.Arms)
+        // Determine whether this is a sum-type / variant match.
+        SumTypeDeclaration? sumParent = null;
+        if (condType is SuruType.SumType st)
+            _sumTypeDeclarations.TryGetValue(st.Name, out sumParent);
+        else if (condType is SuruType.NamedType nt && IsSumTypeVariant(nt.Name))
+            sumParent = FindParentForVariant(nt.Name);
+
+        if (sumParent != null)
         {
-            if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
-            _scopes.Enter();
-            foreach (var bodyStmt in arm.Body)
-                AnalyzeStatement(bodyStmt);
-            _scopes.Exit();
+            // Validate variant patterns and check exhaustiveness.
+            var covered   = new HashSet<string>();
+            bool wildcard = false;
+            foreach (var arm in ms.Arms)
+            {
+                if (arm.Pattern == null) { wildcard = true; }
+                else if (arm.Pattern is VariableReferenceExpression { Name: var vn })
+                {
+                    if (!sumParent.Variants.Contains(vn))
+                        _errors.Add($"{_module.SourcePath}: '{vn}' is not a variant of '{sumParent.Name}'");
+                    else
+                        covered.Add(vn);
+                }
+                // Arm body analyzed in its own scope; patterns are variant names, not variables.
+                _scopes.Enter();
+                foreach (var bodyStmt in arm.Body)
+                    AnalyzeStatement(bodyStmt);
+                _scopes.Exit();
+            }
+            if (!wildcard)
+                foreach (var variant in sumParent.Variants)
+                    if (!covered.Contains(variant))
+                        _errors.Add($"{_module.SourcePath}: non-exhaustive match: missing variant '{variant}'");
+        }
+        else
+        {
+            // Scalar / string match — condition must be a supported type.
+            if (condType is not null
+                and not SuruType.BoolType
+                and not SuruType.Int64Type
+                and not SuruType.Float64Type
+                and not SuruType.StringType)
+                _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType}");
+            foreach (var arm in ms.Arms)
+            {
+                if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
+                _scopes.Enter();
+                foreach (var bodyStmt in arm.Body)
+                    AnalyzeStatement(bodyStmt);
+                _scopes.Exit();
+            }
         }
     }
 
@@ -282,11 +327,10 @@ public sealed class SemanticAnalyzer
             if (stmt is ReturnStatement) return true;
             if (stmt is ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.Exit } }) return true;
             if (stmt is WhileStatement ws && CheckHasReturn(ws.Body)) return true;
-            // MatchStatement satisfies the return requirement only when a wildcard arm is
-            // present (exhaustive) and every arm body itself contains a return/exit.
-            if (stmt is MatchStatement ms
-                && ms.Arms.Any(a => a.Pattern == null)
-                && ms.Arms.All(a => CheckHasReturn(a.Body)))
+            // MatchStatement satisfies the return requirement when every arm body contains
+            // a return/exit path.  A wildcard ensures exhaustiveness for scalar matches;
+            // sum-type matches are verified exhaustive by the semantic analyzer.
+            if (stmt is MatchStatement ms && ms.Arms.All(a => CheckHasReturn(a.Body)))
                 return true;
         }
         return false;
@@ -460,16 +504,48 @@ public sealed class SemanticAnalyzer
             case MatchExpression match:
                 AnalyzeExpression(match.Condition);
                 var condType = InferType(match.Condition);
-                if (condType is not null
-                    and not SuruType.BoolType
-                    and not SuruType.Int64Type
-                    and not SuruType.Float64Type
-                    and not SuruType.StringType)
-                    _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType}");
-                foreach (var arm in match.Arms)
+                // Detect sum-type / variant match; variant names are not variables so skip AnalyzeExpression on patterns.
+                SumTypeDeclaration? exprSumParent = null;
+                if (condType is SuruType.SumType mst)
+                    _sumTypeDeclarations.TryGetValue(mst.Name, out exprSumParent);
+                else if (condType is SuruType.NamedType mnt && IsSumTypeVariant(mnt.Name))
+                    exprSumParent = FindParentForVariant(mnt.Name);
+
+                if (exprSumParent != null)
                 {
-                    if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
-                    AnalyzeExpression(arm.Body);
+                    // Validate variant pattern names; skip AnalyzeExpression (they're not variables).
+                    var mCovered = new HashSet<string>();
+                    bool mWild   = false;
+                    foreach (var arm in match.Arms)
+                    {
+                        if (arm.Pattern == null) { mWild = true; }
+                        else if (arm.Pattern is VariableReferenceExpression { Name: var mvn })
+                        {
+                            if (!exprSumParent.Variants.Contains(mvn))
+                                _errors.Add($"{_module.SourcePath}: '{mvn}' is not a variant of '{exprSumParent.Name}'");
+                            else
+                                mCovered.Add(mvn);
+                        }
+                        AnalyzeExpression(arm.Body);
+                    }
+                    if (!mWild)
+                        foreach (var variant in exprSumParent.Variants)
+                            if (!mCovered.Contains(variant))
+                                _errors.Add($"{_module.SourcePath}: non-exhaustive match: missing variant '{variant}'");
+                }
+                else
+                {
+                    if (condType is not null
+                        and not SuruType.BoolType
+                        and not SuruType.Int64Type
+                        and not SuruType.Float64Type
+                        and not SuruType.StringType)
+                        _errors.Add($"{_module.SourcePath}: match condition must be Bool, Int64, Float64, or String, got {condType}");
+                    foreach (var arm in match.Arms)
+                    {
+                        if (arm.Pattern != null) AnalyzeExpression(arm.Pattern);
+                        AnalyzeExpression(arm.Body);
+                    }
                 }
                 break;
         }

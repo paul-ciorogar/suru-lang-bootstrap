@@ -189,26 +189,55 @@ public sealed partial class IRCodeGenerator
         return (patternArms, wildcardArm, n);
     }
 
-    // Emits the icmp/fcmp/strcmp comparison chain for a list of pattern expressions.
+    // Emits the icmp/fcmp/strcmp/variant-tag comparison chain for a list of pattern expressions.
     // Each comparison branches to match_arm_{n}_{i} on match or to the next test/missLabel on miss.
+    // For sum-type / variant conditions, extracts the variant tag once before the loop and
+    // compares it against each arm's variant index (never calls EmitValue on variant-name patterns).
     private void EmitPatternComparisons(
         string condVal, SuruType condType,
         IReadOnlyList<Expression?> patterns,
         string missLabel, int n)
     {
+        // Detect variant/sum-type condition and extract tag.
+        SumTypeDeclaration? sumParent = null;
         string rawCond;
-        if (condType is SuruType.StringType)
+
+        if (condType is SuruType.NamedType nt && IsVariant(nt.Name))
+        {
+            sumParent = FindParentSumType(nt.Name)!;
+            _runtimeDecls.AddVariantTag();
+            var tagTmp = NextTmp();
+            _funcs.AppendLine($"  {tagTmp} = call i64 @suru_variant_tag(ptr {condVal})");
+            rawCond = tagTmp;
+        }
+        else if (condType is SuruType.SumType sumt && _module.SumTypeDeclarations.TryGetValue(sumt.Name, out var sd))
+        {
+            sumParent = sd;
+            _runtimeDecls.AddVariantTag();
+            var tagTmp = NextTmp();
+            _funcs.AppendLine($"  {tagTmp} = call i64 @suru_variant_tag(ptr {condVal})");
+            rawCond = tagTmp;
+        }
+        else if (condType is SuruType.StringType)
             rawCond = condVal;
         else if (IsScalar(condType))
             rawCond = condVal;
         else
-            rawCond = UnboxInt64(condVal);   // NamedType → unbox as i64
+            rawCond = UnboxInt64(condVal);   // NamedType (non-variant) → unbox as i64
 
         for (int i = 0; i < patterns.Count; i++)
         {
             var cmpTmp = NextTmp();
 
-            if (condType is SuruType.StringType)
+            if (sumParent != null)
+            {
+                // Pattern is a variant name identifier — never call EmitValue; the name is
+                // not a variable but a type constructor.  Compare extracted tag to the index.
+                var variantName = ((VariableReferenceExpression)patterns[i]!).Name;
+                var variantIdx  = GetVariantIndex(variantName, sumParent);
+                _funcs.AppendLine($"  {cmpTmp} = icmp eq i64 {rawCond}, {variantIdx}");
+            }
+            else if (condType is SuruType.StringType)
             {
                 _externals.AddStrcmp();
                 var (patternVal, _) = EmitValue(patterns[i]!);

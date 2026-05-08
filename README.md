@@ -284,6 +284,55 @@ fn main(args Array<String>) {
 
 > **Implementation note:** Structs are heap-allocated linked lists of Field nodes (`%suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }`). The `field_tag` uses the unified type enum (0=Bool, 1=Int32, 2=Int64, 3=Float64, 4=Struct, 5=Array, 6=String); field values are stored as `ptrtoint(ptr)`. `type_tag=4` at offset 0 identifies the node as a Struct to runtime inspection.
 
+### Sum Types (Discriminated Unions)
+
+Declare a sum type with `type Name: Variant1, Variant2, ...`. Each variant name must refer to a declared struct type:
+
+```suru
+type Circle: { radius Int64 }
+type Square: { side   Int64 }
+type Shape: Circle, Square
+```
+
+Create a variant value using the struct literal syntax with the variant type as the annotation:
+
+```suru
+let c Circle: { radius: 2283 }
+let s Square: { side:   100  }
+```
+
+Variant field access works transparently (the compiler unwraps the variant box automatically):
+
+```suru
+printLn(c.radius.toString())   // 2283
+```
+
+Match on a variant-typed value with a **match statement**. Every arm must name a variant of the parent sum type. The match must be exhaustive — all variants covered or a `_` wildcard present:
+
+```suru
+fn describe(c Circle) String {
+    match c {
+        Circle: { return "circle" }
+        Square: { return "square" }
+    }
+}
+```
+
+A non-exhaustive match is a compile-time error listing each missing variant. A `_` wildcard arm covers all remaining variants:
+
+```suru
+fn info(c Circle) String {
+    match c {
+        Circle: { return "circle" }
+        _: { return "other" }
+    }
+}
+```
+
+A sum-type match statement where every arm body has a `return` or `exit` satisfies the non-void return requirement of the enclosing function.
+
+> **Implementation note:** Each variant value is a heap-allocated `%suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner }` (24 bytes). Field access calls `@suru_variant_inner` to unwrap before `@suru_find_field`. Match dispatch calls `@suru_variant_tag` once to extract the `i64` variant index, then compares it against each arm's statically-known index.
+
 ### Arrays
 
 Create an array with `[e1, e2, ...]`. The element type is specified with the `Array<T>` generic annotation:

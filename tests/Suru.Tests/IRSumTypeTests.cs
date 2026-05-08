@@ -188,6 +188,79 @@ public class IRSumTypeTests
         Assert.Equal(7, SuruType.SumType.Tag);
     }
 
+    // ─── Stage 13j: match pattern & exhaustiveness tests ────────────────────
+
+    [Fact]
+    public void Semantic_ExhaustiveVariantMatch_BothVariants_NoErrors()
+    {
+        var errors = AnalyzeSource("""
+            type Circle: { radius Int64 }
+            type Square: { side Int64 }
+            type Shape: Circle, Square
+            fn info(c Circle) String {
+                match c {
+                    Circle: { return "circle" }
+                    Square: { return "square" }
+                }
+            }
+            fn main(args Array<String>) { }
+            """);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void Semantic_NonExhaustiveMatch_MissingVariant_ReportsError()
+    {
+        var errors = AnalyzeSource("""
+            type Circle: { radius Int64 }
+            type Square: { side Int64 }
+            type Shape: Circle, Square
+            fn info(c Circle) String {
+                match c {
+                    Circle: { return "circle" }
+                }
+            }
+            fn main(args Array<String>) { }
+            """);
+        Assert.Contains(errors, e => e.Contains("non-exhaustive") && e.Contains("Square"));
+    }
+
+    [Fact]
+    public void Semantic_WildcardCoversSumTypeMatch_NoErrors()
+    {
+        var errors = AnalyzeSource("""
+            type Circle: { radius Int64 }
+            type Square: { side Int64 }
+            type Shape: Circle, Square
+            fn info(c Circle) String {
+                match c {
+                    Circle: { return "circle" }
+                    _: { return "other" }
+                }
+            }
+            fn main(args Array<String>) { }
+            """);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void Semantic_UnknownVariantInPattern_ReportsError()
+    {
+        var errors = AnalyzeSource("""
+            type Circle: { radius Int64 }
+            type Square: { side Int64 }
+            type Shape: Circle, Square
+            fn info(c Circle) String {
+                match c {
+                    Circle: { return "circle" }
+                    Triangle: { return "triangle" }
+                }
+            }
+            fn main(args Array<String>) { }
+            """);
+        Assert.Contains(errors, e => e.Contains("Triangle"));
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static Module ParseSource(string source)
@@ -219,7 +292,10 @@ public class IRSumTypeIntegrationTests(CompiledFixturesIR fixtures) : Integratio
     public void SumType_VariantCreation_FieldAccess_PrintsRadius()
     {
         var output = Run(_exe);
-        Assert.Equal("2283\n", output);
+        // Line 1: c.radius (Stage 13i field access)
+        // Line 2: getCircleInfo(c) dispatches to Circle arm → "circle"
+        // Line 3: getSquareInfo(s) dispatches to Square arm → "square"
+        Assert.Equal("2283\ncircle\nsquare\n", output);
         _testPassed = true;
     }
 

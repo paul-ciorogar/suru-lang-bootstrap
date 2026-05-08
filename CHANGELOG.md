@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13j — Sum Type Match Patterns & Exhaustiveness
+
+Completes the sum type feature: `match` dispatch on variant-typed values and compile-time exhaustiveness checking.
+
+- **`src/Suru.Compiler/Semantic/SemanticAnalyzer.cs`**: `AnalyzeMatchStatement` now recognises sum-type / variant conditions (`SuruType.SumType` or `NamedType(V)` where `IsVariant(V)`). For these matches it validates each non-wildcard pattern identifier against the parent sum type's variant list and reports `"non-exhaustive match: missing variant '<name>'"` for any uncovered variant when no wildcard arm is present. Pattern expressions are not passed to `AnalyzeExpression` (variant names are not variables). Same logic applied to expression-context `MatchExpression`. Added `IsSumTypeVariant` and `FindParentForVariant` helpers. `CheckHasReturn` extended: a `MatchStatement` where every arm body contains a return/exit satisfies the non-void return requirement regardless of wildcard — semantics analyzer already ensures exhaustiveness for sum-type matches.
+
+- **`src/Suru.Compiler/Codegen/IRMatchCodeGenerator.cs`**: `EmitPatternComparisons` now detects variant/sum-type conditions at the top of the method. When detected, calls `@suru_variant_tag(ptr cond)` once to extract the `i64` variant index, then for each arm compares that index against the arm's static variant index via `icmp eq i64`. Pattern variant names are resolved to indices via the existing `GetVariantIndex` helper — `EmitValue` is never called on variant-name patterns (they are not variables). Applies to both statement-context (`EmitMatchStatementTestChain`) and expression-context (`EmitMatchTestChain`) match.
+
+- **`tests/fixtures/sum-types/main.suru`**: Added `getCircleInfo(c Circle) String` and `getSquareInfo(s Square) String` functions, each with an exhaustive `match` on both `Circle` and `Square` arms. `main` calls both and prints the results. Expected output: `2283\ncircle\nsquare`.
+
+- **`tests/Suru.Tests/IRSumTypeTests.cs`**: Four new semantic tests — exhaustive match accepted, non-exhaustive match reports error for missing variant, wildcard covers all variants, unknown variant in pattern reports error. Integration test updated to assert `"2283\ncircle\nsquare\n"`.
+
+All 154 tests pass.
+
+---
+
 ### Stage 13i — Variant Creation & Field Access Codegen
 
 Wires codegen so user code can create variant values and transparently access their fields. Given `type Circle: { radius Int64 }` and `type Shape: Circle, Square`, writing `let c Circle: { radius: 2283 }` now wraps the struct in `@suru_variant_create`, and `c.radius` unwraps via `@suru_variant_inner` before `@suru_find_field`.
