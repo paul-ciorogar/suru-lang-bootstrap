@@ -1,53 +1,58 @@
 namespace Suru.Compiler.Codegen;
 
-// Generates the four Suru runtime LLVM IR modules that are compiled and linked
+// Generates the five Suru runtime LLVM IR modules that are compiled and linked
 // with every Suru program.
 //
 // ── Type tag enum (unified across all modules) ───────────────────────────────
 //
 //   0 = Bool    1 = Int32    2 = Int64    3 = Float64
-//   4 = Struct  5 = Array    6 = String
+//   4 = Struct  5 = Array    6 = String   7 = SumType
 //
 //   Every heap-allocated Suru value stores its type_tag as the FIRST i64 field.
 //   This means `load i64, ptr %anyVal` gives the type_tag regardless of kind.
 //
 //   Authoritative C# definition: SuruType.*Type.Tag constants in Types/SuruType.cs.
 //   The C# codegen derives tag values from those constants. The LLVM IR text in
-//   this file and the three sibling runtime files is the only remaining manual
+//   this file and the four sibling runtime files is the only remaining manual
 //   sync point — update both together if tag ordinals ever change.
 //
 // ── Modules ──────────────────────────────────────────────────────────────────
 //
-//   suru_box.ll    — Scalar heap wrapper: %suru.Box = { i64 type_tag, i64 payload }.
-//                    box/unbox for Bool/Int32/Int64/Float64, suru_box_clone,
-//                    suru_println (stdout), suru_printerror (stderr).
+//   suru_box.ll     — Scalar heap wrapper: %suru.Box = { i64 type_tag, i64 payload }.
+//                     box/unbox for Bool/Int32/Int64/Float64, suru_box_clone,
+//                     suru_println (stdout), suru_printerror (stderr).
 //
-//   suru_string.ll — String heap operations: create, clone, drop, append, at,
-//                    equals, slice, ord, suru_int64_from_string, suru_int64_to_string.
-//                    %suru.String = { i64 type_tag=6, i64 len, ptr data }
+//   suru_string.ll  — String heap operations: create, clone, drop, append, at,
+//                     equals, slice, ord, suru_int64_from_string, suru_int64_to_string.
+//                     %suru.String = { i64 type_tag=6, i64 len, ptr data }
 //
-//   suru_array.ll  — Array heap operations: at (returns ptr), set/add (take ptr),
-//                    slice, clone_dyn (dispatch on element type_tag), drop_dyn.
-//                    %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }
+//   suru_array.ll   — Array heap operations: at (returns ptr), set/add (take ptr),
+//                     slice, clone_dyn (dispatch on element type_tag), drop_dyn.
+//                     %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }
 //
-//   suru_struct.ll — Struct linked-list operations: suru_find_field (phi-loop via strcmp),
-//                    suru_struct_clone (node-by-node copy), suru_struct_drop (linked-list free).
-//                    %suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }
+//   suru_struct.ll  — Struct linked-list operations: suru_find_field (phi-loop via strcmp),
+//                     suru_struct_clone (node-by-node copy), suru_struct_drop (linked-list free).
+//                     %suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }
+//
+//   suru_variant.ll — Sum type variant wrapper: suru_variant_create/tag/inner/drop.
+//                     %suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner }
 //
 // ── Cross-module dependencies ─────────────────────────────────────────────────
 //
-//   suru_box.ll:    depends on libc only (malloc, free, printf, puts, fprintf, fputs).
-//   suru_string.ll: depends on libc only (malloc, memcpy, free, strcmp, strtol, snprintf).
-//   suru_struct.ll: depends on libc only (malloc, free, strcmp).
-//   suru_array.ll:  depends on libc + suru_box_clone + suru_string_clone/drop + suru_struct_clone/drop.
+//   suru_box.ll:     depends on libc only (malloc, free, printf, puts, fprintf, fputs).
+//   suru_string.ll:  depends on libc only (malloc, memcpy, free, strcmp, strtol, snprintf).
+//   suru_struct.ll:  depends on libc only (malloc, free, strcmp).
+//   suru_array.ll:   depends on libc + suru_box_clone + suru_string_clone/drop + suru_struct_clone/drop.
+//   suru_variant.ll: depends on libc only (malloc, free).
 //
-// All four .o files are linked into every Suru binary so cross-module calls resolve.
+// All five .o files are linked into every Suru binary so cross-module calls resolve.
 //
 // Partial class split:
-//   SuruRuntime.cs       — GenerateBoxRuntime (box/unbox, println, printerror, dyn_len)
-//   SuruStringRuntime.cs — GenerateStringRuntime
-//   SuruArrayRuntime.cs  — GenerateArrayRuntime
-//   SuruStructRuntime.cs — GenerateStructRuntime
+//   SuruRuntime.cs        — GenerateBoxRuntime (box/unbox, println, printerror, dyn_len)
+//   SuruStringRuntime.cs  — GenerateStringRuntime
+//   SuruArrayRuntime.cs   — GenerateArrayRuntime
+//   SuruStructRuntime.cs  — GenerateStructRuntime
+//   SuruVariantRuntime.cs — GenerateVariantRuntime
 public static partial class SuruRuntime
 {
     // ─── Box runtime ──────────────────────────────────────────────────────────

@@ -93,8 +93,8 @@ public class Compiler
     //   1. Compile the main source to its own .ll and .o.
     //   2. For every file listed in module.IncludedSourcePaths, generate its standalone
     //      IR (extern declarations for any of *its* includes) and compile to .o.
-    //   3. Generate the three Suru runtime modules (suru_string.ll, suru_array.ll,
-    //      suru_struct.ll) into the build directory and compile each to .o.
+    //   3. Generate the five Suru runtime modules (suru_box.ll, suru_string.ll, suru_array.ll,
+    //      suru_struct.ll, suru_variant.ll) into the build directory and compile each to .o.
     //   4. Link all .o files together with cc.
     //
     // Each .suru file is an independent compilation unit — included files are not merged
@@ -146,13 +146,14 @@ public class Compiler
             objectPaths.Add(inclObjPath);
         }
 
-        // Step 3: generate and compile the four Suru runtime modules.
+        // Step 3: generate and compile the five Suru runtime modules.
         var runtimes = new[]
         {
-            ("suru_box",    SuruRuntime.GenerateBoxRuntime()),
-            ("suru_string", SuruRuntime.GenerateStringRuntime()),
-            ("suru_array",  SuruRuntime.GenerateArrayRuntime()),
-            ("suru_struct", SuruRuntime.GenerateStructRuntime()),
+            ("suru_box",     SuruRuntime.GenerateBoxRuntime()),
+            ("suru_string",  SuruRuntime.GenerateStringRuntime()),
+            ("suru_array",   SuruRuntime.GenerateArrayRuntime()),
+            ("suru_struct",  SuruRuntime.GenerateStructRuntime()),
+            ("suru_variant", SuruRuntime.GenerateVariantRuntime()),
         };
         foreach (var (rtName, rtIr) in runtimes)
         {

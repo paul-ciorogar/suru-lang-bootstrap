@@ -36,6 +36,9 @@ internal sealed class SuruRuntimeDeclarations
     private bool _cloneDyn, _dropDyn;
     private bool _dynLen;
 
+    // ─── Variant runtime (suru_variant.ll) ───────────────────────────────────
+    private bool _variantCreate, _variantTag, _variantInner, _variantDrop;
+
     public override string ToString() => _sb.ToString();
 
     // ─── Box ─────────────────────────────────────────────────────────────────
@@ -281,5 +284,35 @@ internal sealed class SuruRuntimeDeclarations
         if (_dynLen) return;
         _sb.AppendLine("declare i64  @suru_dyn_len(ptr)");
         _dynLen = true;
+    }
+
+    // ─── Variant ──────────────────────────────────────────────────────────────
+
+    internal void AddVariantCreate()
+    {
+        if (_variantCreate) return;
+        _sb.AppendLine("declare ptr  @suru_variant_create(i64, ptr)");
+        _variantCreate = true;
+    }
+
+    internal void AddVariantTag()
+    {
+        if (_variantTag) return;
+        _sb.AppendLine("declare i64  @suru_variant_tag(ptr)");
+        _variantTag = true;
+    }
+
+    internal void AddVariantInner()
+    {
+        if (_variantInner) return;
+        _sb.AppendLine("declare ptr  @suru_variant_inner(ptr)");
+        _variantInner = true;
+    }
+
+    internal void AddVariantDrop()
+    {
+        if (_variantDrop) return;
+        _sb.AppendLine("declare void @suru_variant_drop(ptr)");
+        _variantDrop = true;
     }
 }
