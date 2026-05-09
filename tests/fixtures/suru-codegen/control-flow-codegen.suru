@@ -1,0 +1,499 @@
+include "ir-builder.suru" as ir
+include "codegen-types.suru" as cg
+include "../suru-parser/suru-parser-ast.suru" as ast
+
+fn emitScalarDecls(b IrBuilder) IrBuilder {
+    b: ir.emitDeclare(b, "ptr",  "malloc",        "i64")
+    b: ir.emitDeclare(b, "void", "free",           "ptr")
+    b: ir.emitDeclare(b, "void", "suru_println",   "ptr")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_int64", "i64")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_bool",  "i1")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_int32", "i32")
+    b: ir.emit(b, "\n")
+    return b
+}
+
+fn emitValue(ctx CodegenContext, node AstNode) CodegenResult {
+    match node {
+        IntLitNode:     { return { ctx: ctx, name: node.text, llvmType: "i64" } }
+        BoolLitNode:    {
+            let v String: match node.boolVal { true: "1", _: "0" }
+            return { ctx: ctx, name: v, llvmType: "i1" }
+        }
+        VarRefNode:     {
+            let e VarEntry: cg.lookupVar(ctx, node.name)
+            let r IrResult: ir.emitLoad(ctx.builder, e.llvmType, e.allocaName)
+            return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: e.llvmType }
+        }
+        MethodCallNode: { return emitMethod(ctx, node) }
+        CallNode:       { return emitCallExpr(ctx, node) }
+        MatchExprNode:  { return emitMatchExpr(ctx, node) }
+        _: {
+            printError("emitValue: unsupported node")
+            exit(1)
+        }
+    }
+}
+
+fn emitCallExpr(ctx CodegenContext, node CallNode) CodegenResult {
+    let retTy String: cg.lookupFn(ctx, node.name).returnLlvmType
+    let args Array<String>: []
+    let i Int64: 0
+    while i.lt(node.args.len()) {
+        let ar CodegenResult: emitValue(ctx, node.args.at(i))
+        ctx: ar.ctx
+        args.add(ar.llvmType.append(" ").append(ar.name))
+        i: i.add(1)
+    }
+    let r IrResult: ir.emitCall(ctx.builder, retTy, node.name, args)
+    return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: retTy }
+}
+
+fn emitMethod(ctx CodegenContext, node MethodCallNode) CodegenResult {
+    let rr CodegenResult: emitValue(ctx, node.receiver)
+    ctx: rr.ctx
+    let recv String: rr.name
+    let rty String: rr.llvmType
+
+    match node.methodName.equals("invert") {
+        true: {
+            let r IrResult: ir.emitBinop(ctx.builder, "sub", "i64", "0", recv)
+            return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: "i64" }
+        }
+        _: {}
+    }
+
+    match node.methodName.equals("compare") {
+        true: {
+            let ar CodegenResult: emitValue(ctx, node.args.at(0))
+            ctx: ar.ctx
+            let r1 IrResult: ir.emitICmp(ctx.builder, "sgt", rty, recv, ar.name)
+            ctx: cg.withBuilder(ctx, r1.builder)
+            let r2 IrResult: ir.emitICmp(ctx.builder, "slt", rty, recv, ar.name)
+            ctx: cg.withBuilder(ctx, r2.builder)
+            let r3 IrResult: ir.emitZext(ctx.builder, "i1", r1.name, "i64")
+            ctx: cg.withBuilder(ctx, r3.builder)
+            let r4 IrResult: ir.emitZext(ctx.builder, "i1", r2.name, "i64")
+            ctx: cg.withBuilder(ctx, r4.builder)
+            let r5 IrResult: ir.emitBinop(ctx.builder, "sub", "i64", r3.name, r4.name)
+            return { ctx: cg.withBuilder(ctx, r5.builder), name: r5.name, llvmType: "i64" }
+        }
+        _: {}
+    }
+
+    let ar CodegenResult: emitValue(ctx, node.args.at(0))
+    ctx: ar.ctx
+
+    let isArith Bool: node.methodName.equals("add")
+    match node.methodName.equals("take")     { true: { isArith: true } _: {} }
+    match node.methodName.equals("multiply") { true: { isArith: true } _: {} }
+    match node.methodName.equals("split")    { true: { isArith: true } _: {} }
+
+    match isArith {
+        true: {
+            let op String: "add"
+            match node.methodName.equals("take")     { true: { op: "sub"  } _: {} }
+            match node.methodName.equals("multiply") { true: { op: "mul"  } _: {} }
+            match node.methodName.equals("split")    { true: { op: "sdiv" } _: {} }
+            let r IrResult: ir.emitBinop(ctx.builder, op, "i64", recv, ar.name)
+            return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: "i64" }
+        }
+        _: {}
+    }
+
+    let pred String: "eq"
+    match node.methodName.equals("lt")  { true: { pred: "slt" } _: {} }
+    match node.methodName.equals("gt")  { true: { pred: "sgt" } _: {} }
+    match node.methodName.equals("lte") { true: { pred: "sle" } _: {} }
+    match node.methodName.equals("gte") { true: { pred: "sge" } _: {} }
+    let r IrResult: ir.emitICmp(ctx.builder, pred, rty, recv, ar.name)
+    return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: "i1" }
+}
+
+fn emitPrintLn(ctx CodegenContext, argNode AstNode) CodegenContext {
+    let vr CodegenResult: emitValue(ctx, argNode)
+    ctx: vr.ctx
+    let boxFn String: "suru_box_int64"
+    match vr.llvmType.equals("i1")  { true: { boxFn: "suru_box_bool"  } _: {} }
+    match vr.llvmType.equals("i32") { true: { boxFn: "suru_box_int32" } _: {} }
+    let br IrResult: ir.emitCall(ctx.builder, "ptr", boxFn, [vr.llvmType.append(" ").append(vr.name)])
+    ctx: cg.withBuilder(ctx, br.builder)
+    return cg.withBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_println", ["ptr ".append(br.name)]))
+}
+
+fn emitLetStmt(ctx CodegenContext, node LetNode) CodegenContext {
+    let llvmTy String: cg.llvmTypeOf(node.typeName)
+    let ar IrResult: ir.emitAlloca(ctx.builder, llvmTy)
+    ctx: cg.withBuilder(ctx, ar.builder)
+    let vr CodegenResult: emitValue(ctx, node.value)
+    ctx: vr.ctx
+    let b IrBuilder: ir.emitStore(ctx.builder, llvmTy, vr.name, ar.name)
+    return cg.addVar(cg.withBuilder(ctx, b), node.name, ar.name, llvmTy)
+}
+
+fn emitAssignStmt(ctx CodegenContext, node AssignNode) CodegenContext {
+    let e VarEntry: cg.lookupVar(ctx, node.name)
+    let vr CodegenResult: emitValue(ctx, node.value)
+    let b IrBuilder: ir.emitStore(vr.ctx.builder, e.llvmType, vr.name, e.allocaName)
+    return cg.withBuilder(vr.ctx, b)
+}
+
+fn emitExprStmt(ctx CodegenContext, node ExprStmtNode) CodegenContext {
+    match node.expr {
+        CallNode: {
+            let c CallNode: node.expr
+            match c.name.equals("printLn") {
+                true:  { return emitPrintLn(ctx, c.args.at(0)) }
+                _: {}
+            }
+        }
+        _: {}
+    }
+    return ctx
+}
+
+fn emitReturnStmt(ctx CodegenContext, node ReturnNode) CodegenContext {
+    match node.hasValue {
+        true: {
+            let vr CodegenResult: emitValue(ctx, node.value)
+            let b IrBuilder: ir.emitRet(vr.ctx.builder, ctx.currentReturnType, vr.name)
+            return cg.withBlockOpen(cg.withBuilder(vr.ctx, b), false)
+        }
+        _: { return cg.withBlockOpen(cg.withBuilder(ctx, ir.emitRetVoid(ctx.builder)), false) }
+    }
+}
+
+fn emitWhile(ctx CodegenContext, node WhileNode) CodegenContext {
+    let nr IrResult: ir.nextLabel(ctx.builder, "wh")
+    let n String: nr.name
+    ctx: cg.withBuilder(ctx, nr.builder)
+    ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_c")))
+    ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_c")))
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    ctx: cg.withBlockOpen(cg.withBuilder(ctx, ir.emitLabel(ir.emitCondBr(ctx.builder, condR.name, n.append("_b"), n.append("_a")), n.append("_b"))), true)
+    ctx: emitStmts(ctx, node.body)
+    match ctx.blockOpen {
+        true: { ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_c"))) }
+        _: {}
+    }
+    return cg.withBlockOpen(cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a"))), true)
+}
+
+fn peekType(ctx CodegenContext, node AstNode) String {
+    match node {
+        IntLitNode:    { return "i64" }
+        BoolLitNode:   { return "i1"  }
+        FloatLitNode:  { return "double" }
+        VarRefNode:    { return cg.lookupVar(ctx, node.name).llvmType }
+        CallNode:      { return cg.lookupFn(ctx, node.name).returnLlvmType }
+        MatchExprNode: {
+            let arms Array<MatchArm>: node.arms
+            let i Int64: 0
+            while i.lt(arms.len()) {
+                let arm MatchArm: arms.at(i)
+                match arm.isWildcard { true: {} _: { return peekType(ctx, arm.body) } }
+                i: i.add(1)
+            }
+            return "i64"
+        }
+        MethodCallNode: {
+            let isArith Bool: node.methodName.equals("add")
+            match node.methodName.equals("take")     { true: { isArith: true } _: {} }
+            match node.methodName.equals("multiply") { true: { isArith: true } _: {} }
+            match node.methodName.equals("split")    { true: { isArith: true } _: {} }
+            match node.methodName.equals("invert")   { true: { isArith: true } _: {} }
+            match node.methodName.equals("compare")  { true: { isArith: true } _: {} }
+            match isArith { true: { return "i64" } _: {} }
+            return "i1"
+        }
+        _: { return "i64" }
+    }
+}
+
+fn collectPatIdxs(arms Array<MatchArm>) Array<Int64> {
+    let pis Array<Int64>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        match arms.at(i).isWildcard { true: {} _: { pis.add(i) } }
+        i: i.add(1)
+    }
+    return pis
+}
+
+fn emitMatchExpr(ctx CodegenContext, node MatchExprNode) CodegenResult {
+    let arms Array<MatchArm>: node.arms
+    let resultTy String: "i64"
+    let fi Int64: 0
+    while fi.lt(arms.len()) {
+        let arm MatchArm: arms.at(fi)
+        resultTy: match arm.isWildcard { true: resultTy, _: peekType(ctx, arm.body) }
+        fi: match arm.isWildcard { true: fi.add(1), _: arms.len() }
+    }
+    let rp IrResult: ir.emitAlloca(ctx.builder, resultTy)
+    let resultPtr String: rp.name
+    ctx: cg.withBuilder(ctx, rp.builder)
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    let condVal String: condR.name
+    let condTy String: condR.llvmType
+    let nr IrResult: ir.nextLabel(ctx.builder, "mx")
+    let n String: nr.name
+    ctx: cg.withBuilder(ctx, nr.builder)
+    let pis Array<Int64>: collectPatIdxs(arms)
+    match pis.len().equals(0) {
+        true: { ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) }
+        _: {}
+    }
+    let ci Int64: 0
+    while ci.lt(pis.len()) {
+        let arm MatchArm: arms.at(pis.at(ci))
+        let pr CodegenResult: emitValue(ctx, arm.pattern)
+        ctx: pr.ctx
+        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
+        ctx: cg.withBuilder(ctx, cr.builder)
+        let nx String: match ci.add(1).lt(pis.len()) {
+            true: n.append("_t").append(ci.add(1).toString())
+            _:    n.append("_w")
+        }
+        ctx: cg.withBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name,
+            n.append("_a").append(ci.toString()), nx))
+        match ci.add(1).lt(pis.len()) {
+            true: {
+                ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder,
+                    n.append("_t").append(ci.add(1).toString())))
+            }
+            _: {}
+        }
+        ci: ci.add(1)
+    }
+    let ai Int64: 0
+    while ai.lt(pis.len()) {
+        let arm MatchArm: arms.at(pis.at(ai))
+        ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a").append(ai.toString())))
+        let vr CodegenResult: emitValue(ctx, arm.body)
+        ctx: vr.ctx
+        let b IrBuilder: ir.emitStore(ctx.builder, resultTy, vr.name, resultPtr)
+        ctx: cg.withBuilder(ctx, ir.emitBr(b, n.append("_m")))
+        ai: ai.add(1)
+    }
+    ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_w")))
+    let wi Int64: 0
+    while wi.lt(arms.len()) {
+        let arm MatchArm: arms.at(wi)
+        match arm.isWildcard {
+            true: {
+                let vr CodegenResult: emitValue(ctx, arm.body)
+                ctx: vr.ctx
+                let b IrBuilder: ir.emitStore(ctx.builder, resultTy, vr.name, resultPtr)
+                ctx: cg.withBuilder(ctx, b)
+                wi: arms.len()
+            }
+            _: {}
+        }
+        wi: wi.add(1)
+    }
+    ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m")))
+    ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_m")))
+    let lr IrResult: ir.emitLoad(ctx.builder, resultTy, resultPtr)
+    ctx: cg.withBuilder(ctx, lr.builder)
+    return { ctx: ctx, name: lr.name, llvmType: resultTy }
+}
+
+fn collectStmtPatIdxs(arms Array<MatchStmtArm>) Array<Int64> {
+    let pis Array<Int64>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        match arms.at(i).isWildcard { true: {} _: { pis.add(i) } }
+        i: i.add(1)
+    }
+    return pis
+}
+
+fn emitMatchStmt(ctx CodegenContext, node MatchStmtNode) CodegenContext {
+    let arms Array<MatchStmtArm>: node.arms
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    let condVal String: condR.name
+    let condTy String: condR.llvmType
+    let nr IrResult: ir.nextLabel(ctx.builder, "ms")
+    let n String: nr.name
+    ctx: cg.withBuilder(ctx, nr.builder)
+    let pis Array<Int64>: collectStmtPatIdxs(arms)
+    match pis.len().equals(0) {
+        true: { ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) }
+        _: {}
+    }
+    let ci Int64: 0
+    while ci.lt(pis.len()) {
+        let arm MatchStmtArm: arms.at(pis.at(ci))
+        let pr CodegenResult: emitValue(ctx, arm.pattern)
+        ctx: pr.ctx
+        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
+        ctx: cg.withBuilder(ctx, cr.builder)
+        let nx String: match ci.add(1).lt(pis.len()) {
+            true: n.append("_t").append(ci.add(1).toString())
+            _:    n.append("_w")
+        }
+        ctx: cg.withBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name,
+            n.append("_a").append(ci.toString()), nx))
+        match ci.add(1).lt(pis.len()) {
+            true: {
+                ctx: cg.withBuilder(ctx, ir.emitLabel(ctx.builder,
+                    n.append("_t").append(ci.add(1).toString())))
+            }
+            _: {}
+        }
+        ci: ci.add(1)
+    }
+    let ai Int64: 0
+    while ai.lt(pis.len()) {
+        let arm MatchStmtArm: arms.at(pis.at(ai))
+        ctx: cg.withBlockOpen(cg.withBuilder(ctx,
+            ir.emitLabel(ctx.builder, n.append("_a").append(ai.toString()))), true)
+        let stmts Array<AstNode>: arm.stmts
+        ctx: emitStmts(ctx, stmts)
+        match ctx.blockOpen {
+            true: { ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m"))) }
+            _: {}
+        }
+        ai: ai.add(1)
+    }
+    ctx: cg.withBlockOpen(cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_w"))), true)
+    let wi Int64: 0
+    while wi.lt(arms.len()) {
+        let arm MatchStmtArm: arms.at(wi)
+        match arm.isWildcard {
+            true: {
+                let stmts Array<AstNode>: arm.stmts
+                ctx: emitStmts(ctx, stmts)
+                wi: arms.len()
+            }
+            _: {}
+        }
+        wi: wi.add(1)
+    }
+    match ctx.blockOpen {
+        true: { ctx: cg.withBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m"))) }
+        _: {}
+    }
+    return cg.withBlockOpen(cg.withBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_m"))), true)
+}
+
+fn emitStmt(ctx CodegenContext, stmt AstNode) CodegenContext {
+    match stmt {
+        LetNode:       { return emitLetStmt(ctx, stmt)    }
+        AssignNode:    { return emitAssignStmt(ctx, stmt) }
+        ExprStmtNode:  { return emitExprStmt(ctx, stmt)  }
+        ReturnNode:    { return emitReturnStmt(ctx, stmt) }
+        WhileNode:     { return emitWhile(ctx, stmt)      }
+        MatchStmtNode: { return emitMatchStmt(ctx, stmt)  }
+        _: {}
+    }
+    return ctx
+}
+
+fn emitStmts(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        ctx: emitStmt(ctx, stmts.at(i))
+        i: i.add(1)
+    }
+    return ctx
+}
+
+fn buildParamsStr(params Array<Param>) String {
+    let result String: ""
+    let i Int64: 0
+    while i.lt(params.len()) {
+        match i.gt(0) { true: { result: result.append(", ") } _: {} }
+        let p Param: params.at(i)
+        result: result.append(cg.llvmTypeOf(p.typeName)).append(" %").append(p.name)
+        i: i.add(1)
+    }
+    return result
+}
+
+fn emitFnDecl(ctx CodegenContext, node FnDeclNode) CodegenContext {
+    let isMain Bool: node.name.equals("main")
+    let llvmName String: match isMain { true: "suru_main", _: node.name }
+    let retTy String: match isMain { true: "i64", _: cg.llvmTypeOf(node.returnType) }
+    let pStr String: match isMain { true: "ptr %argv", _: buildParamsStr(node.params) }
+    let b IrBuilder: ir.emitFnStart(ctx.builder, retTy, llvmName, pStr)
+    let emptyVars Array<VarEntry>: []
+    let inner CodegenContext: { builder: b, vars: emptyVars, fns: ctx.fns, currentReturnType: retTy, blockOpen: true }
+    let i Int64: 0
+    while i.lt(node.params.len()) {
+        let p Param: node.params.at(i)
+        let ty String: cg.llvmTypeOf(p.typeName)
+        let ar IrResult: ir.emitAlloca(inner.builder, ty)
+        inner: cg.withBuilder(inner, ar.builder)
+        inner: cg.withBuilder(inner, ir.emitStore(inner.builder, ty, match isMain { true: "%argv", _: "%".append(p.name) }, ar.name))
+        inner: cg.addVar(inner, p.name, ar.name, ty)
+        i: i.add(1)
+    }
+    inner: emitStmts(inner, node.body)
+    match inner.blockOpen {
+        true: {
+            let b2 IrBuilder: match isMain {
+                true: ir.emitRet(inner.builder, "i64", "0")
+                _:    ir.emitRetVoid(inner.builder)
+            }
+            inner: cg.withBuilder(inner, b2)
+        }
+        _: {}
+    }
+    return cg.withBuilder(ctx, ir.emitFnEnd(inner.builder))
+}
+
+fn emitMainWrapper(b IrBuilder) IrBuilder {
+    b: ir.emitFnStart(b, "i32", "main", "i32 %argc, ptr %argv")
+    let mallocArgs Array<String>: ["i64 24"]
+    let mr IrResult: ir.emitCall(b, "ptr", "malloc", mallocArgs)
+    b: mr.builder
+    let sp String: mr.name
+    let g0 IrResult: ir.emitGEP(b, "%suru.String", sp, "i32 0, i32 0")
+    b: ir.emitStore(g0.builder, "i64", "6", g0.name)
+    let g1 IrResult: ir.emitGEP(b, "%suru.String", sp, "i32 0, i32 1")
+    b: g1.builder
+    let sr IrResult: ir.emitSext(b, "i32", "%argc", "i64")
+    b: ir.emitStore(sr.builder, "i64", sr.name, g1.name)
+    let g2 IrResult: ir.emitGEP(b, "%suru.String", sp, "i32 0, i32 2")
+    b: ir.emitStore(g2.builder, "ptr", "%argv", g2.name)
+    let ma Array<String>: ["ptr ".append(sp)]
+    let rr IrResult: ir.emitCall(b, "i64", "suru_main", ma)
+    b: rr.builder
+    let tr IrResult: ir.emitTrunc(b, "i64", rr.name, "i32")
+    b: ir.emitRet(tr.builder, "i32", tr.name)
+    return ir.emitFnEnd(b)
+}
+
+fn registerFunctions(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                ctx: cg.addFn(ctx, stmt.name, match stmt.name.equals("main") { true: "i64", _: cg.llvmTypeOf(stmt.returnType) })
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+fn emitModule(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    ctx: cg.withBuilder(ctx, emitScalarDecls(ir.emitModuleHeader(ctx.builder)))
+    ctx: registerFunctions(ctx, stmts)
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: { ctx: emitFnDecl(ctx, stmt) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return cg.withBuilder(ctx, emitMainWrapper(ctx.builder))
+}

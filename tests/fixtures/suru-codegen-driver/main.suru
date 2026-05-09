@@ -16,7 +16,7 @@
 include "../suru-lexer/suru-lexer.suru"          as lex
 include "../suru-parser/suru-parser.suru"         as parser
 include "../suru-codegen/codegen-types.suru"      as cg
-include "../suru-codegen/scalar-codegen.suru"     as codegen
+include "../suru-codegen/control-flow-codegen.suru" as codegen
 
 fn main(args Array<String>) {
     let sourcePath String: args.at(1)

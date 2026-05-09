@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 14c — Control Flow & Match Codegen (Suru-in-Suru)
+
+Extends the Suru-in-Suru codegen with while loops, match-as-expression, match-as-statement, function parameter alloca, assignment statements, recursive calls, and the `compare` method. Cross-validates against the C# codegen on `fibonacci.suru` (match expression + recursion, pure integers).
+
+- **`tests/fixtures/suru-codegen/control-flow-codegen.suru`** (new, 499 lines): Standalone codegen file — includes only `ir-builder.suru`, `codegen-types.suru`, and `suru-parser-ast.suru`. Contains the full mutually-recursive codegen dispatch layer. Key additions: `emitCallExpr` (user-defined function calls, enables recursion); `emitAssignStmt` (variable reassignment); `emitWhile` (three-block pattern: `wh_N_c / wh_N_b / wh_N_a`); `peekType` (LLVM type inference for match result alloca); `collectPatIdxs` / `collectStmtPatIdxs` (pre-collect non-wildcard arm indices); `emitMatchExpr` (result alloca emitted BEFORE the comparison chain — critical dominance invariant); `emitMatchStmt` (block arm bodies with `blockOpen` tracking to prevent double-terminators); `compare` method (sgt + slt + zext×2 + sub → i64 -1/0/1). `emitFnDecl` allocas each parameter from its LLVM SSA name (`%argv` for `suru_main`, `%name` for all others).
+- **`tests/fixtures/suru-codegen/codegen-types.suru`**: Added `blockOpen Bool` to `CodegenContext`; added `withBlockOpen` helper; updated `makeContext`, `withBuilder`, `withReturnType` to thread the field through.
+- **`tests/fixtures/suru-codegen/scalar-codegen.suru`**: Preserved as Stage 14b artifact; no longer used by the driver.
+- **`tests/fixtures/suru-codegen-driver/main.suru`**: Changed include from `scalar-codegen.suru` to `control-flow-codegen.suru`.
+- **`tests/Suru.Tests/IRSuruCodegenTests.cs`**: Added `IRSuruStage14cTests.FibonacciCrossValidation` — runs the driver on `fibonacci.suru`, links with Suru runtime modules, asserts output `"0\n1\n5\n55\n"`.
+- 160/160 tests green.
+
 ### Stage 14b — Scalar Values & Arithmetic (Suru-in-Suru Codegen)
 
 First real codegen layer: processes AST nodes from the Suru-in-Suru parser and emits LLVM IR for scalar programs. Cross-validates against the C# codegen on `arithmetic.suru`.

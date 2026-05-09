@@ -26,11 +26,14 @@ type VarEntry: { name String, allocaName String, llvmType String }
 type FnSig: { name String, returnLlvmType String }
 
 // All state threaded through codegen functions.
+// blockOpen: true when the current basic block needs a terminator (br/ret).
+// Set to false after emitting a ret; reset to true after labels (while/match merges).
 type CodegenContext: {
     builder           IrBuilder
     vars              Array<VarEntry>
     fns               Array<FnSig>
     currentReturnType String
+    blockOpen         Bool
 }
 
 // Returned by value-producing emitters: updated context + SSA name + LLVM type.
@@ -54,18 +57,23 @@ fn llvmTypeOf(typeName String) String {
 fn makeContext() CodegenContext {
     let vars Array<VarEntry>: []
     let fns Array<FnSig>: []
-    return { builder: ir.makeBuilder(), vars: vars, fns: fns, currentReturnType: "" }
+    return { builder: ir.makeBuilder(), vars: vars, fns: fns, currentReturnType: "", blockOpen: false }
 }
 
 // Return a new context identical to ctx but with a different builder.
 // Used to propagate the updated builder from ir.emit* calls back into the context.
 fn withBuilder(ctx CodegenContext, b IrBuilder) CodegenContext {
-    return { builder: b, vars: ctx.vars, fns: ctx.fns, currentReturnType: ctx.currentReturnType }
+    return { builder: b, vars: ctx.vars, fns: ctx.fns, currentReturnType: ctx.currentReturnType, blockOpen: ctx.blockOpen }
 }
 
 // Return a new context with a different currentReturnType (set when entering a fn).
 fn withReturnType(ctx CodegenContext, retType String) CodegenContext {
-    return { builder: ctx.builder, vars: ctx.vars, fns: ctx.fns, currentReturnType: retType }
+    return { builder: ctx.builder, vars: ctx.vars, fns: ctx.fns, currentReturnType: retType, blockOpen: ctx.blockOpen }
+}
+
+// Return a new context with blockOpen updated.
+fn withBlockOpen(ctx CodegenContext, open Bool) CodegenContext {
+    return { builder: ctx.builder, vars: ctx.vars, fns: ctx.fns, currentReturnType: ctx.currentReturnType, blockOpen: open }
 }
 
 // ─── Variable table helpers ──────────────────────────────────────────────────
