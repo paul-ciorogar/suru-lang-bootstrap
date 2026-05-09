@@ -1,0 +1,372 @@
+// Stage 14b — Scalar Value & Arithmetic Codegen
+//
+// Emits LLVM IR for scalar programs: Bool/Int32/Int64 literals, arithmetic and
+// printLn.  Covers the arithmetic.suru corpus target.  Match expressions, while
+// loops, and heap types (String/Array/Struct) are deferred to later stages.
+//
+// Entry point: emitModule(ctx, stmts) — processes a full module statement list
+// and emits a complete .ll file (header, runtime declarations, function bodies,
+// @main wrapper).
+//
+// Mutual recursion: emitValue ↔ emitMethod (value-producing arithmetic dispatch).
+// The C# semantic pre-pass registers all function signatures before analyzing
+// bodies, so this cross-call is valid.
+
+include "ir-builder.suru" as ir
+include "codegen-types.suru" as cg
+// Parser AST types (AstNode sum type and all variant structs) must be included
+// so this file compiles standalone — each .suru file is a separate compilation
+// unit and cannot rely on types that only appear in the top-level module.
+include "../suru-parser/suru-parser-ast.suru" as ast
+
+// ─── Runtime declarations ─────────────────────────────────────────────────────
+
+// Emit declare stubs for all suru runtime and libc functions used by scalar programs.
+// Called once at the top of the module before any function definitions.
+fn emitScalarDecls(b IrBuilder) IrBuilder {
+    b: ir.emitDeclare(b, "ptr",  "malloc",       "i64")
+    b: ir.emitDeclare(b, "void", "free",          "ptr")
+    b: ir.emitDeclare(b, "void", "suru_println",  "ptr")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_int64","i64")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_bool", "i1")
+    b: ir.emitDeclare(b, "ptr",  "suru_box_int32","i32")
+    b: ir.emit(b, "\n")
+    return b
+}
+
+// ─── Value emission ───────────────────────────────────────────────────────────
+
+// Dispatch on an AstNode expression to produce an SSA name (or immediate constant)
+// and its LLVM type.  Returns a CodegenResult so the updated builder, SSA name, and
+// LLVM type are all available to the caller.
+//
+// Supported: IntLitNode, BoolLitNode, VarRefNode, MethodCallNode.
+// Other node kinds print an error and exit — they are not reachable for Stage 14b.
+fn emitValue(ctx CodegenContext, node AstNode) CodegenResult {
+    match node {
+        IntLitNode: {
+            // Integer literals are i64 immediate constants; no alloca needed.
+            return { ctx: ctx, name: node.text, llvmType: "i64" }
+        }
+        BoolLitNode: {
+            let v String: match node.boolVal { true: "1", _: "0" }
+            return { ctx: ctx, name: v, llvmType: "i1" }
+        }
+        VarRefNode: {
+            let entry VarEntry: cg.lookupVar(ctx, node.name)
+            let r IrResult: ir.emitLoad(ctx.builder, entry.llvmType, entry.allocaName)
+            return { ctx: cg.withBuilder(ctx, r.builder), name: r.name, llvmType: entry.llvmType }
+        }
+        MethodCallNode: {
+            return emitMethod(ctx, node)
+        }
+        _: {
+            printError("emitValue: unsupported node kind for Stage 14b")
+            exit(1)
+        }
+    }
+}
+
+// ─── Arithmetic/comparison method dispatch ────────────────────────────────────
+
+// Emit a method call on a scalar receiver.  Handles arithmetic (add, take,
+// multiply, split, invert) and comparison methods (lt, gt, lte, gte, equals).
+// The receiver and argument are evaluated first; then a single binop or icmp is
+// emitted.  Result type is always "i64" for arithmetic, "i1" for comparisons.
+fn emitMethod(ctx CodegenContext, node MethodCallNode) CodegenResult {
+    // Emit the receiver expression.
+    let rr CodegenResult: emitValue(ctx, node.receiver)
+    let ctx2 CodegenContext: rr.ctx
+    let recvName String: rr.name
+    let b IrBuilder: ctx2.builder
+
+    // invert() — unary negation; no argument.
+    match node.methodName.equals("invert") {
+        true: {
+            let r IrResult: ir.emitBinop(b, "sub", "i64", "0", recvName)
+            return { ctx: cg.withBuilder(ctx2, r.builder), name: r.name, llvmType: "i64" }
+        }
+        _: {}
+    }
+
+    // All remaining methods are binary (one argument).
+    let argNode AstNode: node.args.at(0)
+    let ar CodegenResult: emitValue(ctx2, argNode)
+    let ctx3 CodegenContext: ar.ctx
+    let argName String: ar.name
+    let b2 IrBuilder: ctx3.builder
+
+    // Arithmetic: choose LLVM opcode by method name.
+    let isArith Bool: node.methodName.equals("add")
+    match node.methodName.equals("take")     { true: { isArith: true } _: {} }
+    match node.methodName.equals("multiply") { true: { isArith: true } _: {} }
+    match node.methodName.equals("split")    { true: { isArith: true } _: {} }
+
+    match isArith {
+        true: {
+            let op String: "add"
+            match node.methodName.equals("take")     { true: { op: "sub"  } _: {} }
+            match node.methodName.equals("multiply") { true: { op: "mul"  } _: {} }
+            match node.methodName.equals("split")    { true: { op: "sdiv" } _: {} }
+            let r IrResult: ir.emitBinop(b2, op, "i64", recvName, argName)
+            return { ctx: cg.withBuilder(ctx3, r.builder), name: r.name, llvmType: "i64" }
+        }
+        _: {}
+    }
+
+    // Comparison: choose LLVM icmp predicate by method name.
+    let pred String: "eq"
+    match node.methodName.equals("lt")  { true: { pred: "slt" } _: {} }
+    match node.methodName.equals("gt")  { true: { pred: "sgt" } _: {} }
+    match node.methodName.equals("lte") { true: { pred: "sle" } _: {} }
+    match node.methodName.equals("gte") { true: { pred: "sge" } _: {} }
+    let r IrResult: ir.emitICmp(b2, pred, "i64", recvName, argName)
+    return { ctx: cg.withBuilder(ctx3, r.builder), name: r.name, llvmType: "i1" }
+}
+
+// ─── Statement emitters ───────────────────────────────────────────────────────
+
+// Emit a let declaration: alloca the variable, emit the RHS value, store it.
+// For Int32 annotations with an i64 literal RHS (e.g. `let p Int32: 7`),
+// the literal string "7" is stored directly as i32 — valid in LLVM IR.
+fn emitLetStmt(ctx CodegenContext, node LetNode) CodegenContext {
+    let llvmTy String: cg.llvmTypeOf(node.typeName)
+    let allocaR IrResult: ir.emitAlloca(ctx.builder, llvmTy)
+    let ctx2 CodegenContext: cg.withBuilder(ctx, allocaR.builder)
+
+    let valR CodegenResult: emitValue(ctx2, node.value)
+    let ctx3 CodegenContext: valR.ctx
+    let b IrBuilder: ir.emitStore(ctx3.builder, llvmTy, valR.name, allocaR.name)
+    let ctx4 CodegenContext: cg.withBuilder(ctx3, b)
+    return cg.addVar(ctx4, node.name, allocaR.name, llvmTy)
+}
+
+// Emit the boxing and suru_println call for a single printLn(expr) statement.
+//
+// Boxing boundary: scalar values are always raw LLVM types inside functions;
+// suru_println expects a tagged-pointer (ptr).  We box at this call site only.
+fn emitPrintLn(ctx CodegenContext, argNode AstNode) CodegenContext {
+    let vr CodegenResult: emitValue(ctx, argNode)
+    let ctx2 CodegenContext: vr.ctx
+    let valName String: vr.name
+    let ty String: vr.llvmType
+    let b IrBuilder: ctx2.builder
+
+    // Choose the correct boxing function for the scalar LLVM type.
+    let boxFn String: "suru_box_int64"
+    match ty.equals("i1")  { true: { boxFn: "suru_box_bool"  } _: {} }
+    match ty.equals("i32") { true: { boxFn: "suru_box_int32" } _: {} }
+
+    let boxArgs Array<String>: [ty.append(" ").append(valName)]
+    let br IrResult: ir.emitCall(b, "ptr", boxFn, boxArgs)
+    b: br.builder
+
+    let printArgs Array<String>: ["ptr ".append(br.name)]
+    b: ir.emitVoidCall(b, "suru_println", printArgs)
+    return cg.withBuilder(ctx2, b)
+}
+
+// Emit a single expression statement.  Currently handles printLn call sites.
+// Other expression statements (side-effect calls) are silently skipped.
+fn emitExprStmt(ctx CodegenContext, node ExprStmtNode) CodegenContext {
+    match node.expr {
+        CallNode: {
+            let callExpr CallNode: node.expr
+            match callExpr.name.equals("printLn") {
+                true: {
+                    return emitPrintLn(ctx, callExpr.args.at(0))
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+    return ctx
+}
+
+// Emit a return statement.  If the statement carries a value, evaluate it and
+// emit `ret <type> <val>`.  Void returns emit `ret void`.
+fn emitReturnStmt(ctx CodegenContext, node ReturnNode) CodegenContext {
+    match node.hasValue {
+        true: {
+            let vr CodegenResult: emitValue(ctx, node.value)
+            let b IrBuilder: ir.emitRet(vr.ctx.builder, ctx.currentReturnType, vr.name)
+            return cg.withBuilder(vr.ctx, b)
+        }
+        _: {
+            let b IrBuilder: ir.emitRetVoid(ctx.builder)
+            return cg.withBuilder(ctx, b)
+        }
+    }
+}
+
+// Dispatch on a single statement node and emit the corresponding IR.
+// Unknown statement kinds (TypeDeclNode, IncludeNode, etc.) are silently ignored —
+// they carry no codegen responsibility in Stage 14b.
+fn emitStmt(ctx CodegenContext, stmt AstNode) CodegenContext {
+    match stmt {
+        LetNode:      { return emitLetStmt(ctx, stmt)   }
+        ExprStmtNode: { return emitExprStmt(ctx, stmt)  }
+        ReturnNode:   { return emitReturnStmt(ctx, stmt) }
+        _: {}
+    }
+    return ctx
+}
+
+// Iterate a statement list, threading ctx through each statement.
+fn emitStmts(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        ctx: emitStmt(ctx, stmt)
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// ─── Function definition emission ────────────────────────────────────────────
+
+// Build the LLVM parameter string for a non-main function, e.g. "i64 %x, ptr %y".
+fn buildParamsStr(params Array<Param>) String {
+    let result String: ""
+    let i Int64: 0
+    while i.lt(params.len()) {
+        match i.gt(0) { true: { result: result.append(", ") } _: {} }
+        let param Param: params.at(i)
+        let ty String: cg.llvmTypeOf(param.typeName)
+        result: result.append(ty).append(" %").append(param.name)
+        i: i.add(1)
+    }
+    return result
+}
+
+// Emit a complete function definition.
+//
+// `fn main(args Array<String>)` is special-cased to @suru_main(ptr %argv) -> i64.
+// An implicit `ret i64 0` is appended for main when the body has no explicit return.
+// For other functions the implicit return is `ret void` (non-void functions should
+// have an explicit return in the body; this guards against an open basic block).
+//
+// Stage 14b limitation: function parameters are not alloca'd into the variable
+// table.  Programs that reference their parameters (other than args in main, which
+// is not used by arithmetic.suru) need this in Stage 14c.
+fn emitFnDecl(ctx CodegenContext, node FnDeclNode) CodegenContext {
+    let isMain Bool: node.name.equals("main")
+    let llvmName String: match isMain { true: "suru_main", _: node.name }
+    let retLlvmTy String: match isMain { true: "i64", _: cg.llvmTypeOf(node.returnType) }
+    let paramsStr String: match isMain { true: "ptr %argv", _: buildParamsStr(node.params) }
+
+    let b IrBuilder: ir.emitFnStart(ctx.builder, retLlvmTy, llvmName, paramsStr)
+
+    // Create a fresh inner context for the function body: new var table, shared fns.
+    let emptyVars Array<VarEntry>: []
+    let innerCtx CodegenContext: {
+        builder: b
+        vars: emptyVars
+        fns: ctx.fns
+        currentReturnType: retLlvmTy
+    }
+
+    innerCtx: emitStmts(innerCtx, node.body)
+
+    // Emit an implicit return to close the basic block.  A real program's last
+    // statement is usually printLn (side-effect only), leaving the block open.
+    let b2 IrBuilder: match isMain {
+        true: ir.emitRet(innerCtx.builder, "i64", "0")
+        _:    ir.emitRetVoid(innerCtx.builder)
+    }
+    let b3 IrBuilder: ir.emitFnEnd(b2)
+    return cg.withBuilder(ctx, b3)
+}
+
+// ─── Module-level @main wrapper ───────────────────────────────────────────────
+
+// Emit the C `@main(i32, ptr)` entry point that wraps @suru_main.
+// Builds a %suru.String envelope around argv so suru_main receives a uniform
+// Array<String>-compatible pointer regardless of whether it accesses args.
+fn emitMainWrapper(b IrBuilder) IrBuilder {
+    b: ir.emitFnStart(b, "i32", "main", "i32 %argc, ptr %argv")
+
+    // Allocate a %suru.String (24 bytes) to wrap the C argv.
+    let mallocArgs Array<String>: ["i64 24"]
+    let mr IrResult: ir.emitCall(b, "ptr", "malloc", mallocArgs)
+    b: mr.builder
+    let seqPtr String: mr.name
+
+    // Field 0: type_tag = 6 (String, used as a sentinel for argv wrapper)
+    let gr0 IrResult: ir.emitGEP(b, "%suru.String", seqPtr, "i32 0, i32 0")
+    b: gr0.builder
+    b: ir.emitStore(b, "i64", "6", gr0.name)
+
+    // Field 1: len = argc (widened to i64)
+    let gr1 IrResult: ir.emitGEP(b, "%suru.String", seqPtr, "i32 0, i32 1")
+    b: gr1.builder
+    let sr IrResult: ir.emitSext(b, "i32", "%argc", "i64")
+    b: sr.builder
+    b: ir.emitStore(b, "i64", sr.name, gr1.name)
+
+    // Field 2: data = argv (char**)
+    let gr2 IrResult: ir.emitGEP(b, "%suru.String", seqPtr, "i32 0, i32 2")
+    b: gr2.builder
+    b: ir.emitStore(b, "ptr", "%argv", gr2.name)
+
+    // Call @suru_main, truncate i64 → i32, return.
+    let mainArgs Array<String>: ["ptr ".append(seqPtr)]
+    let rr IrResult: ir.emitCall(b, "i64", "suru_main", mainArgs)
+    b: rr.builder
+    let tr IrResult: ir.emitTrunc(b, "i64", rr.name, "i32")
+    b: tr.builder
+    b: ir.emitRet(b, "i32", tr.name)
+    b: ir.emitFnEnd(b)
+    return b
+}
+
+// ─── Module entry point ───────────────────────────────────────────────────────
+
+// Register all top-level function declarations into the context's function table.
+// This pre-pass runs before emitting any function bodies so that forward calls
+// (or mutual recursion) can be resolved by name.
+fn registerFunctions(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                let isMain Bool: stmt.name.equals("main")
+                let retTy String: match isMain { true: "i64", _: cg.llvmTypeOf(stmt.returnType) }
+                ctx: cg.addFn(ctx, stmt.name, retTy)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Emit a complete LLVM IR module from a parsed statement list.
+//   1. Module header + runtime declare stubs.
+//   2. Register all function signatures.
+//   3. Emit each function body (two-pass so forward calls resolve).
+//   4. Emit the @main(i32, ptr) C entry-point wrapper.
+fn emitModule(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
+    let b IrBuilder: ir.emitModuleHeader(ctx.builder)
+    b: emitScalarDecls(b)
+    ctx: cg.withBuilder(ctx, b)
+
+    ctx: registerFunctions(ctx, stmts)
+
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                ctx: emitFnDecl(ctx, stmt)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+
+    let b2 IrBuilder: emitMainWrapper(ctx.builder)
+    return cg.withBuilder(ctx, b2)
+}

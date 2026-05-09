@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 14b — Scalar Values & Arithmetic (Suru-in-Suru Codegen)
+
+First real codegen layer: processes AST nodes from the Suru-in-Suru parser and emits LLVM IR for scalar programs. Cross-validates against the C# codegen on `arithmetic.suru`.
+
+- **`tests/fixtures/suru-codegen/codegen-types.suru`** (new): `CodegenContext` (wraps `IrBuilder` with `vars Array<VarEntry>`, `fns Array<FnSig>`, `currentReturnType String`), `VarEntry`, `FnSig`, `CodegenResult` (adds `llvmType String` so callers know the scalar type for boxing). Context helpers: `makeContext`, `withBuilder`, `withReturnType`, `lookupVar`, `addVar`, `addFn`, `lookupFn`, `llvmTypeOf` (Suru type annotation → raw LLVM type).
+- **`tests/fixtures/suru-codegen/scalar-codegen.suru`** (new): `emitScalarDecls` (declare stubs for malloc/free/suru_println/suru_box_*), `emitValue` (dispatch on AstNode variant: IntLitNode/BoolLitNode/VarRefNode/MethodCallNode), `emitMethod` (arithmetic: add→`add`/take→`sub`/multiply→`mul`/split→`sdiv`/invert→`sub 0,x`; comparison: lt/gt/lte/gte/equals→icmp), `emitLetStmt` (alloca + emitValue + store + addVar), `emitPrintLn` (box scalar at printLn boundary: `suru_box_int64/bool/int32` + `suru_println`), `emitExprStmt`, `emitReturnStmt`, `emitStmt`/`emitStmts`, `buildParamsStr`, `emitFnDecl` (fn main → `@suru_main(ptr %argv) i64`; implicit `ret i64 0`), `emitMainWrapper` (builds `%suru.String` argv envelope, calls `@suru_main`, truncates to i32), `registerFunctions`, `emitModule` (module header + decls + register fns + emit fn bodies + @main wrapper).
+- **`tests/fixtures/suru-codegen-driver/main.suru`** (new): Compiler driver fixture — reads a `.suru` source file, runs Suru lexer + parser, calls `codegen.emitModule`, writes the `.ll` output. Usage: `suru-codegen-driver <source.suru> <output.ll>`.
+- **`tests/Suru.Tests/IRSuruCodegenTests.cs`**: Added `IRSuruStage14bTests.ArithmeticCrossValidation` — compiles the driver, runs it on `arithmetic.suru`, writes Suru runtime `.ll` modules via `SuruRuntime`, links all with clang, runs the binary, asserts output matches `"5\n6\n6\n3\n-5\ntrue\nfalse\n7\n3\n"`.
+- **`TODO.md`**: Stage 14b marked complete; Stage 14c updated with deferred items (fibonacci, comparisons.suru, match expression codegen, while loops).
+- 159/159 tests green.
+
 ### Stage 14a — IR Builder Primitives
 
 Foundation for the Suru-in-Suru code generator. A pure string-building IR emitter

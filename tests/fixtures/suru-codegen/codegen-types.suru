@@ -1,0 +1,118 @@
+// Stage 14b — Codegen Context Types
+//
+// Defines the CodegenContext type that wraps IrBuilder with a variable symbol
+// table and function registry.  All codegen functions thread this context through
+// their calls so state accumulates purely (no global mutable state).
+//
+// Design:
+//   CodegenContext  = IrBuilder + vars (per-function symbol table) + fns (module
+//                     function registry) + currentReturnType (active function's
+//                     LLVM return type, e.g. "i64" or "void").
+//   CodegenResult   = CodegenContext + the SSA name produced by a value-emitting
+//                     instruction + the LLVM type of that value (needed to choose
+//                     the right box function at printLn boundaries).
+//
+// All functions in this file are pure: they return updated contexts/results and
+// never rely on global mutable state.
+
+include "ir-builder.suru" as ir
+
+// ─── Core types ──────────────────────────────────────────────────────────────
+
+// One entry in the function-local variable table.
+type VarEntry: { name String, allocaName String, llvmType String }
+
+// Registered function signature (return type only — enough for Stage 14b).
+type FnSig: { name String, returnLlvmType String }
+
+// All state threaded through codegen functions.
+type CodegenContext: {
+    builder           IrBuilder
+    vars              Array<VarEntry>
+    fns               Array<FnSig>
+    currentReturnType String
+}
+
+// Returned by value-producing emitters: updated context + SSA name + LLVM type.
+type CodegenResult: { ctx CodegenContext, name String, llvmType String }
+
+// ─── Type mapping ─────────────────────────────────────────────────────────────
+
+// Map a Suru type annotation name to the raw LLVM type used for scalars.
+// Named/pointer types fall through to "ptr".
+fn llvmTypeOf(typeName String) String {
+    match typeName.equals("Int64")   { true: { return "i64"    } _: {} }
+    match typeName.equals("Bool")    { true: { return "i1"     } _: {} }
+    match typeName.equals("Int32")   { true: { return "i32"    } _: {} }
+    match typeName.equals("Float64") { true: { return "double" } _: {} }
+    return "ptr"
+}
+
+// ─── Context constructors ────────────────────────────────────────────────────
+
+// Create a fresh context with an empty builder and no variables or functions.
+fn makeContext() CodegenContext {
+    let vars Array<VarEntry>: []
+    let fns Array<FnSig>: []
+    return { builder: ir.makeBuilder(), vars: vars, fns: fns, currentReturnType: "" }
+}
+
+// Return a new context identical to ctx but with a different builder.
+// Used to propagate the updated builder from ir.emit* calls back into the context.
+fn withBuilder(ctx CodegenContext, b IrBuilder) CodegenContext {
+    return { builder: b, vars: ctx.vars, fns: ctx.fns, currentReturnType: ctx.currentReturnType }
+}
+
+// Return a new context with a different currentReturnType (set when entering a fn).
+fn withReturnType(ctx CodegenContext, retType String) CodegenContext {
+    return { builder: ctx.builder, vars: ctx.vars, fns: ctx.fns, currentReturnType: retType }
+}
+
+// ─── Variable table helpers ──────────────────────────────────────────────────
+
+// Linear search for a variable by name.  Returns an empty VarEntry if not found
+// (callers that need the variable must ensure it was declared before use).
+fn lookupVar(ctx CodegenContext, name String) VarEntry {
+    let vars Array<VarEntry>: ctx.vars
+    let i Int64: 0
+    while i.lt(vars.len()) {
+        let entry VarEntry: vars.at(i)
+        match entry.name.equals(name) {
+            true: { return entry }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return { name: "", allocaName: "", llvmType: "" }
+}
+
+// Append a new variable binding to ctx.vars (in-place array mutation).
+fn addVar(ctx CodegenContext, name String, allocaName String, llvmType String) CodegenContext {
+    let entry VarEntry: { name: name, allocaName: allocaName, llvmType: llvmType }
+    ctx.vars.add(entry)
+    return ctx
+}
+
+// ─── Function registry helpers ───────────────────────────────────────────────
+
+// Append a function signature to ctx.fns.
+fn addFn(ctx CodegenContext, name String, retLlvmType String) CodegenContext {
+    let sig FnSig: { name: name, returnLlvmType: retLlvmType }
+    ctx.fns.add(sig)
+    return ctx
+}
+
+// Linear search for a function signature by name.
+// Returns an empty FnSig if not found.
+fn lookupFn(ctx CodegenContext, name String) FnSig {
+    let i Int64: 0
+    while i.lt(ctx.fns.len()) {
+        let sig FnSig: ctx.fns.at(i)
+        match sig.name.equals(name) {
+            true: { return sig }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return { name: "", returnLlvmType: "" }
+}

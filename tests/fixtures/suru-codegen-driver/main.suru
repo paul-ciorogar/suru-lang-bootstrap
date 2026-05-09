@@ -1,0 +1,32 @@
+// Stage 14b — Suru-in-Suru Compiler Driver
+//
+// Reads a .suru source file, runs the Suru lexer and parser to produce an AST,
+// runs the scalar codegen to produce LLVM IR (.ll text), and writes the result to
+// the output path.
+//
+// Usage:
+//   suru-codegen-driver <source.suru> <output.ll>
+//
+// Stage 14b scope: scalar programs only (Bool/Int32/Int64 literals, arithmetic
+// and comparison methods, let declarations, printLn, fn main).  The emitted .ll
+// must be linked against the suru runtime libraries (suru_box.ll, suru_string.ll,
+// suru_array.ll, suru_struct.ll, suru_variant.ll) for suru_println and the
+// suru_box_* functions to resolve.
+
+include "../suru-lexer/suru-lexer.suru"          as lex
+include "../suru-parser/suru-parser.suru"         as parser
+include "../suru-codegen/codegen-types.suru"      as cg
+include "../suru-codegen/scalar-codegen.suru"     as codegen
+
+fn main(args Array<String>) {
+    let sourcePath String: args.at(1)
+    let outputPath String: args.at(2)
+
+    // Lex → parse → codegen → write
+    let source  String:    readFile(sourcePath)
+    let tokens  Array<Token>: lex.tokenize(source)
+    let module  AstModule: parser.parse(tokens)
+    let ctx     CodegenContext: codegen.emitModule(cg.makeContext(), module.stmts)
+
+    writeFile(outputPath, ctx.builder.output)
+}
