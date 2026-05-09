@@ -1,0 +1,7 @@
+// Stage 15e test fixture — deliberately invalid program.
+// The semantic analyzer must report "undefined variable 'undeclared'" and
+// the driver must exit with code 1 without writing a .ll file.
+
+fn main(args Array<String>) {
+    printLn(undeclared)
+}

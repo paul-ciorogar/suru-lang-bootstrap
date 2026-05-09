@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 15e — Semantic Analysis Integration in Driver
+
+Inserts semantic analysis into the `suru-codegen-driver-full` pipeline between include resolution and codegen, so the driver rejects invalid programs with exit code 1 before emitting any IR.
+
+- **`tests/fixtures/suru-codegen-driver-full/main.suru`** (modified): Added includes for `suru-semantic.suru as semantic`, `suru-semantic-passes.suru as passes`, `suru-semantic-stmts.suru as semstmts` (alias avoids collision with the `stmts` Array variable), `suru-semantic-fns.suru as fns`. Added `collectNonInclude` helper (filters IncludeNode entries from the raw parsed module so statement analysis runs only on the main file's own code). Copied `analyzeModuleStatement`, `analyzeModuleStatements`, and `printErrorsFrom` from `suru-check/main.suru`. Extended `main()`: after `resolveIncludes`, runs `passes.runPrePasses` on all resolved declarations, then `analyzeModuleStatements` on main-file-only statements via `collectNonInclude(mod.stmts)`; prints errors prefixed with source path and calls `exit(1)` if any errors were found.
+- **`tests/fixtures/suru-semantic-reject/main.suru`** (new): Minimal invalid fixture (`printLn(undeclared)`) used by the rejection integration test.
+- **`tests/Suru.Tests/IRSuruStage15eTests.cs`** (new): `ValidProgramStillCompiles` — driver on `while-loop/main.suru` asserts output `"1\n2\n3\n4\n5\n55\nxxx\n"`; `InvalidProgramExitsWithCode1` — driver on `suru-semantic-reject/main.suru` asserts exit code 1 and no `.ll` file written. 174/174 tests green.
+
 ### Stage 15c + 15d — Variant Creation, Field Access & Match Dispatch (Suru-in-Suru)
 
 Implements variant creation, field access, and match dispatch in the Suru-in-Suru heap codegen, cross-validated against `tests/fixtures/sum-types/main.suru`. Also fixes a latent `ret void`/`unreachable` bug in `emitHFnDecl` for non-void-returning Suru functions.

@@ -1,14 +1,19 @@
-// Stage 14e / 15a — Full Pipeline Driver with Transitive Include Resolution
+// Stage 14e / 15a / 15e — Full Pipeline Driver with Transitive Include Resolution
+//                          and Semantic Analysis Gating
 //
-// Extends the Stage 14d heap driver to resolve include directives recursively
-// before codegen.  Stage 14e handled single-level includes; Stage 15a extends
-// this to transitive and diamond includes.
+// Pipeline: lex → parse → resolveIncludes → semantic analysis → codegen → writeFile
 //
-// For each IncludeNode found in the parsed main module the driver reads,
-// lexes, and parses the referenced file, then recurses into that file's own
-// includes before collecting its FnDeclNode / TypeDeclNode / SumTypeDeclNode
-// entries.  A resolved-path list deduplicates diamond includes — if the same
-// file is reachable via two paths it is processed exactly once.
+// Stage 14e: single-level include resolution via resolveIncludes.
+// Stage 15a: extended to transitive and diamond includes via resolveIncludesRec.
+// Stage 15e: semantic pre-passes + statement analysis inserted before codegen;
+//            driver exits with code 1 and prints errors if analysis fails.
+//
+// Semantic analysis strategy:
+//   1. runPrePasses over ALL resolved stmts (included + main) — registers every
+//      type name and function signature so cross-module references resolve.
+//   2. analyzeModuleStatements over the main file's OWN statements only
+//      (collectNonInclude filters out IncludeNode entries from mod.stmts) —
+//      mirrors the C# SemanticAnalyzer's SourcePath skip for external declarations.
 //
 // Namespace calls (e.g. lib.double(21)) are handled transparently by
 // emitHMethod in heap-value-codegen.suru — the receiver VarRef "lib" is not in
@@ -18,9 +23,15 @@
 // Usage:
 //   suru-codegen-driver-full <source.suru> <output.ll>
 
-include "../suru-lexer/suru-lexer.suru"          as lex
-include "../suru-parser/suru-parser.suru"         as parser
-include "../suru-codegen/heap-stmt-codegen.suru"  as codegen
+include "../suru-lexer/suru-lexer.suru"                   as lex
+include "../suru-parser/suru-parser.suru"                  as parser
+include "../suru-codegen/heap-stmt-codegen.suru"           as codegen
+include "../suru-semantic/suru-semantic.suru"              as semantic
+include "../suru-semantic/suru-semantic-passes.suru"       as passes
+include "../suru-semantic/suru-semantic-stmts.suru"        as semstmts
+include "../suru-semantic/suru-semantic-fns.suru"          as fns
+
+// ─── Include resolution ────────────────────────────────────────────────────────
 
 // Return the directory prefix of an absolute path (everything up to and
 // including the last '/').  Used to resolve relative include paths.
@@ -127,6 +138,65 @@ fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
     return all
 }
 
+// ─── Semantic analysis helpers ─────────────────────────────────────────────────
+
+// collectNonInclude — returns only the non-IncludeNode statements from stmts.
+// Used to separate the main file's own declarations from resolved-include
+// declarations so statement analysis does not re-analyze library code.
+fn collectNonInclude(stmts Array<AstNode>) Array<AstNode> {
+    let result Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        match stmts.at(i) {
+            IncludeNode: {}
+            _: { result.add(stmts.at(i)) }
+        }
+        i: i.add(1)
+    }
+    return result
+}
+
+// analyzeModuleStatement — pass-3 dispatch for top-level statements.
+// Extends stmts.analyzeStatement with a FnDeclNode arm so function bodies
+// are fully analyzed.  TypeDeclNode and SumTypeDeclNode are silently skipped
+// (already handled by pre-passes).
+fn analyzeModuleStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+    match stmt {
+        FnDeclNode:      { fns.analyzeFunctionDeclaration(state, stmt) }
+        TypeDeclNode:    {}
+        SumTypeDeclNode: {}
+        _:               { semstmts.analyzeStatement(state, stmt) }
+    }
+    return state
+}
+
+// analyzeModuleStatements — iterates the module statement list.
+fn analyzeModuleStatements(state AnalyzerState, moduleStmts Array<AstNode>) AnalyzerState {
+    let i Int64: 0
+    while i.lt(moduleStmts.len()) {
+        analyzeModuleStatement(state, moduleStmts.at(i))
+        i: i.add(1)
+    }
+    return state
+}
+
+// printErrorsFrom — recursive helper that prints errors starting at index i.
+// Prefixes each message with the source file path, matching C# output format.
+fn printErrorsFrom(state AnalyzerState, path String, i Int64) {
+    let errors Array<AnalysisError>: state.errors
+    match i.lt(errors.len()) {
+        true: {
+            let err AnalysisError: errors.at(i)
+            let line String: path.append(": ").append(err.message)
+            printLn(line)
+            printErrorsFrom(state, path, i.add(1))
+        }
+        _: {}
+    }
+}
+
+// ─── Entry point ───────────────────────────────────────────────────────────────
+
 fn main(args Array<String>) {
     let sourcePath String: args.at(1)
     let outputPath String: args.at(2)
@@ -134,6 +204,24 @@ fn main(args Array<String>) {
     let tokens Array<Token>: lex.tokenize(source)
     let mod AstModule: parser.parse(tokens)
     let stmts Array<AstNode>: resolveIncludes(mod.stmts, dirName(sourcePath))
+
+    // Semantic analysis:
+    //   Pre-passes over ALL stmts — registers types/functions from included libraries
+    //   and the main file so cross-module references resolve during analysis.
+    //   Statement analysis over the main file's OWN statements only to avoid
+    //   false errors in library code.
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    passes.runPrePasses(state, stmts)
+    let ownStmts Array<AstNode>: collectNonInclude(mod.stmts)
+    analyzeModuleStatements(state, ownStmts)
+    printErrorsFrom(state, sourcePath, 0)
+    let errors Array<AnalysisError>: state.errors
+    match errors.len().gt(0) {
+        true: exit(1)
+        _:    {}
+    }
+
+    // Code generation proceeds only when semantic analysis passes.
     let ctx HeapCodegenContext: hctx.makeHeapContext()
     ctx: codegen.emitHModule(ctx, stmts)
     let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
