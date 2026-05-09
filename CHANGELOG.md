@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 15b — Sum Type Context & Registration
+
+Adds `SumTypeDecl` to `HeapCodegenContext` and wires up sum type registration in the heap codegen pipeline, making variant indices available for Stages 15c/15d.
+
+- **`tests/fixtures/suru-codegen/heap-codegen-context.suru`** (modified): Added `type SumTypeDecl: { name String, variants Array<String> }`. Added `sumTypes Array<SumTypeDecl>` field to `HeapCodegenContext`; updated `makeHeapContext` and all 8 `withH*` updater functions to thread the new field. Added sum type registry section: `addHSumType`, `lookupSumType` (linear scan; empty decl on miss), `variantIdx` (returns 0-based index or -1), `isVariant` (true when name appears as variant in any registered sum type).
+- **`tests/fixtures/suru-codegen/heap-stmt-codegen.suru`** (modified): Added `registerHSumTypes` (scans stmts for `SumTypeDeclNode`, builds `SumTypeDecl`, calls `addHSumType`); called after `registerHTypes` in `emitHModule`; updated `emitHFnDecl` inner-context literal to propagate `sumTypes`.
+- **`tests/fixtures/sum-type-context-test/main.suru`** (new): Standalone unit test driver — manually registers `Shape: Circle, Square`, then asserts all helpers with 10 PASS/FAIL cases.
+- **`tests/Suru.Tests/IRSuruStage15bTests.cs`** (new): `SumTypeContextHelpersWork` — compiles and runs the fixture, asserts all 10 PASS lines and no FAIL lines. 171/171 tests green.
+
+### Stage 15a — Multi-Level Include Resolution
+
+Extends `suru-codegen-driver-full/main.suru` to handle transitive and diamond includes, replacing the single-level `resolveIncludes`/`collectDecls` pair with a recursive depth-first resolver backed by a path-deduplication list.
+
+- **`tests/fixtures/suru-codegen-driver-full/main.suru`** (modified): Removed `collectDecls`. Added `ResolveState { decls Array<AstNode>, resolved Array<String> }` named type, `pathResolved` (linear scan helper), and `resolveIncludesRec` (depth-first recursive resolver — for each `IncludeNode` skips already-resolved paths, otherwise marks as resolved, recurses into the included file's own stmts, then adds `FnDeclNode`/`TypeDeclNode`/`SumTypeDeclNode` to `state.decls`). Rewrote `resolveIncludes` to drive the recursive pass then append the main file's own non-include nodes. Signature unchanged — `main()` unmodified.
+- **`tests/fixtures/include-transitive/`** (new): Three-file fixture exercising transitivity (`main → lib-a → lib-b`) and diamond deduplication (`main → lib-b` direct + `main → lib-a → lib-b`). `triple(3)=9`; `quadruple(7)=28`; expected output `"28\n9\n"`.
+- **`tests/Suru.Tests/IRSuruStage15aTests.cs`** (new): `IRSuruStage15aTests.TransitiveAndDiamondIncludeCrossValidation` — compiles driver, runs on `include-transitive/main.suru`, links with five Suru runtime modules, asserts `"28\n9\n"`. 170/170 tests green.
+
 ### Stage 14e — Full Pipeline & Cross-Validation
 
 Extends the Suru-in-Suru code generator to cross-validate against six additional corpus programs and adds include-directive resolution to a new full-pipeline driver.

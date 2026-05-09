@@ -1,0 +1,86 @@
+// Stage 15b — Sum Type Context Unit Tests
+//
+// Exercises addHSumType, lookupSumType, variantIdx, and isVariant directly
+// without going through the full codegen driver.  Builds a HeapCodegenContext
+// manually, registers a Shape sum type (variants: Circle, Square), then
+// asserts each helper produces the expected result.
+
+include "../suru-codegen/heap-codegen-context.suru" as hctx
+
+fn main(args Array<String>) {
+    let ctx HeapCodegenContext: hctx.makeHeapContext()
+
+    // Register Shape: Circle, Square
+    let variants Array<String>: []
+    variants.add("Circle")
+    variants.add("Square")
+    let decl SumTypeDecl: { name: "Shape", variants: variants }
+    ctx: hctx.addHSumType(ctx, decl)
+
+    // ── lookupSumType ──────────────────────────────────────────────────────────
+
+    let found SumTypeDecl: hctx.lookupSumType(ctx, "Shape")
+    match found.name.equals("Shape") {
+        true: { printLn("PASS: lookupSumType finds Shape") }
+        _:    { printLn("FAIL: lookupSumType finds Shape") }
+    }
+
+    let foundVariants Array<String>: found.variants
+    match foundVariants.len().equals(2) {
+        true: { printLn("PASS: Shape has 2 variants") }
+        _:    { printLn("FAIL: Shape has 2 variants") }
+    }
+
+    // lookupSumType returns empty decl for unknown name
+    let missing SumTypeDecl: hctx.lookupSumType(ctx, "Unknown")
+    match missing.name.equals("") {
+        true: { printLn("PASS: lookupSumType missing returns empty") }
+        _:    { printLn("FAIL: lookupSumType missing returns empty") }
+    }
+
+    // ── variantIdx ─────────────────────────────────────────────────────────────
+
+    let shape SumTypeDecl: hctx.lookupSumType(ctx, "Shape")
+    let circleIdx Int64: hctx.variantIdx(shape, "Circle")
+    match circleIdx.equals(0) {
+        true: { printLn("PASS: variantIdx Circle=0") }
+        _:    { printLn("FAIL: variantIdx Circle=0") }
+    }
+
+    let squareIdx Int64: hctx.variantIdx(shape, "Square")
+    match squareIdx.equals(1) {
+        true: { printLn("PASS: variantIdx Square=1") }
+        _:    { printLn("FAIL: variantIdx Square=1") }
+    }
+
+    // variantIdx returns -1 for unknown variant
+    let unknownIdx Int64: hctx.variantIdx(shape, "Triangle")
+    match unknownIdx.equals(-1) {
+        true: { printLn("PASS: variantIdx unknown=-1") }
+        _:    { printLn("FAIL: variantIdx unknown=-1") }
+    }
+
+    // ── isVariant ──────────────────────────────────────────────────────────────
+
+    match hctx.isVariant(ctx, "Circle") {
+        true: { printLn("PASS: isVariant Circle=true") }
+        _:    { printLn("FAIL: isVariant Circle=true") }
+    }
+
+    match hctx.isVariant(ctx, "Square") {
+        true: { printLn("PASS: isVariant Square=true") }
+        _:    { printLn("FAIL: isVariant Square=true") }
+    }
+
+    // "Triangle" is not a variant of any registered sum type
+    match hctx.isVariant(ctx, "Triangle") {
+        true: { printLn("FAIL: isVariant Triangle=false") }
+        _:    { printLn("PASS: isVariant Triangle=false") }
+    }
+
+    // "Shape" is the sum type itself, not a variant
+    match hctx.isVariant(ctx, "Shape") {
+        true: { printLn("FAIL: isVariant Shape=false") }
+        _:    { printLn("PASS: isVariant Shape=false") }
+    }
+}

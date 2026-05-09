@@ -149,6 +149,22 @@ fn registerHTypes(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenConte
     return ctx
 }
 
+fn registerHSumTypes(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            SumTypeDeclNode: {
+                let decl SumTypeDecl: { name: stmt.name, variants: stmt.variants }
+                ctx: hctx.addHSumType(ctx, decl)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
 fn registerHFunctions(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
     let i Int64: 0
     while i.lt(stmts.len()) {
@@ -377,7 +393,7 @@ fn emitHFnDecl(ctx HeapCodegenContext, node FnDeclNode) HeapCodegenContext {
     let pStr String: match isMain { true: "ptr %argv", _: buildHParamsStr(node.params) }
     let emptyVars Array<HeapVarEntry>: []
     let retName String: hctx.makeSuruType(node.returnType)
-    let inner HeapCodegenContext: { builder: ir.emitFnStart(ir.makeBuilder(), retTy, llvmName, pStr), fns: "", strGlobals: "", helpers: "", vars: emptyVars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retTy, currentReturnName: retName, blockOpen: true }
+    let inner HeapCodegenContext: { builder: ir.emitFnStart(ir.makeBuilder(), retTy, llvmName, pStr), fns: "", strGlobals: "", helpers: "", vars: emptyVars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retTy, currentReturnName: retName, blockOpen: true }
     let i Int64: 0
     while i.lt(node.params.len()) {
         let p Param: node.params.at(i)
@@ -421,6 +437,7 @@ fn emitHModule(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext 
     ctx: hctx.withHBuilder(ctx, ir.emitModuleHeader(ctx.builder))
     ctx: registerStringLiterals(ctx, stmts)
     ctx: registerHTypes(ctx, stmts)
+    ctx: registerHSumTypes(ctx, stmts)
     ctx: registerHFunctions(ctx, stmts)
     ctx: hctx.withHBuilder(ctx, prim.emitAllHeapDecls(ctx.builder))
     ctx: htypes.emitAllTypeCloneDrop(ctx)

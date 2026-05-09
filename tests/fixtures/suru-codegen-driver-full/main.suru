@@ -1,10 +1,14 @@
-// Stage 14e — Full Pipeline Driver with Include Resolution
+// Stage 14e / 15a — Full Pipeline Driver with Transitive Include Resolution
 //
-// Extends the Stage 14d heap driver to resolve single-level include directives
-// before codegen.  For each IncludeNode found in the parsed main module the
-// driver reads, lexes, and parses the referenced file, merges its FnDeclNode /
-// TypeDeclNode / SumTypeDeclNode entries into the main stmt list, and then
-// invokes emitHModule on the combined list.
+// Extends the Stage 14d heap driver to resolve include directives recursively
+// before codegen.  Stage 14e handled single-level includes; Stage 15a extends
+// this to transitive and diamond includes.
+//
+// For each IncludeNode found in the parsed main module the driver reads,
+// lexes, and parses the referenced file, then recurses into that file's own
+// includes before collecting its FnDeclNode / TypeDeclNode / SumTypeDeclNode
+// entries.  A resolved-path list deduplicates diamond includes — if the same
+// file is reachable via two paths it is processed exactly once.
 //
 // Namespace calls (e.g. lib.double(21)) are handled transparently by
 // emitHMethod in heap-value-codegen.suru — the receiver VarRef "lib" is not in
@@ -29,50 +33,96 @@ fn dirName(path String) String {
     return "./"
 }
 
-// Collect only declaration nodes (fn, type, sum-type) from a stmt list.
-// Used to pull in declarations from included files without their top-level
-// expression statements or include directives.
-fn collectDecls(stmts Array<AstNode>) Array<AstNode> {
-    let out Array<AstNode>: []
+// Carries accumulated declarations and the set of already-resolved absolute
+// paths so transitive and diamond includes are handled in a single recursive
+// pass without re-processing any file.
+type ResolveState: { decls Array<AstNode>, resolved Array<String> }
+
+// Linear scan: true if path already appears in the resolved list.
+fn pathResolved(resolved Array<String>, path String) Bool {
+    let i Int64: 0
+    while i.lt(resolved.len()) {
+        match resolved.at(i).equals(path) {
+            true: { return true }
+            _:    {}
+        }
+        i: i.add(1)
+    }
+    return false
+}
+
+// Depth-first recursive resolver.  For each IncludeNode in stmts:
+//   - skip if the absolute path is already in state.resolved (diamond dedup)
+//   - otherwise mark as resolved, recurse into that file's own includes first,
+//     then add its FnDeclNode / TypeDeclNode / SumTypeDeclNode to state.decls.
+// Non-include declaration nodes in stmts are added directly to state.decls.
+// All other node kinds (LetNode, ExprStmt, …) are skipped — they belong only
+// to the file that defines them and must not leak into other compilation units.
+fn resolveIncludesRec(stmts Array<AstNode>, dir String, state ResolveState) ResolveState {
     let i Int64: 0
     while i.lt(stmts.len()) {
         let s AstNode: stmts.at(i)
         match s {
-            FnDeclNode:      { out.add(s) }
-            TypeDeclNode:    { out.add(s) }
-            SumTypeDeclNode: { out.add(s) }
+            IncludeNode: {
+                let fullPath String: dir.append(s.path)
+                match pathResolved(state.resolved, fullPath) {
+                    false: {
+                        state.resolved.add(fullPath)
+                        let src String: readFile(fullPath)
+                        let toks Array<Token>: lex.tokenize(src)
+                        let mod AstModule: parser.parse(toks)
+                        state: resolveIncludesRec(mod.stmts, dirName(fullPath), state)
+                    }
+                    _: {}
+                }
+            }
+            FnDeclNode:      { state.decls.add(s) }
+            TypeDeclNode:    { state.decls.add(s) }
+            SumTypeDeclNode: { state.decls.add(s) }
             _: {}
         }
         i: i.add(1)
     }
-    return out
+    return state
 }
 
-// Perform single-level include resolution.  For each IncludeNode in mainStmts
-// the referenced file is read, parsed, and its declarations prepended to the
-// result.  All other nodes (FnDeclNode, TypeDeclNode, LetNode, etc.) from the
-// main file are appended after the included declarations.
+// Resolve all transitive includes from mainStmts, then append the main file's
+// own non-include nodes.  Signature is unchanged from Stage 14e — main() needs
+// no modification.
 fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
-    let all Array<AstNode>: []
+    let state ResolveState: { decls: [], resolved: [] }
     let i Int64: 0
     while i.lt(mainStmts.len()) {
         let s AstNode: mainStmts.at(i)
         match s {
             IncludeNode: {
                 let fullPath String: dir.append(s.path)
-                let src String: readFile(fullPath)
-                let toks Array<Token>: lex.tokenize(src)
-                let mod AstModule: parser.parse(toks)
-                let decls Array<AstNode>: collectDecls(mod.stmts)
-                let j Int64: 0
-                while j.lt(decls.len()) {
-                    all.add(decls.at(j))
-                    j: j.add(1)
+                match pathResolved(state.resolved, fullPath) {
+                    false: {
+                        state.resolved.add(fullPath)
+                        let src String: readFile(fullPath)
+                        let toks Array<Token>: lex.tokenize(src)
+                        let mod AstModule: parser.parse(toks)
+                        state: resolveIncludesRec(mod.stmts, dirName(fullPath), state)
+                    }
+                    _: {}
                 }
             }
-            _: { all.add(s) }
+            _: {}
         }
         i: i.add(1)
+    }
+    // Transitive declarations are already in state.decls; append main file's
+    // own nodes (everything except include directives) after them.
+    let all Array<AstNode>: state.decls
+    let j Int64: 0
+    while j.lt(mainStmts.len()) {
+        let s AstNode: mainStmts.at(j)
+        match s {
+            IncludeNode: {}
+            _: { all.add(s) }
+        }
+        j: j.add(1)
     }
     return all
 }

@@ -1,0 +1,17 @@
+// Fixture for Stage 15a: transitive + diamond include resolution.
+//
+// lib-a includes lib-b; main includes both lib-a and lib-b directly.
+// The second include of lib-b (via main) must be deduplicated so that
+// triple() is not defined twice in the emitted IR.
+//
+// Expected output:
+//   28    (quadruple(7) = triple(7) + 7 = 21 + 7)
+//   9     (triple(3))
+
+include "lib-a.suru" as liba
+include "lib-b.suru" as libb
+
+fn main(args Array<String>) {
+    printLn(liba.quadruple(7))
+    printLn(libb.triple(3))
+}

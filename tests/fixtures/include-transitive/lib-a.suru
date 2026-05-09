@@ -1,0 +1,5 @@
+include "lib-b.suru" as libb
+
+fn quadruple(n Int64) Int64 {
+    return libb.triple(n).add(n)
+}

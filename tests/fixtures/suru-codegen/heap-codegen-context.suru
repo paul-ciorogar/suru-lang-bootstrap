@@ -28,6 +28,10 @@ type TypeFieldEntry: { name String, typeName String }
 // in a pre-pass so struct field layout is available during codegen.
 type TypeDecl: { name String, fields Array<TypeFieldEntry> }
 
+// Compiled view of a SumTypeDeclaration AST node.  Populated from SumTypeDeclNode nodes
+// in a pre-pass so variant indices are available during match dispatch codegen.
+type SumTypeDecl: { name String, variants Array<String> }
+
 // ─── String literal registry ──────────────────────────────────────────────────
 
 // Maps a string literal text to its pre-assigned LLVM global name (@.str_N).
@@ -56,6 +60,7 @@ type HeapCodegenContext: {
     vars              Array<HeapVarEntry>
     fnSigs            Array<FnSig>
     types             Array<TypeDecl>
+    sumTypes          Array<SumTypeDecl>
     strIndex          Array<StrIndexEntry>
     strCount          Int64
     currentReturnType String
@@ -70,10 +75,11 @@ type HeapCodegenResult: { ctx HeapCodegenContext, name String, llvmType String, 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 fn makeHeapContext() HeapCodegenContext {
-    let vars   Array<HeapVarEntry>:  []
-    let fnSigs Array<FnSig>:         []
-    let types  Array<TypeDecl>:      []
-    let idx    Array<StrIndexEntry>: []
+    let vars     Array<HeapVarEntry>:  []
+    let fnSigs   Array<FnSig>:         []
+    let types    Array<TypeDecl>:      []
+    let sumTypes Array<SumTypeDecl>:   []
+    let idx      Array<StrIndexEntry>: []
     return {
         builder:           ir.makeBuilder()
         fns:               ""
@@ -82,6 +88,7 @@ fn makeHeapContext() HeapCodegenContext {
         vars:              vars
         fnSigs:            fnSigs
         types:             types
+        sumTypes:          sumTypes
         strIndex:          idx
         strCount:          0
         currentReturnType: ""
@@ -93,35 +100,35 @@ fn makeHeapContext() HeapCodegenContext {
 // ─── Single-field updaters ────────────────────────────────────────────────────
 
 fn withHBuilder(ctx HeapCodegenContext, b IrBuilder) HeapCodegenContext {
-    return { builder: b, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: b, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 fn withHBlockOpen(ctx HeapCodegenContext, open Bool) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: open }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: open }
 }
 
 fn withHReturnType(ctx HeapCodegenContext, retType String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 fn withHReturnName(ctx HeapCodegenContext, rn String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: rn, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: rn, blockOpen: ctx.blockOpen }
 }
 
 fn withHStrCount(ctx HeapCodegenContext, n Int64) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: n, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: n, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 fn withHStrGlobals(ctx HeapCodegenContext, sg String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: sg, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: sg, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 fn withHFns(ctx HeapCodegenContext, fns String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 fn withHHelpers(ctx HeapCodegenContext, helpers String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
 }
 
 // ─── Variable table ───────────────────────────────────────────────────────────
@@ -175,6 +182,49 @@ fn lookupHType(ctx HeapCodegenContext, name String) TypeDecl {
 fn addHType(ctx HeapCodegenContext, decl TypeDecl) HeapCodegenContext {
     ctx.types.add(decl)
     return ctx
+}
+
+// ─── Sum type registry ────────────────────────────────────────────────────────
+
+fn addHSumType(ctx HeapCodegenContext, decl SumTypeDecl) HeapCodegenContext {
+    ctx.sumTypes.add(decl)
+    return ctx
+}
+
+fn lookupSumType(ctx HeapCodegenContext, name String) SumTypeDecl {
+    let i Int64: 0
+    while i.lt(ctx.sumTypes.len()) {
+        let d SumTypeDecl: ctx.sumTypes.at(i)
+        match d.name.equals(name) { true: { return d } _: {} }
+        i: i.add(1)
+    }
+    let empty Array<String>: []
+    return { name: "", variants: empty }
+}
+
+// Returns the 0-based index of variantName in sumType.variants, or -1 if not found.
+fn variantIdx(sumType SumTypeDecl, variantName String) Int64 {
+    let i Int64: 0
+    while i.lt(sumType.variants.len()) {
+        match sumType.variants.at(i).equals(variantName) { true: { return i } _: {} }
+        i: i.add(1)
+    }
+    return -1
+}
+
+// True when name appears as a variant in any registered sum type.
+fn isVariant(ctx HeapCodegenContext, name String) Bool {
+    let i Int64: 0
+    while i.lt(ctx.sumTypes.len()) {
+        let d SumTypeDecl: ctx.sumTypes.at(i)
+        let j Int64: 0
+        while j.lt(d.variants.len()) {
+            match d.variants.at(j).equals(name) { true: { return true } _: {} }
+            j: j.add(1)
+        }
+        i: i.add(1)
+    }
+    return false
 }
 
 fn lookupHField(decl TypeDecl, fieldName String) TypeFieldEntry {
