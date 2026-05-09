@@ -30,20 +30,22 @@ namespace Suru.Compiler.Codegen;
 //                     slice, clone_dyn (dispatch on element type_tag), drop_dyn.
 //                     %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }
 //
-//   suru_struct.ll  — Struct linked-list operations: suru_find_field (phi-loop via strcmp),
-//                     suru_struct_clone (node-by-node copy), suru_struct_drop (linked-list free).
-//                     %suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next }
+//   suru_struct.ll  — Flat fixed-layout struct operations: suru_clone_dyn / suru_drop_dyn.
+//                     Struct header: { i64 type_tag, i64 variant_idx, ptr clone_fn, ptr drop_fn }
+//                     (32 bytes) followed by field slots at offset 32+i*8.
+//                     clone_fn / drop_fn are per-type functions emitted by IRTypeCloneDropCodeGenerator
+//                     into the user module; suru_clone_dyn/drop_dyn call them via vtable for tag=4/7.
 //
-//   suru_variant.ll — Sum type variant wrapper: suru_variant_create/tag/inner/drop.
-//                     %suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner }
+//   suru_variant.ll — Sum type in-place tagging: suru_variant_create/tag/inner/drop.
+//                     Variants reuse the flat struct allocation — type_tag=7, variant_idx set in-place.
 //
 // ── Cross-module dependencies ─────────────────────────────────────────────────
 //
 //   suru_box.ll:     depends on libc only (malloc, free, printf, puts, fprintf, fputs).
 //   suru_string.ll:  depends on libc only (malloc, memcpy, free, strcmp, strtol, snprintf).
-//   suru_struct.ll:  depends on libc only (malloc, free, strcmp).
-//   suru_array.ll:   depends on libc + suru_box_clone + suru_string_clone/drop + suru_struct_clone/drop.
-//   suru_variant.ll: depends on libc only (malloc, free).
+//   suru_struct.ll:  depends on libc + suru_box_clone + suru_string_clone/drop + suru_array_clone/drop_dyn.
+//   suru_array.ll:   depends on libc + suru_clone_dyn + suru_drop_dyn (from suru_struct.ll).
+//   suru_variant.ll: depends on libc only (free).
 //
 // All five .o files are linked into every Suru binary so cross-module calls resolve.
 //
@@ -326,6 +328,9 @@ done:
 %suru.Array.dyn  = type { i64, i64, i64, i64, ptr }
 define i64 @suru_dyn_len(ptr %v) {
 entry:
+  %is_null = icmp eq ptr %v, null
+  br i1 %is_null, label %unknown, label %dispatch
+dispatch:
   %tag = load i64, ptr %v
   switch i64 %tag, label %unknown [
     i64 5, label %is_array

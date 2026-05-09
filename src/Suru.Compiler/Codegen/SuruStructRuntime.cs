@@ -6,28 +6,35 @@ public static partial class SuruRuntime
 
     // Returns the full LLVM IR text for suru_struct.ll.
     //
-    // %suru.Field = { i64 type_tag=4, ptr name, i32 field_tag, i64 val, ptr next } (40 bytes)
-    // type_tag=4 (TYPE_STRUCT) at field 0 — the user's .ll stores this value at struct creation.
-    // suru_struct_clone copies the type_tag from source, so the clone inherits the correct tag.
+    // Phase 2: structs use a flat fixed-layout allocation instead of a linked list.
+    // Every struct header (32 bytes):
+    //   offset  0: i64 type_tag    (4=struct, 7=variant)
+    //   offset  8: i64 variant_idx (0 for non-variants)
+    //   offset 16: ptr clone_fn    (per-type, signature ptr(ptr))
+    //   offset 24: ptr drop_fn     (per-type, signature void(ptr))
+    // Fields follow at offset 32+i*8 in TypeDeclaration order (all stored as i64).
+    //
+    // suru_clone_dyn / suru_drop_dyn dispatch on type_tag and use the vtable at offsets
+    // 16/24 for tag=4 (struct) and tag=7 (variant), enabling correct dynamic dispatch from
+    // array element operations without knowing the concrete type name.
     public static string GenerateStructRuntime() => """
 ; Suru struct runtime — compiled to suru_struct.o and linked with every Suru program.
 ;
-; Every Suru Struct is a ptr to the head of a singly-linked list of %suru.Field nodes:
-;   %suru.Field = { i64 type_tag, ptr name, i32 field_tag, i64 val, ptr next }  (40 bytes)
-; type_tag=4 (TYPE_STRUCT) at field 0: any heap ptr inspected at offset 0 identifies this as Struct.
-; The user's .ll stores type_tag=4 at node creation; suru_struct_clone propagates it automatically.
+; Phase 2: structs use a flat fixed-layout allocation.
+; Header (32 bytes): { i64 type_tag, i64 variant_idx, ptr clone_fn, ptr drop_fn }
+; Fields follow at byte offset 32 + i*8, in TypeDeclaration order, stored as raw i64.
+; Field slot encoding: scalars as raw value; heap ptrs as ptrtoint(ptr to i64).
 ;
-; Field name strings are interned in the user module's string literal table and passed
-; as raw ptr (not Seq-wrapped). suru_find_field compares them via strcmp at runtime.
+; clone_fn and drop_fn are per-type LLVM functions emitted in the user module.
+; suru_clone_dyn/drop_dyn call them via function pointer for tag=4 and tag=7.
+;
+; type_tag: 0=Bool 1=Int32 2=Int64 3=Float64 4=Struct 5=Array 6=String 7=SumType
 
 ; ModuleID = 'suru_struct.ll'
 source_filename = "suru_struct.ll"
 
-%suru.Field = type { i64, ptr, i32, i64, ptr }
-
 declare ptr  @malloc(i64)
 declare void @free(ptr)
-declare i32  @strcmp(ptr, ptr)
 
 ; Cross-module refs for dynamic dispatch.
 declare ptr  @suru_box_clone(ptr)
@@ -39,15 +46,24 @@ declare void @suru_array_drop_dyn(ptr)
 ; ─── suru_clone_dyn ────────────────────────────────────────────────────────────
 ;
 ; Clone any Suru heap value by reading type_tag at offset 0.
-;   tag 0-3 (Box): suru_box_clone   tag 4 (Struct): suru_struct_clone
-;   tag 5 (Array): suru_array_clone_dyn   tag 6 (String): suru_string_clone
+;   tag 0-3 (Box): suru_box_clone   tag 5 (Array): suru_array_clone_dyn
+;   tag 6 (String): suru_string_clone
+;   tag 4 (Struct) / tag 7 (Variant): call clone_fn from vtable at offset 16
+; null guard: zero-initialized struct fields store i64 0; inttoptr gives null —
+; return null for null input so the cloned struct also carries a null field.
 define ptr @suru_clone_dyn(ptr %val) {
 entry:
+  %is_null = icmp eq ptr %val, null
+  br i1 %is_null, label %ret_null, label %dispatch
+ret_null:
+  ret ptr null
+dispatch:
   %tg = load i64, ptr %val
   switch i64 %tg, label %clone_box [
     i64 4, label %clone_struct
     i64 5, label %clone_array
     i64 6, label %clone_string
+    i64 7, label %clone_struct
   ]
 clone_box:
   %r0 = call ptr @suru_box_clone(ptr %val)
@@ -56,7 +72,9 @@ clone_string:
   %r6 = call ptr @suru_string_clone(ptr %val)
   ret ptr %r6
 clone_struct:
-  %r4 = call ptr @suru_struct_clone(ptr %val)
+  %cfn_gep = getelementptr i8, ptr %val, i64 16
+  %cfn = load ptr, ptr %cfn_gep
+  %r4 = call ptr (ptr) %cfn(ptr %val)
   ret ptr %r4
 clone_array:
   %r5 = call ptr @suru_array_clone_dyn(ptr %val)
@@ -66,15 +84,22 @@ clone_array:
 ; ─── suru_drop_dyn ─────────────────────────────────────────────────────────────
 ;
 ; Drop any Suru heap value by reading type_tag at offset 0.
-;   tag 0-3 (Box): free   tag 4 (Struct): suru_struct_drop
-;   tag 5 (Array): suru_array_drop_dyn   tag 6 (String): suru_string_drop
+;   tag 0-3 (Box): free   tag 5 (Array): suru_array_drop_dyn
+;   tag 6 (String): suru_string_drop
+;   tag 4 (Struct) / tag 7 (Variant): call drop_fn from vtable at offset 24
+; null guard: zero-initialized struct fields store i64 0; inttoptr gives null —
+; treat null as a no-op so partial/empty struct literals don't crash on drop.
 define void @suru_drop_dyn(ptr %val) {
 entry:
+  %is_null = icmp eq ptr %val, null
+  br i1 %is_null, label %done, label %dispatch
+dispatch:
   %tg = load i64, ptr %val
   switch i64 %tg, label %drop_box [
     i64 4, label %drop_struct
     i64 5, label %drop_array
     i64 6, label %drop_string
+    i64 7, label %drop_struct
   ]
 drop_box:
   call void @free(ptr %val)
@@ -83,115 +108,13 @@ drop_string:
   call void @suru_string_drop(ptr %val)
   ret void
 drop_struct:
-  call void @suru_struct_drop(ptr %val)
+  %dfn_gep = getelementptr i8, ptr %val, i64 24
+  %dfn = load ptr, ptr %dfn_gep
+  call void (ptr) %dfn(ptr %val)
   ret void
 drop_array:
   call void @suru_array_drop_dyn(ptr %val)
   ret void
-}
-
-; ─── suru_find_field ───────────────────────────────────────────────────────────
-;
-; Walk the linked list starting at `head`, compare each node's stored name ptr via
-; strcmp, and return the first matching node ptr. Assumes the field exists (no
-; null-termination check). Uses a phi-loop so LLVM can recognise it as a simple loop.
-define ptr @suru_find_field(ptr %head, ptr %name) {
-entry:
-  br label %loop
-loop:
-  %node = phi ptr [ %head, %entry ], [ %next, %cont ]
-  %ngep = getelementptr %suru.Field, ptr %node, i32 0, i32 1
-  %stor = load ptr, ptr %ngep
-  %cmp  = call i32 @strcmp(ptr %stor, ptr %name)
-  %fnd  = icmp eq i32 %cmp, 0
-  br i1 %fnd, label %done, label %cont
-cont:
-  %nxgp = getelementptr %suru.Field, ptr %node, i32 0, i32 4
-  %next = load ptr, ptr %nxgp
-  br label %loop
-done:
-  ret ptr %node
-}
-
-; ─── suru_struct_clone ─────────────────────────────────────────────────────────
-;
-; Deep-copy a struct field-node linked list. Allocates a new 40-byte node for each
-; source node, copies slots 0-3 (type_tag, name, field_tag, val); the new node's next
-; ptr starts as null. The head of the new list is tracked via a `chead` alloca, set
-; on the first node. The previous node's next slot is wired on every subsequent node.
-define ptr @suru_struct_clone(ptr %head) {
-entry:
-  %csrc  = alloca ptr
-  %cprev = alloca ptr
-  %chead = alloca ptr
-  store ptr %head, ptr %csrc
-  store ptr null, ptr %cprev
-  store ptr null, ptr %chead
-  br label %cond
-cond:
-  %sv   = load ptr, ptr %csrc
-  %isnl = icmp eq ptr %sv, null
-  br i1 %isnl, label %done, label %body
-body:
-  %cn   = call ptr @malloc(i64 40)
-  %sn0  = getelementptr %suru.Field, ptr %sv, i32 0, i32 0
-  %tv0  = load i64, ptr %sn0
-  %dn0  = getelementptr %suru.Field, ptr %cn, i32 0, i32 0
-  store i64 %tv0, ptr %dn0
-  %sn1  = getelementptr %suru.Field, ptr %sv, i32 0, i32 1
-  %nv1  = load ptr, ptr %sn1
-  %dn1  = getelementptr %suru.Field, ptr %cn, i32 0, i32 1
-  store ptr %nv1, ptr %dn1
-  %st2  = getelementptr %suru.Field, ptr %sv, i32 0, i32 2
-  %tv2  = load i32, ptr %st2
-  %dt2  = getelementptr %suru.Field, ptr %cn, i32 0, i32 2
-  store i32 %tv2, ptr %dt2
-  %sv3  = getelementptr %suru.Field, ptr %sv, i32 0, i32 3
-  %vv3  = load i64, ptr %sv3
-  %dv3  = getelementptr %suru.Field, ptr %cn, i32 0, i32 3
-  store i64 %vv3, ptr %dv3
-  %dn4  = getelementptr %suru.Field, ptr %cn, i32 0, i32 4
-  store ptr null, ptr %dn4
-  %pv   = load ptr, ptr %cprev
-  %ifl  = icmp eq ptr %pv, null
-  br i1 %ifl, label %sethead, label %wire
-sethead:
-  store ptr %cn, ptr %chead
-  br label %cont
-wire:
-  %pnx  = getelementptr %suru.Field, ptr %pv, i32 0, i32 4
-  store ptr %cn, ptr %pnx
-  br label %cont
-cont:
-  store ptr %cn, ptr %cprev
-  %snx  = getelementptr %suru.Field, ptr %sv, i32 0, i32 4
-  %nxt  = load ptr, ptr %snx
-  store ptr %nxt, ptr %csrc
-  br label %cond
-done:
-  %res  = load ptr, ptr %chead
-  ret ptr %res
-}
-
-; ─── suru_struct_drop ──────────────────────────────────────────────────────────
-;
-; Free all field nodes in the linked list. Loads `next` before calling free(current)
-; to avoid use-after-free. Terminates when the current node is null.
-define void @suru_struct_drop(ptr %head) {
-entry:
-  %dsrc = alloca ptr
-  store ptr %head, ptr %dsrc
-  br label %cond
-cond:
-  %v    = load ptr, ptr %dsrc
-  %isnl = icmp eq ptr %v, null
-  br i1 %isnl, label %done, label %body
-body:
-  %ng   = getelementptr %suru.Field, ptr %v, i32 0, i32 4
-  %nxt  = load ptr, ptr %ng
-  store ptr %nxt, ptr %dsrc
-  call void @free(ptr %v)
-  br label %cond
 done:
   ret void
 }

@@ -146,9 +146,12 @@ partial class IRCodeGenerator
     }
 
     private (string val, SuruType type) EmitArraySet(
-        string arrVal, Expression valExpr, Expression idxExpr)
+        string arrVal, Expression valExpr, Expression idxExpr, SuruType? elemHint = null)
     {
-        var (elemVal, elemType) = EmitValue(valExpr);
+        (string elemVal, SuruType elemType) = valExpr is StructLiteralExpression slset
+            && elemHint is SuruType.NamedType ntset
+            ? EmitStructLiteral(slset, ntset.Name)
+            : EmitValue(valExpr);
         var (idxVal, idxType)   = EmitValue(idxExpr);
         var boxedElem = IsScalar(elemType) ? BoxValue(elemVal, elemType) : elemVal;
         var idx       = IsScalar(idxType)  ? idxVal : UnboxInt64(idxVal);
@@ -157,9 +160,12 @@ partial class IRCodeGenerator
         return ("0", SuruType.Bool);
     }
 
-    private (string val, SuruType type) EmitArrayAdd(string arrVal, Expression valExpr)
+    private (string val, SuruType type) EmitArrayAdd(string arrVal, Expression valExpr, SuruType? elemHint = null)
     {
-        var (elemVal, elemType) = EmitValue(valExpr);
+        (string elemVal, SuruType elemType) = valExpr is StructLiteralExpression sladd
+            && elemHint is SuruType.NamedType ntadd
+            ? EmitStructLiteral(sladd, ntadd.Name)
+            : EmitValue(valExpr);
         var boxedElem = IsScalar(elemType) ? BoxValue(elemVal, elemType) : elemVal;
         _runtimeDecls.AddArrayAdd();
         _funcs.AppendLine($"  call void @suru_array_add(ptr {arrVal}, ptr {boxedElem})");

@@ -9,8 +9,8 @@
 //   verify non-void has return → pop scope → restore context.
 //
 // checkHasReturn:
-//   linear scan of a statement list; returns true on NODE_RETURN or on
-//   a NODE_WHILE whose body transitively contains a return. The exit()
+//   linear scan of a statement list; returns true on ReturnNode or on
+//   a WhileNode whose body transitively contains a return. The exit()
 //   path is deferred to Stage 13e (requires expression analysis).
 //
 // All function names here are distinct from those in suru-semantic-stmts.suru
@@ -23,26 +23,25 @@ include "suru-semantic-stmts.suru" as analysis
 
 // ─── checkHasReturn ───────────────────────────────────────────────────────────
 
-// checkHasReturnInWhile — reads the NODE_WHILE body and delegates to
+// checkHasReturnInWhile — reads the WhileNode body and delegates to
 // checkHasReturnAt so the two functions can be mutually recursive.
-// Uses typed intermediate variable (same pattern as analyzeWhileStatement).
-fn checkHasReturnInWhile(stmt AstNode) Bool {
+fn checkHasReturnInWhile(stmt WhileNode) Bool {
     let body Array<AstNode>: stmt.body
     return checkHasReturnAt(body, 0)
 }
 
-// isExitCall — true when a NODE_EXPR_STMT contains a direct call to exit().
-// Extracted so checkHasReturnAt can use it as a single expression in a match
-// expression arm (match expression arms cannot contain block bodies).
+// isExitCall — true when an ExprStmtNode contains a direct call to exit().
+// Uses typed intermediate so CallNode.name (String) dispatches correctly.
 //
-// IMPORTANT: innerExpr.name is only accessed inside the NODE_CALL arm.
-// Other node kinds (e.g. NODE_MATCH) have no `name` field; suru_find_field
+// IMPORTANT: innerExpr.name is only accessed inside the CallNode arm.
+// Other node kinds (e.g. MatchExprNode) have no `name` field; suru_find_field
 // walks off the end of the linked list and segfaults when the field is absent.
-fn isExitCall(stmt AstNode) Bool {
+fn isExitCall(stmt ExprStmtNode) Bool {
     let innerExpr AstNode: stmt.expr
-    match innerExpr.kind {
-        NODE_CALL: {
-            let innerName String: innerExpr.name
+    match innerExpr {
+        CallNode: {
+            let typedCall CallNode: innerExpr
+            let innerName String: typedCall.name
             return innerName.equals("exit")
         }
         _: {}
@@ -51,18 +50,18 @@ fn isExitCall(stmt AstNode) Bool {
 }
 
 // checkHasReturnAt — linear scan starting at index i.
-// Returns true on NODE_RETURN, NODE_WHILE that transitively contains a return,
-// or NODE_EXPR_STMT that is a direct call to exit().
+// Returns true on ReturnNode, a WhileNode that transitively contains a return,
+// or an ExprStmtNode that is a direct call to exit().
 // Mirrors CheckHasReturn (SemanticAnalyzer.cs:253–268).
 fn checkHasReturnAt(stmts Array<AstNode>, i Int64) Bool {
     return match i.lt(stmts.len()) {
-        true: match stmts.at(i).kind {
-            NODE_RETURN: true
-            NODE_WHILE: match checkHasReturnInWhile(stmts.at(i)) {
+        true: match stmts.at(i) {
+            ReturnNode:   true
+            WhileNode:    match checkHasReturnInWhile(stmts.at(i)) {
                 true: true
                 _: checkHasReturnAt(stmts, i.add(1))
             }
-            NODE_EXPR_STMT: match isExitCall(stmts.at(i)) {
+            ExprStmtNode: match isExitCall(stmts.at(i)) {
                 true: true
                 _: checkHasReturnAt(stmts, i.add(1))
             }
@@ -82,19 +81,16 @@ fn checkHasReturn(stmts Array<AstNode>) Bool {
 // analyzeFunctionDeclaration — mirrors SemanticAnalyzer.AnalyzeFunctionDeclaration
 // (SemanticAnalyzer.cs:201–226).
 //
-// stmt fields accessed (all undeclared in type AstNode; typed intermediates used):
-//   stmt.name        String  — function name for error messages
-//   stmt.returnType  String  — determines void vs non-void; set on state.currentReturnType
+// stmt fields (all declared in FnDeclNode):
+//   stmt.name        String       — function name for error messages
+//   stmt.returnType  String       — determines void vs non-void; set on state.currentReturnType
 //   stmt.params      Array<Param> — injected as symbols in the fresh function scope
 //   stmt.body        Array<AstNode> — analyzed via analysis.analyzeStatements
 //
 // Module-scope constants and symbols remain visible inside the function through
 // the parent-chain traversal in lookupSymbol: the new function scope's parent
 // index points to the module scope, so lookupSymbolAt walks up naturally.
-//
-// Nested NODE_FN_DECL inside a function body falls through to _:{} in
-// analysis.analyzeStatement — nested functions are not used in Suru programs.
-fn analyzeFunctionDeclaration(state AnalyzerState, stmt AstNode) AnalyzerState {
+fn analyzeFunctionDeclaration(state AnalyzerState, stmt FnDeclNode) AnalyzerState {
     // 1. Save outer context for restoration after body analysis.
     let savedReturnType String: state.currentReturnType
     let savedInsideFunction Int64: state.insideFunction
@@ -103,7 +99,6 @@ fn analyzeFunctionDeclaration(state AnalyzerState, stmt AstNode) AnalyzerState {
     semantic.pushScope(state)
 
     // 3. Inject parameters as symbols in the new scope.
-    //    Uses typed intermediate to ensure correct array dispatch (same as registerFnDecl).
     let params Array<Param>: stmt.params
     let pi Int64: 0
     while pi.lt(params.len()) {
@@ -123,7 +118,6 @@ fn analyzeFunctionDeclaration(state AnalyzerState, stmt AstNode) AnalyzerState {
     analysis.analyzeStatements(state, body)
 
     // 6. Non-void functions must have at least one reachable return path.
-    //    exit() counting is deferred to Stage 13e (expression analysis required).
     let isVoid Bool: returnType.equals("void") or returnType.equals("")
     match not isVoid and not checkHasReturn(body) {
         true: semantic.addError(state, "function '".append(stmt.name).append("' has no return statement"))

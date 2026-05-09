@@ -331,7 +331,7 @@ fn info(c Circle) String {
 
 A sum-type match statement where every arm body has a `return` or `exit` satisfies the non-void return requirement of the enclosing function.
 
-> **Implementation note:** Each variant value is a heap-allocated `%suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner }` (24 bytes). Field access calls `@suru_variant_inner` to unwrap before `@suru_find_field`. Match dispatch calls `@suru_variant_tag` once to extract the `i64` variant index, then compares it against each arm's statically-known index.
+> **Implementation note:** A variant value is a flat fixed-layout struct allocation (header: `{ i64 type_tag=7, i64 variant_idx, ptr clone_fn, ptr drop_fn }` at offsets 0/8/16/24, then field slots at offset 32+i×8). `suru_variant_inner` is the identity function — the variant IS the struct. Field access resolves directly against the concrete struct type after codegen type-narrowing within the match arm. Match dispatch calls `@suru_variant_tag` once to extract the `i64` variant index, then compares it against each arm's statically-known index. Within each variant arm, the condition variable's type is narrowed to the concrete variant type so field accesses resolve without explicit re-binding.
 
 ### Arrays
 

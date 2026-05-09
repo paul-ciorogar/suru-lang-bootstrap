@@ -11,8 +11,8 @@
 //   analyzeModuleStatements(state, stmts) → full pass-3 statement analysis
 //
 // analyzeModuleStatements adds one dispatch case absent from
-// stmts.analyzeStatement: NODE_FN_DECL → fns.analyzeFunctionDeclaration.
-// NODE_TYPE_DECL is silently skipped (already handled by pre-passes).
+// stmts.analyzeStatement: FnDeclNode → fns.analyzeFunctionDeclaration.
+// TypeDeclNode and SumTypeDeclNode are silently skipped (handled by pre-passes).
 //
 // Error format: "<path>: <message>" — matches the C# SemanticAnalyzer output.
 //
@@ -20,7 +20,7 @@
 // suru-parser.suru → suru-lexer.suru) make the following available without
 // explicit re-inclusion:
 //   lexer.*   — tokenize
-//   parser.*  — parse, AstModule, AstNode, NODE_* constants
+//   parser.*  — parse, AstModule, AstNode, and all node variant types
 //   semantic.* — makeAnalyzerState, AnalyzerState, AnalysisError
 //   passes.*  — runPrePasses
 //   stmts.*   — analyzeStatement, analyzeStatements
@@ -35,20 +35,21 @@ include "../suru-semantic/suru-semantic-fns.suru" as fns
 
 // analyzeModuleStatement — pass-3 dispatch for top-level statements.
 //
-// Extends stmts.analyzeStatement with a NODE_FN_DECL arm so function bodies
-// are fully analyzed. NODE_TYPE_DECL falls through to the wildcard (already
-// handled by pre-passes). All other kinds delegate to stmts.analyzeStatement.
+// Extends stmts.analyzeStatement with a FnDeclNode arm so function bodies
+// are fully analyzed. TypeDeclNode and SumTypeDeclNode fall through to the
+// wildcard (already handled by pre-passes). All other kinds delegate to
+// stmts.analyzeStatement.
 fn analyzeModuleStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
-    match stmt.kind {
-        NODE_FN_DECL: fns.analyzeFunctionDeclaration(state, stmt)
-        NODE_TYPE_DECL: {}
-        _: stmts.analyzeStatement(state, stmt)
+    match stmt {
+        FnDeclNode:      { fns.analyzeFunctionDeclaration(state, stmt) }
+        TypeDeclNode:    {}
+        SumTypeDeclNode: {}
+        _:               { stmts.analyzeStatement(state, stmt) }
     }
     return state
 }
 
 // analyzeModuleStatements — iterates the module statement list.
-// Mirrors the C# SemanticAnalyzer _Analyze() pass-3 loop (line 37).
 fn analyzeModuleStatements(state AnalyzerState, moduleStmts Array<AstNode>) AnalyzerState {
     let i Int64: 0
     while i.lt(moduleStmts.len()) {

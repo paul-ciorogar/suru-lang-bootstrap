@@ -12,7 +12,7 @@ public sealed partial class IRCodeGenerator
     // Consults _module.TypeDeclarations for user-defined named types.
     // Throws if the type is unrecognised — semantic analysis should have caught it first.
     private SuruType SuruTypeFromAnnotation(TypeAnnotation ann)
-        => SuruTypeSystem.TryResolve(ann, _module.TypeDeclarations)
+        => SuruTypeSystem.TryResolve(ann, _module.TypeDeclarations, _module.SumTypeDeclarations)
            ?? throw new NotSupportedException($"IR codegen: unsupported type annotation '{ann}'");
 
     // Scalars (Bool/Int32/Int64/Float64) use raw LLVM types in local vars,

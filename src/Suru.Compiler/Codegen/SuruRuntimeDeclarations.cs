@@ -32,7 +32,6 @@ internal sealed class SuruRuntimeDeclarations
     private bool _arrayCloneDyn, _arrayDropDyn;
 
     // ─── Struct runtime (suru_struct.ll) ─────────────────────────────────────
-    private bool _findField, _structClone, _structDrop;
     private bool _cloneDyn, _dropDyn;
     private bool _dynLen;
 
@@ -243,27 +242,6 @@ internal sealed class SuruRuntimeDeclarations
     }
 
     // ─── Struct ──────────────────────────────────────────────────────────────
-
-    internal void AddFindField()
-    {
-        if (_findField) return;
-        _sb.AppendLine("declare ptr  @suru_find_field(ptr, ptr)");
-        _findField = true;
-    }
-
-    internal void AddStructClone()
-    {
-        if (_structClone) return;
-        _sb.AppendLine("declare ptr  @suru_struct_clone(ptr)");
-        _structClone = true;
-    }
-
-    internal void AddStructDrop()
-    {
-        if (_structDrop) return;
-        _sb.AppendLine("declare void @suru_struct_drop(ptr)");
-        _structDrop = true;
-    }
 
     internal void AddCloneDyn()
     {

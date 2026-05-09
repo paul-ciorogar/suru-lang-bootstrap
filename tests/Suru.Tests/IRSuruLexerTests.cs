@@ -10,7 +10,10 @@ namespace Suru.Tests;
 //
 //   <kind> <text> <line>:<col>
 //
-// Token kinds are module-level Int64 constants (TOK_EOF=0 … TOK_WHILE=26).
+// Token kinds are module-level Int64 constants (TOK_EOF=0 … TOK_TYPE=30) in
+// suru-lexer.suru; ordinals match the C# TokenKind enum exactly.  'as' is not
+// a keyword — it tokenises as TOK_IDENT.  '//' line comments are skipped.
+// main.suru uses `include "suru-lexer.suru" as lexer` and calls lexer.tokenize.
 // The main entry point returns void — the process exits 0 implicitly.
 //
 // ── IR features exercised ────────────────────────────────────────────────────
@@ -18,13 +21,14 @@ namespace Suru.Tests;
 // This is the most comprehensive integration fixture in the IR test suite.
 // It exercises nearly every feature of IRCodeGenerator in combination:
 //
-//   Module-level constants  — 27 TOK_* let bindings emitted as LLVM internal
-//                             globals in the pre-pass (pass-0 constants loop).
+//   Module-level constants  — 31 TOK_* let bindings in suru-lexer.suru emitted
+//                             as LLVM internal globals in the pre-pass.
 //
-//   User-defined functions  — 15 functions (isDigit, isLetter, makeToken,
-//                             keywordKind, readIdent, readNumber, escapeChar,
-//                             readString, tokenize, and more). The pre-pass
-//                             registers all signatures before any body is emitted.
+//   User-defined functions  — isDigit, isLetter, makeToken, keywordKind,
+//                             readIdent, readNumber, escapeChar, readString,
+//                             skipLineComment, tokenize, and helpers. The
+//                             pre-pass registers all signatures before any body
+//                             is emitted.
 //
 //   Struct tokens           — makeToken returns { kind, text, line, col }; each
 //                             field is a %suru.Field node in a heap-allocated
@@ -77,16 +81,16 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
         // print/main.suru: fn main(args Array<String>) — <,> not in singleCharKind,
         // so they tokenize as TOK_EOF (0). String tokenizes as IDENT (1).
         var expected =
-            "22 fn 1:1\n" +
+            "25 fn 1:1\n" +
             "1 main 1:4\n" +
             "7 ( 1:8\n" +
             "1 args 1:9\n" +
             "1 Array 1:14\n" +
-            "27 < 1:19\n" +
+            "17 < 1:19\n" +
             "1 String 1:20\n" +
-            "28 > 1:26\n" +
+            "18 > 1:26\n" +
             "8 ) 1:27\n" +
-            "12 { 1:29\n" +
+            "9 { 1:29\n" +
             "1 printLn 2:5\n" +
             "7 ( 2:12\n" +
             "2 true 2:13\n" +
@@ -103,7 +107,7 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
             "7 ( 5:12\n" +
             "5 1.2 5:13\n" +
             "8 ) 5:16\n" +
-            "13 } 6:1\n" +
+            "10 } 6:1\n" +
             "0  7:1\n";
 
         Assert.Equal(expected, Run(_exe, FixturePath("print")));
@@ -115,7 +119,7 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
     {
         var output = Run(_exe, FixturePath("arithmetic"));
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Assert.Equal("22 fn 1:1", lines[0]);   // first token is 'fn'
+        Assert.Equal("25 fn 1:1", lines[0]);   // first token is 'fn'
         Assert.StartsWith("0 ", lines[^1]);     // last token is EOF
         _testPassed = true;
     }
@@ -123,10 +127,12 @@ public class IRSuruLexerTests(CompiledFixturesIR fixtures) : IntegrationTestBase
     [Fact]
     public void Lexer_TokenizesSelf()
     {
-        var output = Run(_exe, FixturePath("suru-lexer"));
+        // Tokenize the library file directly — main.suru is now a thin include wrapper.
+        var lexerLib = Path.Combine(Path.GetDirectoryName(FixturePath("suru-lexer"))!, "suru-lexer.suru");
+        var output = Run(_exe, lexerLib);
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        // First token of the lexer source is 'let' (constants precede all functions)
-        Assert.Equal("16 let 1:1", lines[0]);
+        // Line 1 is a '//' comment; first emitted token is 'let' on line 2.
+        Assert.Equal("19 let 2:1", lines[0]);
         // Last token is EOF
         Assert.StartsWith("0 ", lines[^1]);
         // Should be a substantial number of tokens

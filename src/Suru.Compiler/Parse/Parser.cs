@@ -172,10 +172,7 @@ public sealed class Parser
     private IncludeDirective ParseIncludeDirective()
     {
         var pathToken = Consume(TokenKind.StringLiteral);
-        var asToken = Consume(TokenKind.Identifier);
-        if (asToken.Text != "as")
-            throw new ParseException(
-                $"{_tokens.SourcePath}({asToken.Line},{asToken.Column}): expected 'as', got '{asToken.Text}'");
+        Consume(TokenKind.As);
         var nsToken = Consume(TokenKind.Identifier);
         return new IncludeDirective(pathToken.Text, nsToken.Text);
     }

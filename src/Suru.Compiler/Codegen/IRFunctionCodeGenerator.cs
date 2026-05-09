@@ -140,17 +140,20 @@ public sealed partial class IRCodeGenerator
                 break;
 
             // let name NamedType: { fields } — thread type name into EmitStructLiteral.
-            // When the annotation names a variant, wrap the emitted struct in suru_variant_create.
+            // When the annotation names a variant, tag the flat struct in-place (type_tag=7,
+            // variant_idx=<idx>) instead of wrapping in a separate suru_variant_create allocation.
             case LetStatement { Name: var name, Value: StructLiteralExpression sl, TypeAnnotation: var slAnn }:
                 var (slVal, slType) = EmitStructLiteral(sl, slAnn.Name);
                 if (IsVariant(slAnn.Name))
                 {
-                    var parent  = FindParentSumType(slAnn.Name)!;
-                    var idx     = GetVariantIndex(slAnn.Name, parent);
-                    _runtimeDecls.AddVariantCreate();
-                    var wrapTmp = NextTmp();
-                    _funcs.AppendLine($"  {wrapTmp} = call ptr @suru_variant_create(i64 {idx}, ptr {slVal})");
-                    slVal = wrapTmp;
+                    var parent = FindParentSumType(slAnn.Name)!;
+                    var idx    = GetVariantIndex(slAnn.Name, parent);
+                    var tagGep  = NextTmp();
+                    var vidxGep = NextTmp();
+                    _funcs.AppendLine($"  {tagGep}  = getelementptr i8, ptr {slVal}, i64 0");
+                    _funcs.AppendLine($"  store i64 7, ptr {tagGep}");
+                    _funcs.AppendLine($"  {vidxGep} = getelementptr i8, ptr {slVal}, i64 8");
+                    _funcs.AppendLine($"  store i64 {idx}, ptr {vidxGep}");
                 }
                 var slPtr = $"%{name}.{_tmp++}";
                 _funcs.AppendLine($"  {slPtr} = alloca ptr");
@@ -240,7 +243,10 @@ public sealed partial class IRCodeGenerator
                 if (!_vars.TryGetValue(assignName, out var assignEntry))
                     throw new InvalidOperationException($"IR codegen: assignment to undeclared variable '{assignName}'");
                 var (assignPtrAddr, assignVarType) = assignEntry;
-                var (assignVal, assignExprType)    = EmitValue(assignExpr);
+                (string assignVal, SuruType assignExprType) = assignExpr is StructLiteralExpression slAssign
+                    && assignVarType is SuruType.NamedType ntAssign
+                    ? EmitStructLiteral(slAssign, ntAssign.Name)
+                    : EmitValue(assignExpr);
                 var storeVal  = IsScalar(assignVarType) && !IsScalar(assignExprType)
                     ? UnboxScalar(assignVal, assignVarType)
                     : assignVal;

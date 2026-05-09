@@ -1,0 +1,81 @@
+// suru-parser-ast.suru — AST node type declarations for the Suru parser.
+//
+// Provides all struct types and the AstNode sum type used throughout the parser
+// and semantic analyzer.  No functions — import this file for type definitions;
+// import suru-parser.suru for the parse() entry point.
+//
+// AstNode variant indices (0-based, in declaration order):
+//   0  IncludeNode     1  FnDeclNode      2  LetNode
+//   3  AssignNode      4  FieldAssignNode 5  ReturnNode
+//   6  WhileNode       7  ExprStmtNode    8  TypeDeclNode
+//   9  SumTypeDeclNode 10 MatchStmtNode   11 BoolLitNode
+//  12  IntLitNode      13 FloatLitNode    14 StrLitNode
+//  15  WildcardNode    16 VarRefNode      17 CallNode
+//  18  MethodCallNode  19 FieldAccessNode 20 ArrayLitNode
+//  21  StructLitNode   22 MatchExprNode   23 UnaryNode
+//  24  BinaryNode
+
+include "../suru-lexer/suru-lexer.suru" as lexer
+
+// Operator constants for UnaryNode.op and BinaryNode.op.
+let OP_NOT Int64: 1
+let OP_AND Int64: 2
+let OP_OR  Int64: 3
+
+// ─── Parser state ─────────────────────────────────────────────────────────────
+
+type Parser: { pos Int64, tokens Array<Token> }
+
+// ─── Helper types (not AstNode variants) ──────────────────────────────────────
+
+type Param:          { name String, typeName String }
+type StructFieldNode: { name String, value AstNode }
+type MatchArm:       { isWildcard Bool, pattern AstNode, body AstNode }
+type MatchStmtArm:   { isWildcard Bool, pattern AstNode, stmts Array<AstNode> }
+
+// ─── Statement node types (AstNode variants 0–10) ─────────────────────────────
+
+type IncludeNode:     { path String, ns String }
+type FnDeclNode:      { name String, params Array<Param>, returnType String, body Array<AstNode> }
+type LetNode:         { name String, typeName String, value AstNode }
+type AssignNode:      { name String, value AstNode }
+type FieldAssignNode: { receiver AstNode, fieldName String, value AstNode }
+type ReturnNode:      { hasValue Bool, value AstNode }
+type WhileNode:       { condition AstNode, body Array<AstNode> }
+type ExprStmtNode:    { expr AstNode }
+type TypeDeclNode:    { name String, fields Array<Param> }
+type SumTypeDeclNode: { name String, variants Array<String> }
+type MatchStmtNode:   { condition AstNode, arms Array<MatchStmtArm> }
+
+// ─── Expression node types (AstNode variants 11–24) ───────────────────────────
+
+type BoolLitNode:     { boolVal Bool }
+type IntLitNode:      { text String }
+type FloatLitNode:    { text String }
+type StrLitNode:      { text String }
+type WildcardNode:    { }
+type VarRefNode:      { name String }
+type CallNode:        { name String, args Array<AstNode> }
+type MethodCallNode:  { receiver AstNode, methodName String, args Array<AstNode> }
+type FieldAccessNode: { receiver AstNode, fieldName String }
+type ArrayLitNode:    { elems Array<AstNode> }
+type StructLitNode:   { fields Array<StructFieldNode> }
+type MatchExprNode:   { condition AstNode, arms Array<MatchArm> }
+type UnaryNode:       { op Int64, operand AstNode }
+type BinaryNode:      { op Int64, left AstNode, right AstNode }
+
+// ─── Sum type ──────────────────────────────────────────────────────────────────
+
+type AstNode: IncludeNode, FnDeclNode, LetNode, AssignNode, FieldAssignNode, ReturnNode, WhileNode, ExprStmtNode, TypeDeclNode, SumTypeDeclNode, MatchStmtNode, BoolLitNode, IntLitNode, FloatLitNode, StrLitNode, WildcardNode, VarRefNode, CallNode, MethodCallNode, FieldAccessNode, ArrayLitNode, StructLitNode, MatchExprNode, UnaryNode, BinaryNode
+
+// ─── Module and result types ───────────────────────────────────────────────────
+
+type AstModule:     { stmts Array<AstNode> }
+type ParseResult:   { parser Parser, expr AstNode }
+type TypeAnnResult: { parser Parser, typeName String }
+type RetTypeResult: { parser Parser, returnType String }
+type ArgsResult:    { parser Parser, args Array<AstNode> }
+type ArmResult:     { parser Parser, arm MatchArm }
+type StmtArmResult: { parser Parser, arm MatchStmtArm }
+type PatResult:     { parser Parser, pat AstNode }
+type StmtResult:    { parser Parser, stmt AstNode }

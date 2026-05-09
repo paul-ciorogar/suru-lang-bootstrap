@@ -8,11 +8,13 @@ public static partial class SuruRuntime
     //
     // Layout: %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data } (40 bytes)
     // type_tag at field 0 means any heap ptr can be identified as an Array at runtime.
-    // elem_tag holds the full SuruType ordinal (0-6) for the element type.
+    // elem_tag holds the full SuruType ordinal (0-7) for the element type.
     // All elements are stored as raw i64 (ptrtoint for ptr types, payload bits for scalars).
     // suru_array_at returns ptr (inttoptr of raw i64) — no element-type dispatch at call site.
     // suru_array_add / suru_array_set take ptr (ptrtoint to store) — uniform interface.
-    // suru_array_clone_dyn / suru_array_drop_dyn read element type_tag at runtime.
+    // suru_array_clone_dyn / suru_array_drop_dyn delegate to suru_clone_dyn / suru_drop_dyn
+    // (defined in suru_struct.ll) which dispatch via vtable for all types including tag=4
+    // (struct) and tag=7 (variant).
     public static string GenerateArrayRuntime() => """
 ; Suru array runtime — compiled to suru_array.o and linked with every Suru program.
 ;
@@ -31,12 +33,10 @@ declare ptr  @realloc(ptr, i64)
 declare ptr  @memcpy(ptr, ptr, i64)
 declare void @free(ptr)
 
-; Cross-module calls for element clone/drop.
-declare ptr  @suru_box_clone(ptr)
-declare ptr  @suru_string_clone(ptr)
-declare void @suru_string_drop(ptr)
-declare ptr  @suru_struct_clone(ptr)
-declare void @suru_struct_drop(ptr)
+; Cross-module dynamic dispatch for element clone/drop.
+; suru_clone_dyn / suru_drop_dyn handle all type_tags (0-7) via vtable for structs/variants.
+declare ptr  @suru_clone_dyn(ptr)
+declare void @suru_drop_dyn(ptr)
 
 ; ─── suru_array_at ─────────────────────────────────────────────────────────────
 ;
@@ -137,11 +137,13 @@ entry:
 
 ; ─── suru_array_clone_dyn ──────────────────────────────────────────────────────
 ;
-; Clone an array by reading each element's type_tag at runtime (offset 0 of element ptr).
-;   type_tag 0-3 (Box scalar): suru_box_clone
-;   type_tag 4   (Struct):     suru_struct_clone
-;   type_tag 5   (Array):      suru_array_clone_dyn (recursive)
-;   type_tag 6   (String):     suru_string_clone
+; Clone an array by delegating each element to @suru_clone_dyn.
+; suru_clone_dyn dispatches on type_tag at offset 0 and handles all types:
+;   tag 0-3 (Box scalar): suru_box_clone
+;   tag 4   (Struct):     per-type clone_fn from vtable at offset 16
+;   tag 5   (Array):      suru_array_clone_dyn (recursive)
+;   tag 6   (String):     suru_string_clone
+;   tag 7   (Variant):    per-type clone_fn from vtable at offset 16
 define ptr @suru_array_clone_dyn(ptr %arr) {
 entry:
   %tgep  = getelementptr %suru.Array, ptr %arr, i32 0, i32 0
@@ -166,35 +168,10 @@ body:
   %ss   = getelementptr i64, ptr %sdat, i64 %i
   %ri64 = load i64, ptr %ss
   %ep   = inttoptr i64 %ri64 to ptr
-  %etg  = load i64, ptr %ep
-  switch i64 %etg, label %clone_box [
-    i64 6, label %clone_string
-    i64 4, label %clone_struct
-    i64 5, label %clone_array
-  ]
-clone_string:
-  %cs   = call ptr @suru_string_clone(ptr %ep)
-  %csi  = ptrtoint ptr %cs to i64
-  %dss  = getelementptr i64, ptr %nd, i64 %i
-  store i64 %csi, ptr %dss
-  br label %next
-clone_struct:
-  %cst  = call ptr @suru_struct_clone(ptr %ep)
-  %csti = ptrtoint ptr %cst to i64
-  %dst  = getelementptr i64, ptr %nd, i64 %i
-  store i64 %csti, ptr %dst
-  br label %next
-clone_array:
-  %ca   = call ptr @suru_array_clone_dyn(ptr %ep)
-  %cai  = ptrtoint ptr %ca to i64
-  %dsa  = getelementptr i64, ptr %nd, i64 %i
-  store i64 %cai, ptr %dsa
-  br label %next
-clone_box:
-  %cb   = call ptr @suru_box_clone(ptr %ep)
-  %cbi  = ptrtoint ptr %cb to i64
-  %dsb  = getelementptr i64, ptr %nd, i64 %i
-  store i64 %cbi, ptr %dsb
+  %ec   = call ptr @suru_clone_dyn(ptr %ep)
+  %eci  = ptrtoint ptr %ec to i64
+  %ds   = getelementptr i64, ptr %nd, i64 %i
+  store i64 %eci, ptr %ds
   br label %next
 next:
   %ni   = add i64 %i, 1
@@ -216,11 +193,9 @@ after:
 
 ; ─── suru_array_drop_dyn ───────────────────────────────────────────────────────
 ;
-; Drop an array by reading each element's type_tag at runtime.
-;   type_tag 0-3 (Box scalar): free the Box
-;   type_tag 4   (Struct):     suru_struct_drop
-;   type_tag 5   (Array):      suru_array_drop_dyn (recursive)
-;   type_tag 6   (String):     suru_string_drop
+; Drop an array by delegating each element to @suru_drop_dyn.
+; suru_drop_dyn dispatches on type_tag at offset 0 and handles all types including
+; tag=4 (Struct) and tag=7 (Variant) via vtable at offset 24.
 ; Then frees the data buffer and the array header.
 define void @suru_array_drop_dyn(ptr %arr) {
 entry:
@@ -239,23 +214,7 @@ body:
   %slot = getelementptr i64, ptr %data, i64 %i
   %ri64 = load i64, ptr %slot
   %ep   = inttoptr i64 %ri64 to ptr
-  %etg  = load i64, ptr %ep
-  switch i64 %etg, label %drop_box [
-    i64 6, label %drop_string
-    i64 4, label %drop_struct
-    i64 5, label %drop_array
-  ]
-drop_string:
-  call void @suru_string_drop(ptr %ep)
-  br label %next
-drop_struct:
-  call void @suru_struct_drop(ptr %ep)
-  br label %next
-drop_array:
-  call void @suru_array_drop_dyn(ptr %ep)
-  br label %next
-drop_box:
-  call void @free(ptr %ep)
+  call void @suru_drop_dyn(ptr %ep)
   br label %next
 next:
   %ni   = add i64 %i, 1

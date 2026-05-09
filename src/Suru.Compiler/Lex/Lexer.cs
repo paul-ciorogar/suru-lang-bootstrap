@@ -92,6 +92,7 @@ public sealed class Lexer(string source)
             "while"   => TokenKind.While,
             "include" => TokenKind.Include,
             "type"    => TokenKind.Type,
+            "as"      => TokenKind.As,
             _         => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);

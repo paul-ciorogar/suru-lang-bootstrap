@@ -88,17 +88,20 @@ fn resolveTypeName(state AnalyzerState, name String) Bool {
 
 // ─── Pass 1: collect type declarations ───────────────────────────────────────
 
-// collectTypeDeclarations — walk stmts; for each NODE_TYPE_DECL node either
-// add its name to state.typeNames or report a duplicate-type error.
+// collectTypeDeclarations — walk stmts; for each TypeDeclNode either add its
+// name to state.typeNames or report a duplicate-type error.
 fn collectTypeDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
     let typeNames Array<String>: state.typeNames
     let i Int64: 0
     while i.lt(stmts.len()) {
         let stmt AstNode: stmts.at(i)
-        match stmt.kind.equals(NODE_TYPE_DECL) {
-            true: match typeNameExistsAt(typeNames, stmt.name, 0) {
-                true: appendError(state, "type '".append(stmt.name).append("' is already declared"))
-                _: typeNames.add(stmt.name)
+        match stmt {
+            TypeDeclNode: {
+                let typed TypeDeclNode: stmt
+                match typeNameExistsAt(typeNames, typed.name, 0) {
+                    true: appendError(state, "type '".append(typed.name).append("' is already declared"))
+                    _: typeNames.add(typed.name)
+                }
             }
             _: {}
         }
@@ -109,9 +112,9 @@ fn collectTypeDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerSt
 
 // ─── Pass 2: collect function declarations ────────────────────────────────────
 
-// registerFnDecl — validate and register one NODE_FN_DECL node into state.functions.
+// registerFnDecl — validate and register one FnDeclNode into state.functions.
 // Emits errors for unknown param/return types but still registers the signature.
-fn registerFnDecl(state AnalyzerState, stmt AstNode) AnalyzerState {
+fn registerFnDecl(state AnalyzerState, stmt FnDeclNode) AnalyzerState {
     let paramTypes Array<String>: []
     let params Array<Param>: stmt.params
     let pi Int64: 0
@@ -135,17 +138,20 @@ fn registerFnDecl(state AnalyzerState, stmt AstNode) AnalyzerState {
     return state
 }
 
-// collectFunctionDeclarations — walk stmts; for each NODE_FN_DECL node either
-// report a duplicate-function error or call registerFnDecl.
+// collectFunctionDeclarations — walk stmts; for each FnDeclNode either report
+// a duplicate-function error or call registerFnDecl.
 fn collectFunctionDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
     let functions Array<FunctionSig>: state.functions
     let i Int64: 0
     while i.lt(stmts.len()) {
         let stmt AstNode: stmts.at(i)
-        match stmt.kind.equals(NODE_FN_DECL) {
-            true: match fnNameExistsAt(functions, stmt.name, 0) {
-                true: appendError(state, "function '".append(stmt.name).append("' is already declared"))
-                _: registerFnDecl(state, stmt)
+        match stmt {
+            FnDeclNode: {
+                let typed FnDeclNode: stmt
+                match fnNameExistsAt(functions, typed.name, 0) {
+                    true: appendError(state, "function '".append(typed.name).append("' is already declared"))
+                    _: registerFnDecl(state, stmt)
+                }
             }
             _: {}
         }

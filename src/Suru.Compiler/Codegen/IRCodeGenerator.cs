@@ -43,12 +43,7 @@ public sealed partial class IRCodeGenerator
     private readonly Dictionary<string, (string name, int byteLen)> _stringLiterals = new();
     private int _strCount;
 
-    // Struct field name strings are interned separately from user string literals so
-    // the generated IR is easier to read and the two namespaces cannot collide.
-    private readonly Dictionary<string, (string name, int byteLen)> _fieldNames = new();
-    private int _fieldCount;
-
-    // Per-function variable table: name → (alloca SSA name, SuruType).
+// Per-function variable table: name → (alloca SSA name, SuruType).
     // ArrayType carries element type; NamedType carries struct name — no side dicts needed.
     private Dictionary<string, (string ptr, SuruType type)> _vars = new();
 
@@ -72,6 +67,10 @@ public sealed partial class IRCodeGenerator
 
     // Tracks which Array variables are the argv Seq (built by @main from char**).
     private HashSet<string> _argvVars = new();
+
+    // External type names whose @suru_clone_T / @suru_drop_T are defined in another .o
+    // and need `declare` stubs in this module's .ll so clang assembles cleanly.
+    private readonly HashSet<string> _externalTypeCloneDrop = new();
 
     private IRCodeGenerator(Module module, string sourceName)
     {
@@ -109,6 +108,10 @@ public sealed partial class IRCodeGenerator
             if (stmt is FunctionDeclaration { Name: not BuiltinNames.Main, SourcePath: null } fn)
                 _userFunctions[fn.Name] = (fn.Parameters, FnReturnSuruType(fn));
 
+        // Emit per-type clone/drop helpers into _helpers (before user function bodies).
+        _externals.AddFree();
+        EmitTypeCloneDrop();
+
         // Pass 1: emit all function bodies.
         foreach (var stmt in _module.Statements)
             if (stmt is FunctionDeclaration fn)
@@ -119,10 +122,9 @@ public sealed partial class IRCodeGenerator
         sb.AppendLine($"; ModuleID = '{_sourceName}'");
         sb.AppendLine($"source_filename = \"{_sourceName}\"");
         sb.AppendLine();
-        sb.AppendLine("%suru.String = type { i64, i64, ptr }");             // { type_tag=6, len, data }
-        sb.AppendLine("%suru.Array  = type { i64, i64, i64, i64, ptr }");  // { type_tag=5, elem_tag, len, cap, data }
-        sb.AppendLine("%suru.Field  = type { i64, ptr, i32, i64, ptr }");  // { type_tag=4, name, field_tag, val, next }
-        sb.AppendLine("%suru.Box    = type { i64, i64 }");                  // { type_tag, payload }
+        sb.AppendLine("%suru.String = type { i64, i64, ptr }");            // { type_tag=6, len, data }
+        sb.AppendLine("%suru.Array  = type { i64, i64, i64, i64, ptr }"); // { type_tag=5, elem_tag, len, cap, data }
+        sb.AppendLine("%suru.Box    = type { i64, i64 }");                 // { type_tag, payload }
         sb.AppendLine();
 
         // Module-level constant globals — stored as raw LLVM types; boxed on each load.
@@ -150,17 +152,15 @@ public sealed partial class IRCodeGenerator
         }
         if (_stringLiterals.Count > 0) sb.AppendLine();
 
-        // Struct field name globals — separate namespace (@.field_N) for readability.
-        foreach (var (fieldName, (name, byteLen)) in _fieldNames)
-        {
-            var escaped = EscapeStringForIR(fieldName);
-            sb.AppendLine($"{name} = private unnamed_addr constant [{byteLen} x i8] c\"{escaped}\\00\"");
-        }
-        sb.AppendLine();
-
         sb.Append(_externals.ToString());
         sb.Append(_runtimeDecls.ToString());
-        sb.AppendLine();
+        // Declare stubs for per-type clone/drop of external types (defined in their origin .o).
+        foreach (var t in _externalTypeCloneDrop.OrderBy(x => x))
+        {
+            sb.AppendLine($"declare ptr  @suru_clone_{t}(ptr)");
+            sb.AppendLine($"declare void @suru_drop_{t}(ptr)");
+        }
+        if (_externalTypeCloneDrop.Count > 0) sb.AppendLine();
 
         sb.Append(_helpers);
         sb.Append(_funcs);
@@ -180,7 +180,6 @@ public sealed partial class IRCodeGenerator
         FloatLiteral f             => ($"0x{BitConverter.DoubleToInt64Bits(f.Value):X16}", SuruType.Float64),
         StringLiteralExpression s  => EmitStringLiteralValue(s.Value),
         ArrayLiteralExpression arr => EmitArrayLiteral(arr),
-        StructLiteralExpression sl => EmitStructLiteral(sl, null),
         FieldAccessExpression fa   => EmitFieldAccess(fa),
         CallExpression { Name: BuiltinNames.Clone, Args: [var cloneArg] } => EmitCloneDyn(cloneArg),
         CallExpression { Name: BuiltinNames.Drop,  Args: [var dropArg]  } => EmitDropDyn(dropArg),
@@ -303,8 +302,8 @@ public sealed partial class IRCodeGenerator
             {
                 "len"   => EmitArrayLen(recvVal),
                 "at"    => EmitArrayAt(recvVal, m.Args[0], arrayType.Element),
-                "set"   => EmitArraySet(recvVal, m.Args[0], m.Args[1]),
-                "add"   => EmitArrayAdd(recvVal, m.Args[0]),
+                "set"   => EmitArraySet(recvVal, m.Args[0], m.Args[1], arrayType.Element),
+                "add"   => EmitArrayAdd(recvVal, m.Args[0], arrayType.Element),
                 "slice" => EmitArraySlice(recvVal, m.Args[0], m.Args[1], arrayType),
                 _ => throw new NotSupportedException($"IR codegen: unsupported Array method '{m.MethodName}'"),
             };

@@ -190,7 +190,11 @@ public sealed class SemanticAnalyzer
                         covered.Add(vn);
                 }
                 // Arm body analyzed in its own scope; patterns are variant names, not variables.
+                // Type narrowing: within a variant arm, shadow the condition variable with the narrowed type.
                 _scopes.Enter();
+                if (ms.Condition is VariableReferenceExpression condVar &&
+                    arm.Pattern is VariableReferenceExpression { Name: var narrowedVariant })
+                    _scopes.DeclareInCurrent(condVar.Name, new SuruType.NamedType(narrowedVariant));
                 foreach (var bodyStmt in arm.Body)
                     AnalyzeStatement(bodyStmt);
                 _scopes.Exit();
@@ -288,7 +292,15 @@ public sealed class SemanticAnalyzer
             {
                 var retType = InferType(ret.Value);
                 if (retType is not null && !retType.Equals(_currentReturnType))
-                    _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentReturnType}, got {retType}");
+                {
+                    // Returning a sum type variant is valid when the declared return type is
+                    // the parent sum type (e.g. `fn f() AstNode { let n BoolLitNode: ...; return n }`).
+                    bool isVariantReturn = _currentReturnType is SuruType.SumType sumRet &&
+                                          retType is SuruType.NamedType retNt &&
+                                          sumRet.Variants.Contains(retNt.Name);
+                    if (!isVariantReturn)
+                        _errors.Add($"{_module.SourcePath}: return type mismatch: expected {_currentReturnType}, got {retType}");
+                }
             }
         }
     }
@@ -526,7 +538,13 @@ public sealed class SemanticAnalyzer
                             else
                                 mCovered.Add(mvn);
                         }
+                        // Type narrowing: within a variant arm, shadow the condition variable with the narrowed type.
+                        _scopes.Enter();
+                        if (match.Condition is VariableReferenceExpression mCondVar &&
+                            arm.Pattern is VariableReferenceExpression { Name: var mNarrowedVariant })
+                            _scopes.DeclareInCurrent(mCondVar.Name, new SuruType.NamedType(mNarrowedVariant));
                         AnalyzeExpression(arm.Body);
+                        _scopes.Exit();
                     }
                     if (!mWild)
                         foreach (var variant in exprSumParent.Variants)
@@ -579,6 +597,13 @@ public sealed class SemanticAnalyzer
               && _typeDeclarations.TryGetValue(structNt.Name, out var structTd)
             => structTd.Fields.FirstOrDefault(f => f.Field == fa.FieldName) is var fld && fld.Field != null
                 ? ResolveTypeAnnotation(fld.Type) : null,
+
+        // expr.field — receiver is any expression returning a named struct type (e.g. fn call, method chain).
+        FieldAccessExpression fa
+            when InferType(fa.Receiver) is SuruType.NamedType anyNt
+              && _typeDeclarations.TryGetValue(anyNt.Name, out var anyTd)
+            => anyTd.Fields.FirstOrDefault(f => f.Field == fa.FieldName) is var anyFld && anyFld.Field != null
+                ? ResolveTypeAnnotation(anyFld.Type) : null,
 
         VariableReferenceExpression v  => _scopes.Lookup(v.Name),
         MethodCallExpression { MethodName: "compare" }                              => SuruType.Int64,

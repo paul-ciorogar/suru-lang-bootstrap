@@ -10,20 +10,15 @@
 //   analyzeReturnStatement       — bare return in non-void function check
 //   analyzeWhileStatement        — push scope, analyze body, pop scope
 //   analyzeStatements            — iterate an Array<AstNode> and dispatch each
-//   analyzeStatement             — dispatch over NODE_* statement kinds
+//   analyzeStatement             — dispatch over AstNode statement variants
 //
 // All analysis is done through in-place mutation of heap-allocated arrays inside
 // AnalyzerState. Functions return state for caller convenience; callers may
 // discard the return value since mutations are visible through the original reference.
 //
-// semantic.* functions are called directly from function bodies — the LLVM linker model
-// resolves them correctly: stmts.o declares @pushScope etc. from semantic.o, and both are
-// linked when building any binary that includes this file.
-//
-// Field access on undeclared AstNode fields (e.g. stmt.hasValue, stmt.receiver.kind)
-// returns SuruType NamedType("") from EmitFieldAccess. EmitMatchTestChain's NamedType
-// branch calls UnboxInt64 on the condition before icmp eq i64 comparison, which
-// correctly unboxes both Bool (0/1) and Int64 fields stored as ptrtoint(Box).
+// Each handler takes the specific AstNode variant type; the sum type dispatch in
+// analyzeStatement coerces the AstNode ptr to the variant ptr at the call site.
+// Field access on variant types calls @suru_variant_inner before @suru_find_field.
 
 include "suru-semantic.suru" as semantic
 include "suru-semantic-passes.suru" as passes
@@ -32,7 +27,6 @@ include "suru-semantic-exprs.suru" as exprs
 // ─── Constants array helpers ──────────────────────────────────────────────────
 
 // isConstantAt — recursive linear search from index i.
-// Returns true if name appears in constants at or after position i.
 fn isConstantAt(constants Array<String>, name String, i Int64) Bool {
     return match i.lt(constants.len()) {
         true: match constants.at(i).equals(name) {
@@ -58,8 +52,8 @@ fn addConstant(state AnalyzerState, name String) AnalyzerState {
 
 // markConstantIfModuleScope — adds name to constants only when currently at
 // module scope (scopes.len() == 1) and the let was not a duplicate declaration.
-// Mirrors the if (_scopes.Count == 1) _scopes.MarkConstant(let.Name) logic in
-// SemanticAnalyzer.cs:183.
+// Duplicate lets are skipped to avoid registering an invalid constant name that
+// would later produce a spurious "cannot reassign constant" error.
 fn markConstantIfModuleScope(state AnalyzerState, name String, isDuplicate Bool) AnalyzerState {
     let scopes Array<Scope>: state.scopes
     match scopes.len().equals(1) and not isDuplicate {
@@ -72,8 +66,7 @@ fn markConstantIfModuleScope(state AnalyzerState, name String, isDuplicate Bool)
 // ─── Statement analyzers ──────────────────────────────────────────────────────
 
 // checkBareReturn — emits an error when state.currentReturnType indicates a
-// non-void function context. Extracted into a helper so analyzeReturnStatement
-// keeps single-expression match arm bodies.
+// non-void function context.
 fn checkBareReturn(state AnalyzerState) AnalyzerState {
     let isVoid Bool: state.currentReturnType.equals("void") or state.currentReturnType.equals("")
     match isVoid {
@@ -90,10 +83,8 @@ fn checkBareReturn(state AnalyzerState) AnalyzerState {
 //   2. Type resolution via resolveTypeName → declare or emit unknown-type error.
 //   3. Module scope → mark as constant (regardless of unknown-type; matches C# behavior).
 //
-// stmt fields accessed: stmt.name (String), stmt.typeName (String).
-// Both are undeclared in type AstNode but return String ptr correctly since
-// String values are stored as non-scalar ptrs — no unboxing needed.
-fn analyzeLetStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+// stmt fields: stmt.name (String), stmt.typeName (String), stmt.value (AstNode).
+fn analyzeLetStatement(state AnalyzerState, stmt LetNode) AnalyzerState {
     let isDuplicate Bool: semantic.existsInCurrentScope(state, stmt.name)
     match isDuplicate {
         true: semantic.addError(state, "variable '".append(stmt.name).append("' is already declared"))
@@ -109,7 +100,6 @@ fn analyzeLetStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
         _: {}
     }
     markConstantIfModuleScope(state, stmt.name, isDuplicate)
-    // Analyze the RHS expression for undefined variables and arity errors.
     let val AstNode: stmt.value
     exprs.analyzeExpr(state, val)
     return state
@@ -117,9 +107,7 @@ fn analyzeLetStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
 
 // analyzeAssignmentStatement — mirrors SemanticAnalyzer.AnalyzeAssignmentStatement
 // (lines 150–157). Constant reassignment takes priority over undefined-variable check.
-//
-// stmt fields accessed: stmt.name (String).
-fn analyzeAssignmentStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+fn analyzeAssignmentStatement(state AnalyzerState, stmt AssignNode) AnalyzerState {
     let isConst Bool: isConstant(state, stmt.name)
     match isConst {
         true: semantic.addError(state, "cannot reassign constant '".append(stmt.name).append("'"))
@@ -136,18 +124,18 @@ fn analyzeAssignmentStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
 }
 
 // analyzeFieldAssignmentStatement — mirrors SemanticAnalyzer.AnalyzeFieldAssignmentStatement
-// (lines 159–165). Only checks the receiver when it is a variable reference.
-//
-// stmt.receiver.kind: undeclared nested field access returns NamedType("").
-// EmitMatchTestChain's NamedType branch calls UnboxInt64, correctly comparing
-// the boxed Int64 kind value against NODE_VAR_REF (14).
-fn analyzeFieldAssignmentStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+// (lines 159–165). Only checks the receiver when it is a VarRefNode.
+fn analyzeFieldAssignmentStatement(state AnalyzerState, stmt FieldAssignNode) AnalyzerState {
     let val AstNode: stmt.value
     exprs.analyzeExpr(state, val)
-    match stmt.receiver.kind {
-        NODE_VAR_REF: match semantic.lookupSymbol(state, stmt.receiver.name).equals("") {
-            true: semantic.addError(state, "undefined variable '".append(stmt.receiver.name).append("'"))
-            _: {}
+    let rcv AstNode: stmt.receiver
+    match rcv {
+        VarRefNode: {
+            let typedRcv VarRefNode: rcv
+            match semantic.lookupSymbol(state, typedRcv.name).equals("") {
+                true: semantic.addError(state, "undefined variable '".append(typedRcv.name).append("'"))
+                _: {}
+            }
         }
         _: {}
     }
@@ -160,16 +148,15 @@ fn analyzeFieldAssignmentStatement(state AnalyzerState, stmt AstNode) AnalyzerSt
 // when both the inferred type and the declared return type are known (non-"").
 // When hasValue is false (bare return): check bare-return-in-non-void.
 //
-// IMPORTANT: test AstNodes for NODE_RETURN must include hasValue. When hasValue is
-// true, value must be a valid AstNode (not {}) — analyzeExpr will be called on it.
-fn analyzeReturnStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+// IMPORTANT: test ReturnNodes with hasValue: true must include a valid AstNode
+// value — analyzeExpr will be called on it.
+fn analyzeReturnStatement(state AnalyzerState, stmt ReturnNode) AnalyzerState {
     match stmt.hasValue {
         true: {
             let val AstNode: stmt.value
             exprs.analyzeExpr(state, val)
             let retType String: exprs.inferType(state, val)
             let expected String: state.currentReturnType
-            // Only report mismatch when both types are concretely known.
             let typesKnown Bool: not retType.equals("") and not expected.equals("") and not expected.equals("void")
             match typesKnown and not retType.equals(expected) {
                 true: semantic.addError(state, "return type mismatch: expected ".append(expected).append(", got ").append(retType))
@@ -182,8 +169,8 @@ fn analyzeReturnStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
 }
 
 // analyzeStatements — iterates stmts in order, dispatching each to analyzeStatement.
-// Mutual recursion with analyzeStatement (via analyzeWhileStatement) is resolved
-// by the function pre-pass that registers all signatures before body analysis.
+// Mutually recursive with analyzeWhileStatement: while bodies are analyzed by
+// calling back into analyzeStatements, enabling arbitrarily nested loops.
 fn analyzeStatements(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
     let i Int64: 0
     while i.lt(stmts.len()) {
@@ -194,13 +181,10 @@ fn analyzeStatements(state AnalyzerState, stmts Array<AstNode>) AnalyzerState {
 }
 
 // analyzeWhileStatement — mirrors SemanticAnalyzer.AnalyzeWhileStatement (lines 153–163).
-// Analyzes the condition expression, checks condition type is Bool (if known),
-// then pushes a fresh scope for the body so sequential while loops can reuse names.
-fn analyzeWhileStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+fn analyzeWhileStatement(state AnalyzerState, stmt WhileNode) AnalyzerState {
     let cond AstNode: stmt.condition
     exprs.analyzeExpr(state, cond)
     let condType String: exprs.inferType(state, cond)
-    // Only report type error when condition type is concretely known and not Bool.
     match not condType.equals("") and not condType.equals("Bool") {
         true: semantic.addError(state, "while condition must be Bool, got ".append(condType))
         _: {}
@@ -212,22 +196,21 @@ fn analyzeWhileStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
     return state
 }
 
-// analyzeStatement — dispatch over statement kinds.
+// analyzeStatement — dispatch over AstNode statement variants.
 // Mirrors SemanticAnalyzer.AnalyzeStatement (lines 101–136).
 //
-// NODE_TYPE_DECL and NODE_FN_DECL are handled by pre-passes (Stage 13b).
-// NODE_EXPR_STMT requires expression analysis (Stage 13e); skipped here.
-// stmt.kind is declared in type AstNode as Int64 — returns raw i64, matching
-// NODE_* Int64 constants directly.
+// TypeDeclNode, SumTypeDeclNode, and FnDeclNode are handled by pre-passes.
+// All other statement variants fall through to _:{}.
 fn analyzeStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
-    match stmt.kind {
-        NODE_LET:          analyzeLetStatement(state, stmt)
-        NODE_ASSIGN:       analyzeAssignmentStatement(state, stmt)
-        NODE_FIELD_ASSIGN: analyzeFieldAssignmentStatement(state, stmt)
-        NODE_RETURN:       analyzeReturnStatement(state, stmt)
-        NODE_WHILE:        analyzeWhileStatement(state, stmt)
-        NODE_EXPR_STMT: {
-            let innerExpr AstNode: stmt.expr
+    match stmt {
+        LetNode:         { analyzeLetStatement(state, stmt) }
+        AssignNode:      { analyzeAssignmentStatement(state, stmt) }
+        FieldAssignNode: { analyzeFieldAssignmentStatement(state, stmt) }
+        ReturnNode:      { analyzeReturnStatement(state, stmt) }
+        WhileNode:       { analyzeWhileStatement(state, stmt) }
+        ExprStmtNode: {
+            let typed ExprStmtNode: stmt
+            let innerExpr AstNode: typed.expr
             exprs.analyzeExpr(state, innerExpr)
         }
         _: {}

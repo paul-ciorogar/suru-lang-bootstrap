@@ -6,80 +6,67 @@ public static partial class SuruRuntime
 
     // Returns the full LLVM IR text for suru_variant.ll.
     //
-    // %suru.Variant = { i64 type_tag=7, i64 variant_idx, ptr inner } (24 bytes)
-    // type_tag=7 at field 0 identifies this heap value as a sum type variant.
-    // variant_idx (field 1) records which variant of the sum type this is.
-    // inner (field 2) is a ptr to the heap-allocated struct payload for this variant.
+    // Phase 2: a sum type value is a flat struct (same layout as any named type) with
+    // type_tag=7 at byte offset 0 and variant_idx at byte offset 8. The variant IS the
+    // struct — no separate allocation or indirection.
     //
-    // suru_variant_drop frees only the 24-byte wrapper; inner struct drop is the
-    // caller's responsibility (Stage 13i will wire this up at the language level).
+    // suru_variant_create: sets type_tag=7 and variant_idx on an existing flat struct; no malloc.
+    // suru_variant_tag: loads byte offset 8 (variant_idx).
+    // suru_variant_inner: identity — returns the ptr unchanged.
+    // suru_variant_drop: calls drop_fn from vtable at offset 24 (same as suru_drop_dyn for tag=7).
     public static string GenerateVariantRuntime() => """
 ; Suru variant runtime — compiled to suru_variant.o and linked with every Suru program.
 ;
-; Every Suru sum type value is a ptr to a heap-allocated %suru.Variant:
-;   %suru.Variant = { i64 type_tag, i64 variant_idx, ptr inner }  (24 bytes)
-; type_tag=7 (TYPE_SUMTYPE) at field 0: any heap ptr inspected at offset 0 identifies this as a variant.
-; variant_idx holds the zero-based index of the active variant within its sum type declaration.
-; inner points to the heap-allocated struct payload for this variant.
+; Phase 2: a sum type value is a flat fixed-layout struct where type_tag=7 at byte offset 0
+; identifies it as a variant, and variant_idx at byte offset 8 records the active variant.
+; The struct header vtable (clone_fn at 16, drop_fn at 24) enables correct clone/drop dispatch.
 ;
 ; type_tag: 0=Bool 1=Int32 2=Int64 3=Float64 4=Struct 5=Array 6=String 7=SumType
 
 ; ModuleID = 'suru_variant.ll'
 source_filename = "suru_variant.ll"
 
-%suru.Variant = type { i64, i64, ptr }
-
-declare ptr  @malloc(i64)
 declare void @free(ptr)
 
 ; ─── suru_variant_create ───────────────────────────────────────────────────────
 ;
-; Allocates a 24-byte %suru.Variant, stores type_tag=7, variant_idx, and inner ptr.
-; Returns a ptr to the new wrapper.
-define ptr @suru_variant_create(i64 %idx, ptr %inner) {
+; Marks an existing flat struct as a variant: sets type_tag=7 at byte offset 0,
+; variant_idx at byte offset 8. Returns the same ptr — no new allocation.
+define ptr @suru_variant_create(i64 %idx, ptr %struct_ptr) {
 entry:
-  %mem = call ptr @malloc(i64 24)
-  ; store type_tag = 7 at field 0
-  %tag_ptr = getelementptr %suru.Variant, ptr %mem, i32 0, i32 0
-  store i64 7, ptr %tag_ptr
-  ; store variant_idx at field 1
-  %idx_ptr = getelementptr %suru.Variant, ptr %mem, i32 0, i32 1
-  store i64 %idx, ptr %idx_ptr
-  ; store inner ptr at field 2
-  %inner_ptr = getelementptr %suru.Variant, ptr %mem, i32 0, i32 2
-  store ptr %inner, ptr %inner_ptr
-  ret ptr %mem
+  %tag_gep = getelementptr i8, ptr %struct_ptr, i64 0
+  store i64 7, ptr %tag_gep
+  %vidx_gep = getelementptr i8, ptr %struct_ptr, i64 8
+  store i64 %idx, ptr %vidx_gep
+  ret ptr %struct_ptr
 }
 
 ; ─── suru_variant_tag ──────────────────────────────────────────────────────────
 ;
-; Returns the variant_idx stored at field 1 of %suru.Variant.
-; Used by match dispatch (Stage 13j) to branch on which variant is active.
+; Returns variant_idx stored at byte offset 8 of the struct.
 define i64 @suru_variant_tag(ptr %v) {
 entry:
-  %idx_ptr = getelementptr %suru.Variant, ptr %v, i32 0, i32 1
-  %idx = load i64, ptr %idx_ptr
+  %vidx_gep = getelementptr i8, ptr %v, i64 8
+  %idx = load i64, ptr %vidx_gep
   ret i64 %idx
 }
 
 ; ─── suru_variant_inner ────────────────────────────────────────────────────────
 ;
-; Returns the inner struct ptr stored at field 2 of %suru.Variant.
-; Used by field access on variant values (Stage 13i) to reach the payload struct.
+; Returns the ptr unchanged — the variant IS the flat struct.
 define ptr @suru_variant_inner(ptr %v) {
 entry:
-  %inner_ptr = getelementptr %suru.Variant, ptr %v, i32 0, i32 2
-  %inner = load ptr, ptr %inner_ptr
-  ret ptr %inner
+  ret ptr %v
 }
 
 ; ─── suru_variant_drop ─────────────────────────────────────────────────────────
 ;
-; Frees the 24-byte %suru.Variant wrapper.
-; Does NOT free the inner struct — the caller must drop the payload separately.
+; Calls drop_fn from the vtable at byte offset 24.
 define void @suru_variant_drop(ptr %v) {
 entry:
-  call void @free(ptr %v)
+  %dfn_gep = getelementptr i8, ptr %v, i64 24
+  %dfn = load ptr, ptr %dfn_gep
+  call void (ptr) %dfn(ptr %v)
   ret void
 }
 """;

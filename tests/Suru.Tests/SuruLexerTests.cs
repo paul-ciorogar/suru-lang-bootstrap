@@ -8,11 +8,11 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
 
     // Cross-validate: run the Suru-compiled lexer on a known .suru source and
     // assert each token's kind, text, and position.  Token kinds match the
-    // constants defined in the lexer fixture:
+    // constants defined in the lexer fixture (ordinals == C# TokenKind enum):
     //   0=EOF 1=IDENT 2=TRUE 3=FALSE 4=INT 5=FLOAT 6=STRING
-    //   7=( 8=) 9=, 10=. 11=: 12={ 13=} 14=[ 15=]
-    //   16=let 17=not 18=and 19=or 20=match 21=_ 22=fn 23=return 24=void
-    //   25=- 26=while 27=< 28=> 29=include 30=as
+    //   7=( 8=) 9={ 10=} 11=[ 12=] 13=, 14=. 15=: 16=- 17=< 18=>
+    //   19=let 20=not 21=and 22=or 23=match 24=_ 25=fn 26=return 27=void
+    //   28=while 29=include 30=type 31=as
 
     private static string FixturePath(string name)
     {
@@ -30,16 +30,16 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
     public void Lexer_TokenizesPrintFixture()
     {
         var expected =
-            "22 fn 1:1\n" +
+            "25 fn 1:1\n" +
             "1 main 1:4\n" +
             "7 ( 1:8\n" +
             "1 args 1:9\n" +
             "1 Array 1:14\n" +
-            "27 < 1:19\n" +
+            "17 < 1:19\n" +
             "1 String 1:20\n" +
-            "28 > 1:26\n" +
+            "18 > 1:26\n" +
             "8 ) 1:27\n" +
-            "12 { 1:29\n" +
+            "9 { 1:29\n" +
             "1 printLn 2:5\n" +
             "7 ( 2:12\n" +
             "2 true 2:13\n" +
@@ -56,7 +56,7 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
             "7 ( 5:12\n" +
             "5 1.2 5:13\n" +
             "8 ) 5:16\n" +
-            "13 } 6:1\n" +
+            "10 } 6:1\n" +
             "0  7:1\n";
 
         Assert.Equal(expected, Run(_exe, FixturePath("print")));
@@ -68,7 +68,7 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
     {
         var output = Run(_exe, FixturePath("arithmetic"));
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Assert.Equal("22 fn 1:1", lines[0]);   // first token is 'fn'
+        Assert.Equal("25 fn 1:1", lines[0]);   // first token is 'fn'
         Assert.StartsWith("0 ", lines[^1]);     // last token is EOF
         _testPassed = true;
     }
@@ -76,10 +76,12 @@ public class SuruLexerTests(CompiledFixtures fixtures) : IntegrationTestBase, ID
     [Fact]
     public void Lexer_TokenizesSelf()
     {
-        var output = Run(_exe, FixturePath("suru-lexer"));
+        // Tokenize the library file directly — main.suru is now a thin include wrapper.
+        var lexerLib = Path.Combine(Path.GetDirectoryName(FixturePath("suru-lexer"))!, "suru-lexer.suru");
+        var output = Run(_exe, lexerLib);
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        // First token of the lexer source is 'let' (constants precede all functions)
-        Assert.Equal("16 let 1:1", lines[0]);
+        // Line 1 is a '//' comment; first emitted token is 'let' on line 2.
+        Assert.Equal("19 let 2:1", lines[0]);
         // Last token is EOF
         Assert.StartsWith("0 ", lines[^1]);
         // Should be a substantial number of tokens

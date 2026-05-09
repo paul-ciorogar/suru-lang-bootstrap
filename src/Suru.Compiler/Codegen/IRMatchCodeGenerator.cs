@@ -7,14 +7,36 @@ public sealed partial class IRCodeGenerator
 {
     // ─── Match emission ───────────────────────────────────────────────────────
 
+    // Narrow the condition variable to a specific variant type for the duration of emit.
+    // Returns the original type if narrowing was applied (caller must restore), null otherwise.
+    private SuruType? NarrowCondVar(string? condVarName, string? variantName)
+    {
+        if (condVarName == null || variantName == null) return null;
+        if (!_vars.TryGetValue(condVarName, out var entry)) return null;
+        if (entry.type is not SuruType.SumType) return null;
+        _vars[condVarName] = (entry.ptr, new SuruType.NamedType(variantName));
+        return entry.type;
+    }
+
+    private void RestoreCondVar(string? condVarName, SuruType? savedType)
+    {
+        if (condVarName == null || savedType == null) return;
+        if (!_vars.TryGetValue(condVarName, out var entry)) return;
+        _vars[condVarName] = (entry.ptr, savedType);
+    }
+
     private void EmitMatchAsStatement(MatchExpression match)
     {
         var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
+        var condVarName = (match.Condition as VariableReferenceExpression)?.Name;
 
         for (int i = 0; i < patternArms.Count; i++)
         {
+            var variantName = (patternArms[i].Pattern as VariableReferenceExpression)?.Name;
+            var savedType   = NarrowCondVar(condVarName, variantName);
             _funcs.AppendLine($"match_arm_{n}_{i}:");
             EmitMatchArmBodyAsStatement(patternArms[i].Body);
+            RestoreCondVar(condVarName, savedType);
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
 
@@ -34,6 +56,9 @@ public sealed partial class IRCodeGenerator
         {
             case MatchExpression nestedMatch:
                 EmitMatchAsStatement(nestedMatch);
+                break;
+            // `_: {}` in a MatchExpression arm — empty struct literal means no-op.
+            case StructLiteralExpression { Fields: { Count: 0 } }:
                 break;
             case CallExpression { Name: BuiltinNames.PrintLn, Args: [var arg] }:
                 var (v, vt) = EmitValue(arg);
@@ -58,11 +83,15 @@ public sealed partial class IRCodeGenerator
         _funcs.AppendLine($"  {resultPtr} = alloca {resultLlvmT}");
 
         var (patternArms, wildcardArm, n) = EmitMatchTestChain(match);
+        var condVarName = (match.Condition as VariableReferenceExpression)?.Name;
 
         for (int i = 0; i < patternArms.Count; i++)
         {
+            var variantName = (patternArms[i].Pattern as VariableReferenceExpression)?.Name;
+            var savedType   = NarrowCondVar(condVarName, variantName);
             _funcs.AppendLine($"match_arm_{n}_{i}:");
             var (armVal, _) = EmitMatchArmValue(patternArms[i].Body);
+            RestoreCondVar(condVarName, savedType);
             _funcs.AppendLine($"  store {resultLlvmT} {armVal}, ptr {resultPtr}");
             _funcs.AppendLine($"  br label %match_merge_{n}");
         }
@@ -284,13 +313,17 @@ public sealed partial class IRCodeGenerator
     internal void EmitMatchStatement(MatchStatement stmt)
     {
         var (patternArms, wildcardArm, n) = EmitMatchStatementTestChain(stmt);
+        var condVarName = (stmt.Condition as VariableReferenceExpression)?.Name;
 
         for (int i = 0; i < patternArms.Count; i++)
         {
+            var variantName = (patternArms[i].Pattern as VariableReferenceExpression)?.Name;
+            var savedType   = NarrowCondVar(condVarName, variantName);
             _funcs.AppendLine($"match_arm_{n}_{i}:");
             _blockOpen = true;
             foreach (var s in patternArms[i].Body)
                 EmitStmt(s);
+            RestoreCondVar(condVarName, savedType);
             if (_blockOpen)
                 _funcs.AppendLine($"  br label %match_merge_{n}");
         }

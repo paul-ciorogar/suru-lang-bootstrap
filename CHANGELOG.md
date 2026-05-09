@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 13k — Flat Struct Layout, Vtable Dispatch & Type Narrowing
+
+Replaces the linked-list struct representation with a flat fixed-layout allocation, adds per-type vtable-based clone/drop, unifies the variant representation with the struct layout, and adds type narrowing inside variant match arms.
+
+**Struct representation — Phase 2 (flat layout)**
+
+- **`src/Suru.Compiler/Codegen/IRStructCodeGenerator.cs`**: Rewrites `EmitStructLiteral` for a flat fixed-layout allocation. New header layout (32 bytes): `{ i64 type_tag, i64 variant_idx, ptr clone_fn, ptr drop_fn }`; field slots follow at byte offset `32 + i*8` in `TypeDeclaration` order, stored as raw `i64` (scalars widened, heap values `ptrtoint`). The old linked-list of `%suru.Field` nodes and the runtime name-lookup via `@suru_find_field` / `@strcmp` are gone. `StructSize` / `FieldOffset` / `FieldIndex` helpers compute byte geometry. `StructFieldToI64` / `StructFieldFromI64` encode/decode scalar and heap field slots without boxing. `EmitStructLiteral` now requires a declared type name (anonymous struct literals were already disallowed by the grammar). Missing fields in a literal are zero-initialized so `suru_drop_dyn` never dereferences a garbage slot. Fields absent from a literal (partial struct, empty `{}`) are stored as `i64 0`; `suru_clone_dyn`/`suru_drop_dyn` null-guard these before dispatch. `_fieldNames` dict and `@.field_N` globals removed.
+
+- **`src/Suru.Compiler/Codegen/IRTypeCloneDropCodeGenerator.cs`** (new): Emits per-type `@suru_clone_{T}(ptr) ptr` and `@suru_drop_{T}(ptr) void` functions into `_helpers` (before user function bodies) for every locally-declared `TypeDeclaration`. Clone: copies the 32-byte header word-by-word; scalar field slots copied as `i64`; heap field slots loaded, `inttoptr`'d, deep-cloned via `@suru_clone_dyn`, `ptrtoint`'d back, and stored. Drop: heap field slots recursively dropped via `@suru_drop_dyn`; then `@free`s the allocation. External types (merged via include resolution) are skipped here — their clone/drop live in the origin module's `.o`; `declare` stubs are emitted instead.
+
+- **`src/Suru.Compiler/Codegen/IRCodeGenerator.cs`**: Pre-pass calls `EmitTypeCloneDrop()` after registering user functions. `_externalTypeCloneDrop` `HashSet<string>` tracks types needing `declare` stubs for cross-module clone/drop. `%suru.Field` struct type definition and field-name globals removed from the emitted preamble. `StructLiteralExpression` case removed from `EmitValue` (must go through `EmitStructLiteral` with a type name). `EmitArraySet` and `EmitArrayAdd` now receive the element `SuruType` so they can apply the correct `StructFieldToI64` encoding. `_externals.AddFree()` called in the pre-pass so `EmitTypeCloneDrop` can emit `@free` calls unconditionally.
+
+- **`src/Suru.Compiler/Codegen/IRFunctionCodeGenerator.cs`**: Variant `let` tagging inlined — instead of calling `@suru_variant_create`, the codegen now GEPs directly into the flat struct and stores `type_tag=7` and `variant_idx` in-place (no separate wrapper allocation). Assignment `StructLiteralExpression` now routes through `EmitStructLiteral` using the declared variable type, mirroring the `let` case.
+
+- **`src/Suru.Compiler/Codegen/SuruStructRuntime.cs`**: Rewritten. `suru_struct.ll` now provides `@suru_clone_dyn` and `@suru_drop_dyn` — two universal dispatch functions. `suru_clone_dyn` reads `type_tag` at offset 0; for tag 0–3 (Box) calls `@suru_box_clone`; for tag 5 (Array) calls `@suru_array_clone_dyn`; for tag 6 (String) calls `@suru_string_clone`; for tag 4 (Struct) or 7 (Variant) loads `clone_fn` from vtable offset 16 and calls it. Null guard: if `val == null` return `null`. `suru_drop_dyn` mirrors this for drop, using vtable offset 24 for tag 4/7. `%suru.Field` struct type, `@suru_find_field`, `@suru_struct_clone`, `@suru_struct_drop` removed. `@strcmp` no longer needed.
+
+- **`src/Suru.Compiler/Codegen/SuruVariantRuntime.cs`**: Simplified. A variant is now the flat struct itself with `type_tag=7` — no separate 24-byte `%suru.Variant` wrapper. `@suru_variant_create(i64 idx, ptr struct_ptr)` writes `type_tag=7` and `variant_idx` in-place and returns the same ptr (no `@malloc`). `@suru_variant_inner(ptr v)` is the identity (returns `v` unchanged). `@suru_variant_drop(ptr v)` reads `drop_fn` from vtable offset 24 and calls it. `%suru.Variant` struct type removed.
+
+- **`src/Suru.Compiler/Codegen/SuruArrayRuntime.cs`**: `suru_array_clone_dyn` and `suru_array_drop_dyn` now delegate to `@suru_clone_dyn` / `@suru_drop_dyn` (single call per element) instead of an inline `switch` on `type_tag`. Cross-module `declare` stubs updated: `suru_box_clone`, `suru_string_clone/drop`, `suru_struct_clone/drop` removed; `suru_clone_dyn`, `suru_drop_dyn` added.
+
+- **`src/Suru.Compiler/Codegen/SuruRuntime.cs`**: File-header comments updated to describe Phase 2 struct layout, vtable dispatch, and revised cross-module dependency graph. `@suru_dyn_len` gains a null guard (`icmp eq ptr %v, null → label %unknown`) so it doesn't crash on a null value.
+
+- **`src/Suru.Compiler/Codegen/SuruRuntimeDeclarations.cs`**: `AddFindField` method and related `@suru_find_field` declare-stub removed. `AddCloneDyn` / `AddDropDyn` methods added.
+
+- **`tests/Suru.Tests/IRStructFieldNameGlobalsTests.cs`**: Updated to assert the flat-layout IR instead of linked-list field-node IR.
+
+**Language improvements**
+
+- **`src/Suru.Compiler/Lex/TokenKind.cs`** / **`Lexer.cs`**: `as` promoted from identifier to `TokenKind.As`. `ParseIncludeDirective` now uses `Consume(TokenKind.As)` instead of checking that the identifier text equals `"as"`.
+
+- **`src/Suru.Compiler/Semantic/SemanticAnalyzer.cs`**: Three improvements:
+  1. **Type narrowing in match arms** — within a variant arm of a sum-type match, the condition variable is shadowed in the arm's scope with the narrowed concrete `NamedType`. This means `x.field` resolves correctly inside the arm without an explicit re-binding.
+  2. **Variant return covariance** — returning a value whose type is a variant of the function's declared sum-type return type is now valid (no spurious type-mismatch error).
+  3. **`InferType` extension** — field access on any expression returning a named type (e.g. a function call result) now resolves the field type via `_typeDeclarations`, not just variable references.
+
+- **`src/Suru.Compiler/Codegen/IRMatchCodeGenerator.cs`**: **Codegen type narrowing** — `NarrowCondVar` / `RestoreCondVar` helpers temporarily update `_vars[condVar]` to the narrowed `NamedType` for the duration of each variant arm's emit, so `EmitFieldAccess` resolves fields against the concrete struct type. Handles expression-form match (`EmitMatchAsExpression`), statement-form match (`EmitMatchStatement`), and `EmitMatchAsStatement`. Empty struct literal `{ }` in a match arm body (`_: {}`) now treated as a no-op instead of raising a codegen error.
+
+**Fixture & test updates**
+
+- **`tests/fixtures/suru-lexer/suru-lexer.suru`** / **`main.suru`**: Updated for flat struct emit; `main.suru` split — driver logic extracted, file reduced significantly.
+- **`tests/fixtures/suru-parser/suru-parser.suru`**: Major expansion; `suru-parser-ast.suru` (new) extracted to keep both files under 500 lines.
+- **`tests/fixtures/suru-semantic/`**: All semantic fixture files updated to exercise type narrowing and variant return covariance.
+- **`tests/Suru.Tests/IRSuruLexerTests.cs`** / **`SuruLexerTests.cs`**: Assertions updated for `as` keyword token and flat struct IR changes.
+
+All 156 tests pass.
+
+---
+
 ### Stage 13j — Sum Type Match Patterns & Exhaustiveness
 
 Completes the sum type feature: `match` dispatch on variant-typed values and compile-time exhaustiveness checking.

@@ -41,4 +41,5 @@ public enum TokenKind
     While,
     Include,
     Type,
+    As,
 }

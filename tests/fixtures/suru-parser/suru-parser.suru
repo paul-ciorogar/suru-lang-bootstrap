@@ -1,87 +1,16 @@
-include "../suru-lexer/suru-lexer.suru" as lexer
-
-type Parser:        { pos Int64, tokens Array<Token> }
-type AstNode:       { kind Int64 }
-type Param:         { name String, typeName String }
-type MatchArm:      { kind Int64, isWildcard Bool, pattern AstNode, body AstNode }
-type AstModule:     { stmts Array<AstNode> }
-type ParseResult:   { parser Parser, expr AstNode }
-type TypeAnnResult: { parser Parser, typeName String }
-type RetTypeResult: { parser Parser, returnType String }
-type ArgsResult:    { parser Parser, args Array<AstNode> }
-type ArmResult:     { parser Parser, arm MatchArm }
-type PatResult:     { parser Parser, pat AstNode }
-type StmtResult:    { parser Parser, stmt AstNode }
-
-let TOK_EOF      Int64: 0
-let TOK_IDENT    Int64: 1
-let TOK_TRUE     Int64: 2
-let TOK_FALSE    Int64: 3
-let TOK_INT      Int64: 4
-let TOK_FLOAT    Int64: 5
-let TOK_STRING   Int64: 6
-let TOK_LPAREN   Int64: 7
-let TOK_RPAREN   Int64: 8
-let TOK_COMMA    Int64: 9
-let TOK_DOT      Int64: 10
-let TOK_COLON    Int64: 11
-let TOK_LBRACE   Int64: 12
-let TOK_RBRACE   Int64: 13
-let TOK_LBRACKET Int64: 14
-let TOK_RBRACKET Int64: 15
-let TOK_LET      Int64: 16
-let TOK_NOT      Int64: 17
-let TOK_AND      Int64: 18
-let TOK_OR       Int64: 19
-let TOK_MATCH    Int64: 20
-let TOK_WILDCARD Int64: 21
-let TOK_FN       Int64: 22
-let TOK_RETURN   Int64: 23
-let TOK_VOID     Int64: 24
-let TOK_MINUS    Int64: 25
-let TOK_WHILE    Int64: 26
-let TOK_LT       Int64: 27
-let TOK_GT       Int64: 28
-let TOK_INCLUDE  Int64: 29
-let TOK_AS       Int64: 30
-let TOK_TYPE     Int64: 31
-
-let NODE_INCLUDE      Int64: 1
-let NODE_FN_DECL      Int64: 2
-let NODE_LET          Int64: 3
-let NODE_ASSIGN       Int64: 4
-let NODE_FIELD_ASSIGN Int64: 5
-let NODE_RETURN       Int64: 6
-let NODE_WHILE        Int64: 7
-let NODE_EXPR_STMT    Int64: 8
-let NODE_TYPE_DECL    Int64: 9
-
-let NODE_BOOL_LIT     Int64: 10
-let NODE_INT_LIT      Int64: 11
-let NODE_FLOAT_LIT    Int64: 12
-let NODE_STR_LIT      Int64: 13
-let NODE_VAR_REF      Int64: 14
-let NODE_CALL         Int64: 15
-let NODE_METHOD_CALL  Int64: 16
-let NODE_FIELD_ACCESS Int64: 17
-let NODE_ARRAY_LIT    Int64: 18
-let NODE_STRUCT_LIT   Int64: 19
-let NODE_MATCH        Int64: 20
-let NODE_UNARY        Int64: 21
-let NODE_BINARY       Int64: 22
-let NODE_STRUCT_FIELD Int64: 23
-let NODE_MATCH_ARM    Int64: 24
-
-let OP_NOT Int64: 1
-let OP_AND Int64: 2
-let OP_OR  Int64: 3
+include "suru-parser-ast.suru" as ast
 
 fn currentToken(parser Parser) Token {
     return parser.tokens.at(parser.pos)
 }
 
 fn currentTokenIs(parser Parser, kind Int64) Bool {
-    return parser.tokens.at(parser.pos).kind.equals(kind)
+    let toks Array<Token>: parser.tokens
+    let pos Int64: parser.pos
+    let tok Token: toks.at(pos)
+    let k Int64: tok.kind
+    let result Bool: k.equals(kind)
+    return result
 }
 
 fn peekToken(parser Parser) Token {
@@ -139,7 +68,8 @@ fn parseGenericTypeAnnotation(parser Parser, name String) TypeAnnResult {
     let inner TypeAnnResult: parseTypeAnnotation(parser)
     parser: inner.parser
     let fullName String: name.append("<").append(inner.typeName).append(">")
-    inner.parser: {}
+    inner.parser:   {}
+    inner.typeName: ""
     drop(inner)
     parser: consume(parser, TOK_GT)
     return { parser: parser, typeName: fullName }
@@ -164,7 +94,8 @@ fn parseOrExpr(parser Parser) ParseResult {
         rr.parser: {}
         rr.expr:   {}
         drop(rr)
-        left: { kind: NODE_BINARY, op: OP_OR, left: left, right: right }
+        let n BinaryNode: { op: OP_OR, left: left, right: right }
+        left: n
     }
     return { parser: parser, expr: left }
 }
@@ -184,7 +115,8 @@ fn parseAndExpr(parser Parser) ParseResult {
         rr.parser: {}
         rr.expr:   {}
         drop(rr)
-        left: { kind: NODE_BINARY, op: OP_AND, left: left, right: right }
+        let n BinaryNode: { op: OP_AND, left: left, right: right }
+        left: n
     }
     return { parser: parser, expr: left }
 }
@@ -203,7 +135,8 @@ fn parseNotExprBody(parser Parser) ParseResult {
     r.parser: {}
     r.expr:   {}
     drop(r)
-    return { parser: parser, expr: { kind: NODE_UNARY, op: OP_NOT, operand: inner } }
+    let n UnaryNode: { op: OP_NOT, operand: inner }
+    return { parser: parser, expr: n }
 }
 
 fn parsePostfixChain(parser Parser, pr ParseResult) ParseResult {
@@ -228,9 +161,12 @@ fn processPostfixStep(parser Parser, expr AstNode) ParseResult {
     let nameTok Token: currentToken(parser)
     parser: consume(parser, TOK_IDENT)
     let memberName String: nameTok.text
-    return match currentTokenIs(parser, TOK_LPAREN) {
-        true: parseMethodCallPart(parser, expr, memberName)
-        _:    { parser: parser, expr: { kind: NODE_FIELD_ACCESS, receiver: expr, fieldName: memberName } }
+    match currentTokenIs(parser, TOK_LPAREN) {
+        true: { return parseMethodCallPart(parser, expr, memberName) }
+        _: {
+            let n FieldAccessNode: { receiver: expr, fieldName: memberName }
+            return { parser: parser, expr: n }
+        }
     }
 }
 
@@ -243,24 +179,44 @@ fn parseMethodCallPart(parser Parser, expr AstNode, memberName String) ParseResu
     ar.args:   {}
     drop(ar)
     parser: consume(parser, TOK_RPAREN)
-    return { parser: parser, expr: { kind: NODE_METHOD_CALL, receiver: expr, methodName: memberName, args: args } }
+    let n MethodCallNode: { receiver: expr, methodName: memberName, args: args }
+    return { parser: parser, expr: n }
 }
 
 fn parsePrimary(parser Parser) ParseResult {
     let tok Token: currentToken(parser)
     let k Int64: tok.kind
-    return match k {
-        TOK_LBRACKET: parsePrimaryArray(parser)
-        TOK_LBRACE:   parsePrimaryStruct(parser)
-        TOK_MATCH:    parsePrimaryMatch(parser)
-        TOK_IDENT:    parsePrimaryIdent(parser, tok)
-        TOK_MINUS:    parsePrimaryMinus(parser)
-        TOK_TRUE:     { parser: advance(parser), expr: { kind: NODE_BOOL_LIT, value: true } }
-        TOK_FALSE:    { parser: advance(parser), expr: { kind: NODE_BOOL_LIT, value: false } }
-        TOK_INT:      { parser: advance(parser), expr: { kind: NODE_INT_LIT, text: tok.text } }
-        TOK_FLOAT:    { parser: advance(parser), expr: { kind: NODE_FLOAT_LIT, text: tok.text } }
-        TOK_STRING:   { parser: advance(parser), expr: { kind: NODE_STR_LIT, text: tok.text } }
-        _:            error(parser, "unexpected token in expression")
+    match k {
+        TOK_LBRACKET: { return parsePrimaryArray(parser) }
+        TOK_LBRACE:   { return parsePrimaryStruct(parser) }
+        TOK_MATCH:    { return parsePrimaryMatch(parser) }
+        TOK_IDENT:    { return parsePrimaryIdent(parser, tok) }
+        TOK_MINUS:    { return parsePrimaryMinus(parser) }
+        TOK_TRUE: {
+            let n BoolLitNode: { boolVal: true }
+            return { parser: advance(parser), expr: n }
+        }
+        TOK_FALSE: {
+            let n BoolLitNode: { boolVal: false }
+            return { parser: advance(parser), expr: n }
+        }
+        TOK_INT: {
+            let n IntLitNode: { text: tok.text }
+            return { parser: advance(parser), expr: n }
+        }
+        TOK_FLOAT: {
+            let n FloatLitNode: { text: tok.text }
+            return { parser: advance(parser), expr: n }
+        }
+        TOK_STRING: {
+            let n StrLitNode: { text: tok.text }
+            return { parser: advance(parser), expr: n }
+        }
+        _: {
+            error(parser, "unexpected token in expression")
+            let n BoolLitNode: { boolVal: false }
+            return { parser: advance(parser), expr: n }
+        }
     }
 }
 
@@ -277,12 +233,13 @@ fn parsePrimaryArray(parser Parser) ParseResult {
         parser: consumeIf(parser, TOK_COMMA)
     }
     parser: consume(parser, TOK_RBRACKET)
-    return { parser: parser, expr: { kind: NODE_ARRAY_LIT, count: elems.len(), elems: elems } }
+    let n ArrayLitNode: { elems: elems }
+    return { parser: parser, expr: n }
 }
 
 fn parsePrimaryStruct(parser Parser) ParseResult {
     parser: advance(parser)
-    let fields Array<AstNode>: []
+    let fields Array<StructFieldNode>: []
     while not currentTokenIs(parser, TOK_RBRACE) and not currentTokenIs(parser, TOK_EOF) {
         let fieldNameTok Token: currentToken(parser)
         parser: consume(parser, TOK_IDENT)
@@ -293,11 +250,13 @@ fn parsePrimaryStruct(parser Parser) ParseResult {
         vr.parser: {}
         vr.expr:   {}
         drop(vr)
-        fields.add({ kind: NODE_STRUCT_FIELD, name: fieldNameTok.text, value: val })
+        let f StructFieldNode: { name: fieldNameTok.text, value: val }
+        fields.add(f)
         parser: consumeIf(parser, TOK_COMMA)
     }
     parser: consume(parser, TOK_RBRACE)
-    return { parser: parser, expr: { kind: NODE_STRUCT_LIT, count: fields.len(), fields: fields } }
+    let n StructLitNode: { fields: fields }
+    return { parser: parser, expr: n }
 }
 
 fn parsePrimaryMatch(parser Parser) ParseResult {
@@ -309,7 +268,7 @@ fn parsePrimaryMatch(parser Parser) ParseResult {
     cr.expr:   {}
     drop(cr)
     parser: consume(parser, TOK_LBRACE)
-    let arms Array<AstNode>: []
+    let arms Array<MatchArm>: []
     while not currentTokenIs(parser, TOK_RBRACE) and not currentTokenIs(parser, TOK_EOF) {
         let armR ArmResult: parseMatchArm(parser)
         parser: armR.parser
@@ -320,15 +279,19 @@ fn parsePrimaryMatch(parser Parser) ParseResult {
         parser: consumeIf(parser, TOK_COMMA)
     }
     parser: consume(parser, TOK_RBRACE)
-    return { parser: parser, expr: { kind: NODE_MATCH, count: arms.len(), condition: cond, arms: arms } }
+    let n MatchExprNode: { condition: cond, arms: arms }
+    return { parser: parser, expr: n }
 }
 
 fn parsePrimaryIdent(parser Parser, tok Token) ParseResult {
     let name String: tok.text
     parser: advance(parser)
-    return match currentTokenIs(parser, TOK_LPAREN) {
-        true: parsePrimaryCall(parser, name)
-        _:    { parser: parser, expr: { kind: NODE_VAR_REF, name: name } }
+    match currentTokenIs(parser, TOK_LPAREN) {
+        true: { return parsePrimaryCall(parser, name) }
+        _: {
+            let n VarRefNode: { name: name }
+            return { parser: parser, expr: n }
+        }
     }
 }
 
@@ -341,17 +304,28 @@ fn parsePrimaryCall(parser Parser, name String) ParseResult {
     ar.args:   {}
     drop(ar)
     parser: consume(parser, TOK_RPAREN)
-    return { parser: parser, expr: { kind: NODE_CALL, name: name, args: args } }
+    let n CallNode: { name: name, args: args }
+    return { parser: parser, expr: n }
 }
 
 fn parsePrimaryMinus(parser Parser) ParseResult {
     parser: advance(parser)
     let numTok Token: currentToken(parser)
     let k Int64: numTok.kind
-    return match k {
-        TOK_INT:   { parser: advance(parser), expr: { kind: NODE_INT_LIT, text: "-".append(numTok.text) } }
-        TOK_FLOAT: { parser: advance(parser), expr: { kind: NODE_FLOAT_LIT, text: "-".append(numTok.text) } }
-        _:         error(parser, "expected number after '-'")
+    match k {
+        TOK_INT: {
+            let n IntLitNode: { text: "-".append(numTok.text) }
+            return { parser: advance(parser), expr: n }
+        }
+        TOK_FLOAT: {
+            let n FloatLitNode: { text: "-".append(numTok.text) }
+            return { parser: advance(parser), expr: n }
+        }
+        _: {
+            error(parser, "expected number after '-'")
+            let n IntLitNode: { text: "0" }
+            return { parser: advance(parser), expr: n }
+        }
     }
 }
 
@@ -369,22 +343,49 @@ fn parseMatchArm(parser Parser) ArmResult {
     br.parser: {}
     br.expr:   {}
     drop(br)
-    return { parser: parser, arm: { kind: NODE_MATCH_ARM, isWildcard: pat.kind.equals(0), pattern: pat, body: body } }
+    let isWc Bool: match pat { WildcardNode: true, _: false }
+    let arm MatchArm: { isWildcard: isWc, pattern: pat, body: body }
+    return { parser: parser, arm: arm }
 }
 
 fn parseMatchPattern(parser Parser) PatResult {
     let tok Token: currentToken(parser)
     let k Int64: tok.kind
-    return match k {
-        TOK_WILDCARD: { parser: advance(parser), pat: { kind: 0 } }
-        TOK_TRUE:     { parser: advance(parser), pat: { kind: NODE_BOOL_LIT, value: true } }
-        TOK_FALSE:    { parser: advance(parser), pat: { kind: NODE_BOOL_LIT, value: false } }
-        TOK_INT:      { parser: advance(parser), pat: { kind: NODE_INT_LIT, text: tok.text } }
-        TOK_FLOAT:    { parser: advance(parser), pat: { kind: NODE_FLOAT_LIT, text: tok.text } }
-        TOK_STRING:   { parser: advance(parser), pat: { kind: NODE_STR_LIT, text: tok.text } }
-        TOK_MINUS:    parseNegativePattern(parser)
-        TOK_IDENT:    { parser: advance(parser), pat: { kind: NODE_VAR_REF, name: tok.text } }
-        _:            error(parser, "expected match pattern")
+    match k {
+        TOK_WILDCARD: {
+            let n WildcardNode: {}
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_TRUE: {
+            let n BoolLitNode: { boolVal: true }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_FALSE: {
+            let n BoolLitNode: { boolVal: false }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_INT: {
+            let n IntLitNode: { text: tok.text }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_FLOAT: {
+            let n FloatLitNode: { text: tok.text }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_STRING: {
+            let n StrLitNode: { text: tok.text }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_MINUS: { return parseNegativePattern(parser) }
+        TOK_IDENT: {
+            let n VarRefNode: { name: tok.text }
+            return { parser: advance(parser), pat: n }
+        }
+        _: {
+            error(parser, "expected match pattern")
+            let n WildcardNode: {}
+            return { parser: advance(parser), pat: n }
+        }
     }
 }
 
@@ -392,10 +393,20 @@ fn parseNegativePattern(parser Parser) PatResult {
     parser: advance(parser)
     let num Token: currentToken(parser)
     let k Int64: num.kind
-    return match k {
-        TOK_INT:   { parser: advance(parser), pat: { kind: NODE_INT_LIT, text: "-".append(num.text) } }
-        TOK_FLOAT: { parser: advance(parser), pat: { kind: NODE_FLOAT_LIT, text: "-".append(num.text) } }
-        _:         error(parser, "expected number after '-' in match pattern")
+    match k {
+        TOK_INT: {
+            let n IntLitNode: { text: "-".append(num.text) }
+            return { parser: advance(parser), pat: n }
+        }
+        TOK_FLOAT: {
+            let n FloatLitNode: { text: "-".append(num.text) }
+            return { parser: advance(parser), pat: n }
+        }
+        _: {
+            error(parser, "expected number after '-' in match pattern")
+            let n WildcardNode: {}
+            return { parser: advance(parser), pat: n }
+        }
     }
 }
 
@@ -435,6 +446,7 @@ fn parseStatement(parser Parser) StmtResult {
         TOK_RETURN:  parseReturnStmt(parser)
         TOK_LET:     parseLetStmt(parser)
         TOK_TYPE:    parseTypeDeclaration(parser)
+        TOK_MATCH:   parseMatchStatement(parser)
         TOK_IDENT:   parseIdentStmt(parser)
         _:           parseExprStmt(parser)
     }
@@ -447,7 +459,8 @@ fn parseIncludeDirective(parser Parser) StmtResult {
     parser: consume(parser, TOK_AS)
     let nsTok Token: currentToken(parser)
     parser: consume(parser, TOK_IDENT)
-    return { parser: parser, stmt: { kind: NODE_INCLUDE, path: clone(pathTok.text), ns: clone(nsTok.text) } }
+    let n IncludeNode: { path: clone(pathTok.text), ns: clone(nsTok.text) }
+    return { parser: parser, stmt: n }
 }
 
 fn parseFnDecl(parser Parser) StmtResult {
@@ -462,7 +475,8 @@ fn parseFnDecl(parser Parser) StmtResult {
         let tr TypeAnnResult: parseTypeAnnotation(parser)
         parser: tr.parser
         let pType String: tr.typeName
-        tr.parser: {}
+        tr.parser:   {}
+        tr.typeName: ""
         drop(tr)
         params.add({ name: pNameTok.text, typeName: pType })
         parser: consumeIf(parser, TOK_COMMA)
@@ -471,7 +485,8 @@ fn parseFnDecl(parser Parser) StmtResult {
     let rtr RetTypeResult: parseFnReturnType(parser)
     parser: rtr.parser
     let returnType String: rtr.returnType
-    rtr.parser: {}
+    rtr.parser:     {}
+    rtr.returnType: ""
     drop(rtr)
     parser: consume(parser, TOK_LBRACE)
     let body Array<AstNode>: []
@@ -484,16 +499,8 @@ fn parseFnDecl(parser Parser) StmtResult {
         drop(r)
     }
     parser: consume(parser, TOK_RBRACE)
-    return {
-        parser: parser
-        stmt: {
-            kind:       NODE_FN_DECL
-            name:       nameTok.text
-            params:     params
-            returnType: returnType
-            body:       body
-        }
-    }
+    let n FnDeclNode: { name: nameTok.text, params: params, returnType: returnType, body: body }
+    return { parser: parser, stmt: n }
 }
 
 fn parseFnReturnType(parser Parser) RetTypeResult {
@@ -510,7 +517,8 @@ fn parseFnReturnTypeAnnotation(parser Parser) RetTypeResult {
     let tr TypeAnnResult: parseTypeAnnotation(parser)
     parser: tr.parser
     let t String: tr.typeName
-    tr.parser: {}
+    tr.parser:   {}
+    tr.typeName: ""
     drop(tr)
     return { parser: parser, returnType: t }
 }
@@ -520,6 +528,13 @@ fn parseTypeDeclaration(parser Parser) StmtResult {
     let nameTok Token: currentToken(parser)
     parser: consume(parser, TOK_IDENT)
     parser: consume(parser, TOK_COLON)
+    return match currentTokenIs(parser, TOK_LBRACE) {
+        true: parseStructTypeBody(parser, nameTok.text)
+        _:    parseSumTypeBody(parser, nameTok.text)
+    }
+}
+
+fn parseStructTypeBody(parser Parser, typeName String) StmtResult {
     parser: consume(parser, TOK_LBRACE)
     let fields Array<Param>: []
     while not currentTokenIs(parser, TOK_RBRACE) and not currentTokenIs(parser, TOK_EOF) {
@@ -527,14 +542,107 @@ fn parseTypeDeclaration(parser Parser) StmtResult {
         parser: consume(parser, TOK_IDENT)
         let tr TypeAnnResult: parseTypeAnnotation(parser)
         parser: tr.parser
-        let typeName String: tr.typeName
-        tr.parser: {}
+        let fType String: tr.typeName
+        tr.parser:   {}
+        tr.typeName: ""
         drop(tr)
-        fields.add({ name: fieldNameTok.text, typeName: typeName })
+        fields.add({ name: fieldNameTok.text, typeName: fType })
         parser: consumeIf(parser, TOK_COMMA)
     }
     parser: consume(parser, TOK_RBRACE)
-    return { parser: parser, stmt: { kind: NODE_TYPE_DECL, name: nameTok.text, fields: fields } }
+    let n TypeDeclNode: { name: typeName, fields: fields }
+    return { parser: parser, stmt: n }
+}
+
+fn parseSumTypeBody(parser Parser, typeName String) StmtResult {
+    let variants Array<String>: []
+    let vtok Token: currentToken(parser)
+    parser: consume(parser, TOK_IDENT)
+    variants.add(vtok.text)
+    while currentTokenIs(parser, TOK_COMMA) {
+        parser: advance(parser)
+        let vtok2 Token: currentToken(parser)
+        parser: consume(parser, TOK_IDENT)
+        variants.add(vtok2.text)
+    }
+    let n SumTypeDeclNode: { name: typeName, variants: variants }
+    return { parser: parser, stmt: n }
+}
+
+fn parseMatchStatement(parser Parser) StmtResult {
+    parser: consume(parser, TOK_MATCH)
+    let cr ParseResult: parseExpr(parser)
+    parser: cr.parser
+    let cond AstNode: cr.expr
+    cr.parser: {}
+    cr.expr:   {}
+    drop(cr)
+    parser: consume(parser, TOK_LBRACE)
+    let arms Array<MatchStmtArm>: []
+    while not currentTokenIs(parser, TOK_RBRACE) and not currentTokenIs(parser, TOK_EOF) {
+        let ar StmtArmResult: parseMatchStmtArm(parser)
+        parser: ar.parser
+        arms.add(ar.arm)
+        ar.parser: {}
+        ar.arm:    {}
+        drop(ar)
+        parser: consumeIf(parser, TOK_COMMA)
+    }
+    parser: consume(parser, TOK_RBRACE)
+    let n MatchStmtNode: { condition: cond, arms: arms }
+    return { parser: parser, stmt: n }
+}
+
+fn parseMatchStmtArm(parser Parser) StmtArmResult {
+    let patR PatResult: parseMatchPattern(parser)
+    parser: patR.parser
+    let pat AstNode: patR.pat
+    patR.parser: {}
+    patR.pat:    {}
+    drop(patR)
+    parser: consume(parser, TOK_COLON)
+    let stmts Array<AstNode>: []
+    return match currentTokenIs(parser, TOK_LBRACE) {
+        true: parseMatchStmtArmBlock(parser, pat, stmts)
+        _:    parseMatchStmtArmSimple(parser, pat, stmts)
+    }
+}
+
+fn parseMatchStmtArmBlock(parser Parser, pat AstNode, stmts Array<AstNode>) StmtArmResult {
+    parser: advance(parser)
+    while not currentTokenIs(parser, TOK_RBRACE) and not currentTokenIs(parser, TOK_EOF) {
+        let r StmtResult: parseStatement(parser)
+        stmts.add(r.stmt)
+        parser: r.parser
+        r.stmt:   {}
+        r.parser: {}
+        drop(r)
+    }
+    parser: consume(parser, TOK_RBRACE)
+    let isWc Bool: match pat { WildcardNode: true, _: false }
+    let arm MatchStmtArm: { isWildcard: isWc, pattern: pat, stmts: stmts }
+    return { parser: parser, arm: arm }
+}
+
+fn parseMatchStmtArmSimple(parser Parser, pat AstNode, stmts Array<AstNode>) StmtArmResult {
+    let isWc Bool: match pat { WildcardNode: true, _: false }
+    return match currentTokenIs(parser, TOK_RBRACE) {
+        true: { parser: parser, arm: { isWildcard: isWc, pattern: pat, stmts: stmts } }
+        _:    parseMatchStmtArmExprBody(parser, pat, stmts, isWc)
+    }
+}
+
+fn parseMatchStmtArmExprBody(parser Parser, pat AstNode, stmts Array<AstNode>, isWc Bool) StmtArmResult {
+    let er ParseResult: parseExpr(parser)
+    parser: er.parser
+    let val AstNode: er.expr
+    er.parser: {}
+    er.expr:   {}
+    drop(er)
+    let exprStmt ExprStmtNode: { expr: val }
+    stmts.add(exprStmt)
+    let arm MatchStmtArm: { isWildcard: isWc, pattern: pat, stmts: stmts }
+    return { parser: parser, arm: arm }
 }
 
 fn parseWhileStmt(parser Parser) StmtResult {
@@ -556,15 +664,20 @@ fn parseWhileStmt(parser Parser) StmtResult {
         drop(r)
     }
     parser: consume(parser, TOK_RBRACE)
-    return { parser: parser, stmt: { kind: NODE_WHILE, condition: cond, body: body } }
+    let n WhileNode: { condition: cond, body: body }
+    return { parser: parser, stmt: n }
 }
 
 fn parseReturnStmt(parser Parser) StmtResult {
     parser: consume(parser, TOK_RETURN)
     let atEnd Bool: currentTokenIs(parser, TOK_RBRACE) or currentTokenIs(parser, TOK_EOF)
-    return match atEnd {
-        true: { parser: parser, stmt: { kind: NODE_RETURN, hasValue: false, value: {} } }
-        _:    parseReturnValue(parser)
+    match atEnd {
+        true: {
+            let dummy WildcardNode: {}
+            let n ReturnNode: { hasValue: false, value: dummy }
+            return { parser: parser, stmt: n }
+        }
+        _: { return parseReturnValue(parser) }
     }
 }
 
@@ -575,7 +688,8 @@ fn parseReturnValue(parser Parser) StmtResult {
     er.parser: {}
     er.expr:   {}
     drop(er)
-    return { parser: parser, stmt: { kind: NODE_RETURN, hasValue: true, value: val } }
+    let n ReturnNode: { hasValue: true, value: val }
+    return { parser: parser, stmt: n }
 }
 
 fn parseLetStmt(parser Parser) StmtResult {
@@ -585,7 +699,8 @@ fn parseLetStmt(parser Parser) StmtResult {
     let tr TypeAnnResult: parseTypeAnnotation(parser)
     parser: tr.parser
     let typeName String: tr.typeName
-    tr.parser: {}
+    tr.parser:   {}
+    tr.typeName: ""
     drop(tr)
     parser: consume(parser, TOK_COLON)
     let er ParseResult: parseExpr(parser)
@@ -594,11 +709,13 @@ fn parseLetStmt(parser Parser) StmtResult {
     er.parser: {}
     er.expr:   {}
     drop(er)
-    return { parser: parser, stmt: { kind: NODE_LET, name: nameTok.text, typeName: typeName, value: val } }
+    let n LetNode: { name: nameTok.text, typeName: typeName, value: val }
+    return { parser: parser, stmt: n }
 }
 
 fn parseIdentStmt(parser Parser) StmtResult {
-    return match peekIs(parser, TOK_COLON) {
+    let isAssign Bool: peekIs(parser, TOK_COLON)
+    return match isAssign {
         true: parseAssignStmt(parser)
         _:    parseIdentExprOrFieldAssign(parser)
     }
@@ -614,7 +731,8 @@ fn parseAssignStmt(parser Parser) StmtResult {
     er.parser: {}
     er.expr:   {}
     drop(er)
-    return { parser: parser, stmt: { kind: NODE_ASSIGN, name: name, value: val } }
+    let n AssignNode: { name: name, value: val }
+    return { parser: parser, stmt: n }
 }
 
 fn parseIdentExprOrFieldAssign(parser Parser) StmtResult {
@@ -624,9 +742,14 @@ fn parseIdentExprOrFieldAssign(parser Parser) StmtResult {
     pr.parser: {}
     pr.expr:   {}
     drop(pr)
-    return match expr.kind.equals(NODE_FIELD_ACCESS) and currentTokenIs(parser, TOK_COLON) {
-        true: parseFieldAssignStmt(parser, expr)
-        _:    { parser: parser, stmt: { kind: NODE_EXPR_STMT, expr: expr } }
+    let isFA Bool: match expr { FieldAccessNode: true, _: false }
+    let isAssign Bool: isFA and currentTokenIs(parser, TOK_COLON)
+    match isAssign {
+        true: { return parseFieldAssignStmt(parser, expr) }
+        _: {
+            let n ExprStmtNode: { expr: expr }
+            return { parser: parser, stmt: n }
+        }
     }
 }
 
@@ -638,7 +761,17 @@ fn parseFieldAssignStmt(parser Parser, fieldExpr AstNode) StmtResult {
     er.parser: {}
     er.expr:   {}
     drop(er)
-    return { parser: parser, stmt: { kind: NODE_FIELD_ASSIGN, receiver: fieldExpr.receiver, fieldName: fieldExpr.fieldName, value: val } }
+    match fieldExpr {
+        FieldAccessNode: {
+            let n FieldAssignNode: { receiver: fieldExpr.receiver, fieldName: fieldExpr.fieldName, value: val }
+            return { parser: parser, stmt: n }
+        }
+        _: {
+            error(parser, "expected field access before ':'")
+            let n ExprStmtNode: { expr: fieldExpr }
+            return { parser: parser, stmt: n }
+        }
+    }
 }
 
 fn parseExprStmt(parser Parser) StmtResult {
@@ -648,14 +781,12 @@ fn parseExprStmt(parser Parser) StmtResult {
     er.parser: {}
     er.expr:   {}
     drop(er)
-    return { parser: parser, stmt: { kind: NODE_EXPR_STMT, expr: val } }
+    let n ExprStmtNode: { expr: val }
+    return { parser: parser, stmt: n }
 }
 
 fn parse(tokens Array<Token>) AstModule {
-    let parser Parser: {
-        pos:    0
-        tokens: tokens
-    }
+    let parser Parser: { pos: 0, tokens: tokens }
     let stmts Array<AstNode>: []
     while not currentTokenIs(parser, TOK_EOF) {
         let r StmtResult: parseStatement(parser)
@@ -674,8 +805,9 @@ fn makeIndent(indent String) String {
 
 fn printModule(ast AstModule, path String) {
     printLn("Module [".append(path).append("]"))
+    let nstmts Int64: ast.stmts.len()
     let i Int64: 0
-    while i.lt(ast.stmts.len()) {
+    while i.lt(nstmts) {
         let s AstNode: ast.stmts.at(i)
         printStmt(s, "  ")
         i: i.add(1)
@@ -683,57 +815,59 @@ fn printModule(ast AstModule, path String) {
 }
 
 fn printStmt(stmt AstNode, indent String) {
-    let k Int64: stmt.kind
-    match k {
-        NODE_FN_DECL:      printStmtFnDecl(stmt, indent)
-        NODE_LET:          printStmtLet(stmt, indent)
-        NODE_ASSIGN:       printStmtAssign(stmt, indent)
-        NODE_FIELD_ASSIGN: printStmtFieldAssign(stmt, indent)
-        NODE_RETURN:       printStmtReturn(stmt, indent)
-        NODE_WHILE:        printStmtWhile(stmt, indent)
-        NODE_INCLUDE:      printLn(indent.append("IncludeDirective [\"").append(stmt.path).append("\"] as [").append(stmt.ns).append("]"))
-        NODE_EXPR_STMT:    printStmtExpr(stmt, indent)
-        NODE_TYPE_DECL:    printStmtTypeDecl(stmt, indent)
-        _:                 printLn(indent.append("UnknownStatement"))
+    match stmt {
+        IncludeNode:     { printLn(indent.append("IncludeDirective [\"").append(stmt.path).append("\"] as [").append(stmt.ns).append("]")) }
+        FnDeclNode:      { printStmtFnDecl(stmt, indent) }
+        LetNode:         { printStmtLet(stmt, indent) }
+        AssignNode:      { printStmtAssign(stmt, indent) }
+        FieldAssignNode: { printStmtFieldAssign(stmt, indent) }
+        ReturnNode:      { printStmtReturn(stmt, indent) }
+        WhileNode:       { printStmtWhile(stmt, indent) }
+        ExprStmtNode:    { printStmtExpr(stmt, indent) }
+        TypeDeclNode:    { printStmtTypeDecl(stmt, indent) }
+        SumTypeDeclNode: { printStmtSumTypeDecl(stmt, indent) }
+        MatchStmtNode:   { printStmtMatchStatement(stmt, indent) }
+        _:               { printLn(indent.append("UnknownStatement")) }
     }
 }
 
-fn printStmtFnDecl(stmt AstNode, indent String) {
+fn printStmtFnDecl(stmt FnDeclNode, indent String) {
     let paramStr String: buildParamStr(stmt.params)
     printLn(indent.append("FunctionDeclaration [").append(stmt.name).append("](").append(paramStr).append(") -> ").append(stmt.returnType))
     let bodyIndent String: makeIndent(indent)
+    let nbody Int64: stmt.body.len()
     let i Int64: 0
-    while i.lt(stmt.body.len()) {
+    while i.lt(nbody) {
         let s AstNode: stmt.body.at(i)
         printStmt(s, bodyIndent)
         i: i.add(1)
     }
 }
 
-fn printStmtLet(stmt AstNode, indent String) {
+fn printStmtLet(stmt LetNode, indent String) {
     printLn(indent.append("LetStatement [").append(stmt.name).append("] : ").append(stmt.typeName))
     printExpr(stmt.value, makeIndent(indent))
 }
 
-fn printStmtAssign(stmt AstNode, indent String) {
+fn printStmtAssign(stmt AssignNode, indent String) {
     printLn(indent.append("AssignmentStatement [").append(stmt.name).append("]"))
     printExpr(stmt.value, makeIndent(indent))
 }
 
-fn printStmtFieldAssign(stmt AstNode, indent String) {
+fn printStmtFieldAssign(stmt FieldAssignNode, indent String) {
     printLn(indent.append("FieldAssignment [.").append(stmt.fieldName).append("]"))
     printExpr(stmt.receiver, makeIndent(indent))
     printExpr(stmt.value, makeIndent(indent))
 }
 
-fn printStmtReturn(stmt AstNode, indent String) {
+fn printStmtReturn(stmt ReturnNode, indent String) {
     printLn(indent.append("ReturnStatement"))
     match stmt.hasValue {
         true: printExpr(stmt.value, makeIndent(indent))
     }
 }
 
-fn printStmtWhile(stmt AstNode, indent String) {
+fn printStmtWhile(stmt WhileNode, indent String) {
     printLn(indent.append("WhileStatement"))
     let bodyIndent String: makeIndent(indent)
     printExpr(stmt.condition, bodyIndent)
@@ -745,18 +879,60 @@ fn printStmtWhile(stmt AstNode, indent String) {
     }
 }
 
-fn printStmtExpr(stmt AstNode, indent String) {
+fn printStmtExpr(stmt ExprStmtNode, indent String) {
     printLn(indent.append("ExpressionStatement"))
     printExpr(stmt.expr, makeIndent(indent))
 }
 
-fn printStmtTypeDecl(stmt AstNode, indent String) {
+fn printStmtTypeDecl(stmt TypeDeclNode, indent String) {
     printLn(indent.append("TypeDeclaration [").append(stmt.name).append("]"))
     let fieldIndent String: makeIndent(indent)
+    let fields Array<Param>: stmt.fields
     let i Int64: 0
-    while i.lt(stmt.fields.len()) {
-        let f AstNode: stmt.fields.at(i)
+    while i.lt(fields.len()) {
+        let f Param: fields.at(i)
         printLn(fieldIndent.append("Field [").append(f.name).append("] Type [").append(f.typeName).append("]"))
+        i: i.add(1)
+    }
+}
+
+fn printStmtSumTypeDecl(stmt SumTypeDeclNode, indent String) {
+    let variants Array<String>: stmt.variants
+    let i Int64: 0
+    let varStr String: ""
+    while i.lt(variants.len()) {
+        let vname String: variants.at(i)
+        let sep String: match i.gt(0) { true: ", ", _: "" }
+        varStr: varStr.append(sep).append(vname)
+        i: i.add(1)
+    }
+    printLn(indent.append("SumType [").append(stmt.name).append("] Variants: [").append(varStr).append("]"))
+}
+
+fn printStmtMatchStatement(stmt MatchStmtNode, indent String) {
+    let narms Int64: stmt.arms.len()
+    printLn(indent.append("MatchStatement [").append(narms.toString()).append(" arms]"))
+    let bodyIndent String: makeIndent(indent)
+    let armIndent String: makeIndent(bodyIndent)
+    printExpr(stmt.condition, bodyIndent)
+    let i Int64: 0
+    while i.lt(narms) {
+        let arm MatchStmtArm: stmt.arms.at(i)
+        let isWc Bool: arm.isWildcard
+        let pat AstNode: arm.pattern
+        let patLabel String: matchPatternLabel(pat, isWc)
+        printLn(bodyIndent.append("Arm [").append(patLabel).append("]"))
+        let stmts Array<AstNode>: arm.stmts
+        let bodyLen Int64: stmts.len()
+        match bodyLen.equals(0) {
+            true: printLn(armIndent.append("(empty)"))
+        }
+        let j Int64: 0
+        while j.lt(bodyLen) {
+            let s AstNode: stmts.at(j)
+            printStmt(s, armIndent)
+            j: j.add(1)
+        }
         i: i.add(1)
     }
 }
@@ -774,36 +950,35 @@ fn buildParamStr(params Array<Param>) String {
 }
 
 fn printExpr(expr AstNode, indent String) {
-    let k Int64: expr.kind
-    match k {
-        NODE_BOOL_LIT:    printExprBool(expr, indent)
-        NODE_INT_LIT:     printLn(indent.append("IntLiteral [").append(expr.text).append("]"))
-        NODE_FLOAT_LIT:   printLn(indent.append("FloatLiteral [").append(expr.text).append("]"))
-        NODE_STR_LIT:     printExprString(expr, indent)
-        NODE_VAR_REF:     printLn(indent.append("VariableRef [").append(expr.name).append("]"))
-        NODE_CALL:        printExprCall(expr, indent)
-        NODE_METHOD_CALL: printExprMethodCall(expr, indent)
-        NODE_FIELD_ACCESS: printExprFieldAccess(expr, indent)
-        NODE_ARRAY_LIT:   printExprArrayLit(expr, indent)
-        NODE_STRUCT_LIT:  printExprStructLit(expr, indent)
-        NODE_MATCH:       printExprMatch(expr, indent)
-        NODE_UNARY:       printExprUnary(expr, indent)
-        NODE_BINARY:      printExprBinary(expr, indent)
-        _:                printLn(indent.append("UnknownExpr"))
+    match expr {
+        BoolLitNode:     { printExprBool(expr, indent) }
+        IntLitNode:      { printLn(indent.append("IntLiteral [").append(expr.text).append("]")) }
+        FloatLitNode:    { printLn(indent.append("FloatLiteral [").append(expr.text).append("]")) }
+        StrLitNode:      { printExprString(expr, indent) }
+        VarRefNode:      { printLn(indent.append("VariableRef [").append(expr.name).append("]")) }
+        CallNode:        { printExprCall(expr, indent) }
+        MethodCallNode:  { printExprMethodCall(expr, indent) }
+        FieldAccessNode: { printExprFieldAccess(expr, indent) }
+        ArrayLitNode:    { printExprArrayLit(expr, indent) }
+        StructLitNode:   { printExprStructLit(expr, indent) }
+        MatchExprNode:   { printExprMatch(expr, indent) }
+        UnaryNode:       { printExprUnary(expr, indent) }
+        BinaryNode:      { printExprBinary(expr, indent) }
+        _:               { printLn(indent.append("UnknownExpr")) }
     }
 }
 
-fn printExprBool(expr AstNode, indent String) {
-    let val String: match expr.value { true: "true", _: "false" }
+fn printExprBool(expr BoolLitNode, indent String) {
+    let val String: match expr.boolVal { true: "true", _: "false" }
     printLn(indent.append("BoolLiteral [").append(val).append("]"))
 }
 
-fn printExprString(expr AstNode, indent String) {
+fn printExprString(expr StrLitNode, indent String) {
     let escaped String: escapeForPrint(expr.text)
     printLn(indent.append("StringLiteral [\"").append(escaped).append("\"]"))
 }
 
-fn printExprCall(expr AstNode, indent String) {
+fn printExprCall(expr CallNode, indent String) {
     printLn(indent.append("CallExpression [").append(expr.name).append("]"))
     let argIndent String: makeIndent(indent)
     let i Int64: 0
@@ -814,7 +989,7 @@ fn printExprCall(expr AstNode, indent String) {
     }
 }
 
-fn printExprMethodCall(expr AstNode, indent String) {
+fn printExprMethodCall(expr MethodCallNode, indent String) {
     printLn(indent.append("MethodCall [.").append(expr.methodName).append("]"))
     let argIndent String: makeIndent(indent)
     printExpr(expr.receiver, argIndent)
@@ -826,56 +1001,61 @@ fn printExprMethodCall(expr AstNode, indent String) {
     }
 }
 
-fn printExprFieldAccess(expr AstNode, indent String) {
+fn printExprFieldAccess(expr FieldAccessNode, indent String) {
     printLn(indent.append("FieldAccess [.").append(expr.fieldName).append("]"))
     printExpr(expr.receiver, makeIndent(indent))
 }
 
-fn printExprArrayLit(expr AstNode, indent String) {
-    printLn(indent.append("ArrayLiteral [").append(expr.count.toString()).append(" elements]"))
+fn printExprArrayLit(expr ArrayLitNode, indent String) {
+    let nelems Int64: expr.elems.len()
+    printLn(indent.append("ArrayLiteral [").append(nelems.toString()).append(" elements]"))
     let argIndent String: makeIndent(indent)
     let i Int64: 0
-    while i.lt(expr.elems.len()) {
+    while i.lt(nelems) {
         let e AstNode: expr.elems.at(i)
         printExpr(e, argIndent)
         i: i.add(1)
     }
 }
 
-fn printExprStructLit(expr AstNode, indent String) {
-    printLn(indent.append("StructLiteral [").append(expr.count.toString()).append(" fields]"))
+fn printExprStructLit(expr StructLitNode, indent String) {
+    let nfields Int64: expr.fields.len()
+    printLn(indent.append("StructLiteral [").append(nfields.toString()).append(" fields]"))
     let fieldIndent String: makeIndent(indent)
     let valIndent String: makeIndent(fieldIndent)
     let i Int64: 0
-    while i.lt(expr.fields.len()) {
-        let f AstNode: expr.fields.at(i)
+    while i.lt(nfields) {
+        let f StructFieldNode: expr.fields.at(i)
         printLn(fieldIndent.append("Field [").append(f.name).append("]"))
         printExpr(f.value, valIndent)
         i: i.add(1)
     }
 }
 
-fn printExprMatch(expr AstNode, indent String) {
-    printLn(indent.append("MatchExpression [").append(expr.count.toString()).append(" arms]"))
+fn printExprMatch(expr MatchExprNode, indent String) {
+    let narms Int64: expr.arms.len()
+    printLn(indent.append("MatchExpression [").append(narms.toString()).append(" arms]"))
     let bodyIndent String: makeIndent(indent)
     let armIndent String: makeIndent(bodyIndent)
     printExpr(expr.condition, bodyIndent)
     let i Int64: 0
-    while i.lt(expr.arms.len()) {
-        let arm AstNode: expr.arms.at(i)
-        let patLabel String: matchPatternLabel(arm.pattern, arm.isWildcard)
+    while i.lt(narms) {
+        let arm MatchArm: expr.arms.at(i)
+        let wc Bool: arm.isWildcard
+        let pat AstNode: arm.pattern
+        let patLabel String: matchPatternLabel(pat, wc)
         printLn(bodyIndent.append("Arm [").append(patLabel).append("]"))
         printExpr(arm.body, armIndent)
         i: i.add(1)
     }
 }
 
-fn printExprUnary(expr AstNode, indent String) {
+fn printExprUnary(expr UnaryNode, indent String) {
     printLn(indent.append("UnaryExpression [Not]"))
     printExpr(expr.operand, makeIndent(indent))
 }
 
-fn printExprBinary(expr AstNode, indent String) {
+fn printExprBinary(expr BinaryNode, indent String) {
     let opStr String: match expr.op.equals(OP_AND) { true: "And", _: "Or" }
     printLn(indent.append("BinaryExpression [").append(opStr).append("]"))
     let childIndent String: makeIndent(indent)
@@ -884,22 +1064,19 @@ fn printExprBinary(expr AstNode, indent String) {
 }
 
 fn matchPatternLabel(pat AstNode, isWildcard Bool) String {
-    return match isWildcard {
-        true: "_"
-        _:
-        match pat.kind.equals(NODE_BOOL_LIT) {
-            true: match pat.value { true: "true", _: "false" }
-            _:
-            match pat.kind.equals(NODE_INT_LIT) or pat.kind.equals(NODE_FLOAT_LIT) {
-                true: pat.text
-                _:
-                match pat.kind.equals(NODE_STR_LIT) {
-                    true: "\"".append(pat.text).append("\"")
-                    _:
-                        "VariableReferenceExpression"
-                }
-            }
-        }
+    match isWildcard {
+        true: { return "_" }
+    }
+    return matchPatternLabelInner(pat)
+}
+
+fn matchPatternLabelInner(pat AstNode) String {
+    match pat {
+        BoolLitNode:  { return match pat.boolVal { true: "true", _: "false" } }
+        IntLitNode:   { return pat.text }
+        FloatLitNode: { return pat.text }
+        StrLitNode:   { return "\"".append(pat.text).append("\"") }
+        _:            { return "VariableReferenceExpression" }
     }
 }
 
