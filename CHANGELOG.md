@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 15g — Bootstrap Round 1: Binary A
+
+Extends the `suru-build` smoke test to cover a broader corpus, confirming binary A (the `suru-build` executable compiled by the C# bootstrap compiler) handles recursive functions, while loops, and all string methods correctly.
+
+- **`tests/Suru.Tests/IRSuruStage15gTests.cs`** (new): Three `[Fact]` tests — `FibonacciCompilesToCorrectOutput` (recursive match-expression, output `"0\n1\n5\n55\n"`), `WhileLoopCompilesToCorrectOutput` (loops + string append, output `"1\n2\n3\n4\n5\n55\nxxx\n"`), `StringsCompilesToCorrectOutput` (len/equals/append/slice/at/Int64.from/toString, output `"5\ntrue\nfalse\nhello world\nel\n42\n42\nh\n"`). No codegen gaps found; no Suru source changes required. 178/178 tests green.
+
+### Stage 15f — Complete `suru build` Driver CLI
+
+Creates the canonical Suru compiler source fixture (`tests/fixtures/suru-build/main.suru`) — the entry point for bootstrapping in Stages 15g and 15h — and cross-validates it against `arithmetic.suru`.
+
+- **`tests/fixtures/suru-build/main.suru`** (new): Clean, standalone Suru compiler implementing the full pipeline: lex → parse → resolveIncludes (transitive + diamond) → semantic pre-passes → statement analysis → codegen → writeFile. Reads source from `args.at(1)`, writes `.ll` to `args.at(2)`. Exits code 1 on semantic errors. Shares the same include paths as `suru-codegen-driver-full` (both fixtures sit at the same depth under `tests/fixtures/`).
+- **`tests/Suru.Tests/IRSuruStage15fTests.cs`** (new): `ArithmeticCompilesToCorrectOutput` — compiles `suru-build` with the C# bootstrap compiler, runs it on `arithmetic/main.suru`, links the emitted `.ll` with all five Suru runtime modules, and asserts output `"5\n6\n6\n3\n-5\ntrue\nfalse\n7\n3\n"`. 175/175 tests green.
+
 ### Stage 15e — Semantic Analysis Integration in Driver
 
 Inserts semantic analysis into the `suru-codegen-driver-full` pipeline between include resolution and codegen, so the driver rejects invalid programs with exit code 1 before emitting any IR.
