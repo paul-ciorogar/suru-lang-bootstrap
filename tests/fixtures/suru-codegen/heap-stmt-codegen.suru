@@ -208,6 +208,18 @@ fn emitHLetStmt(ctx HeapCodegenContext, node LetNode) HeapCodegenContext {
     ctx: hctx.withHReturnName(ctx, suruTy)
     let vr HeapCodegenResult: hval.emitHValue(ctx, node.value)
     ctx: vr.ctx
+    // When the annotation names a variant, overwrite type_tag=7 and variant_idx in-place.
+    // Mirrors C# IRFunctionCodeGenerator.EmitStmt lines 147-157.
+    match hctx.isVariant(ctx, suruTy) { true: {
+        let parent SumTypeDecl: hctx.findParentForVariant(ctx, suruTy)
+        let vidx Int64: hctx.variantIdx(parent, suruTy)
+        let g0 IrResult: ir.emitGEP(ctx.builder, "i8", vr.name, "i64 0")
+        ctx: hctx.withHBuilder(ctx, g0.builder)
+        ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "7", g0.name))
+        let g8 IrResult: ir.emitGEP(ctx.builder, "i8", vr.name, "i64 8")
+        ctx: hctx.withHBuilder(ctx, g8.builder)
+        ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", vidx.toString(), g8.name))
+    } _: {} }
     ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, llvmTy, vr.name, ar.name))
     ctx: hctx.addHVar(ctx, node.name, ar.name, llvmTy, suruTy)
     return ctx
@@ -299,29 +311,9 @@ fn emitHWhile(ctx HeapCodegenContext, node WhileNode) HeapCodegenContext {
     return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a"))), true)
 }
 
-fn emitHMatchStmt(ctx HeapCodegenContext, node MatchStmtNode) HeapCodegenContext {
-    let arms Array<MatchStmtArm>: node.arms
-    let condR HeapCodegenResult: hval.emitHValue(ctx, node.condition)
-    ctx: condR.ctx
-    let condVal String: condR.name
-    let condTy String: condR.llvmType
-    let nr IrResult: ir.nextLabel(ctx.builder, "ms")
-    let n String: nr.name
-    ctx: hctx.withHBuilder(ctx, nr.builder)
-    let pis Array<Int64>: hval.collectHStmtPatIdxs(arms)
-    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) } _: {} }
-    let ci Int64: 0
-    while ci.lt(pis.len()) {
-        let arm MatchStmtArm: arms.at(pis.at(ci))
-        let pr HeapCodegenResult: hval.emitHValue(ctx, arm.pattern)
-        ctx: pr.ctx
-        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
-        ctx: hctx.withHBuilder(ctx, cr.builder)
-        let nx String: match ci.add(1).lt(pis.len()) { true: n.append("_t").append(ci.add(1).toString()), _: n.append("_w") }
-        ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, n.append("_a").append(ci.toString()), nx))
-        match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_t").append(ci.add(1).toString()))) } _: {} }
-        ci: ci.add(1)
-    }
+// Shared tail: labeled arm bodies → wildcard label+body → merge label.
+// Used by both emitHMatchStmt and emitHMatchStmtVariant.
+fn emitHMatchArmBodies(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Array<Int64>, n String) HeapCodegenContext {
     let ai Int64: 0
     while ai.lt(pis.len()) {
         let arm MatchStmtArm: arms.at(pis.at(ai))
@@ -347,6 +339,63 @@ fn emitHMatchStmt(ctx HeapCodegenContext, node MatchStmtNode) HeapCodegenContext
     }
     match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m"))) } _: {} }
     return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_m"))), true)
+}
+
+// Variant match: emit @suru_variant_tag once then compare variant_idx per arm.
+// Patterns are VarRefNode whose name is the variant name (not an in-scope variable).
+fn emitHMatchStmtVariant(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Array<Int64>, n String, condVal String) HeapCodegenContext {
+    let tagR IrResult: ir.emitCall(ctx.builder, "i64", "suru_variant_tag", ["ptr ".append(condVal)])
+    ctx: hctx.withHBuilder(ctx, tagR.builder)
+    let tagVal String: tagR.name
+    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) } _: {} }
+    let ci Int64: 0
+    while ci.lt(pis.len()) {
+        let arm MatchStmtArm: arms.at(pis.at(ci))
+        let patAst AstNode: arm.pattern
+        match patAst {
+            VarRefNode: {
+                let vidx Int64: hctx.variantIdx(hctx.findParentForVariant(ctx, patAst.name), patAst.name)
+                let cr IrResult: ir.emitICmp(ctx.builder, "eq", "i64", tagVal, vidx.toString())
+                ctx: hctx.withHBuilder(ctx, cr.builder)
+                let nx String: match ci.add(1).lt(pis.len()) { true: n.append("_t").append(ci.add(1).toString()), _: n.append("_w") }
+                ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, n.append("_a").append(ci.toString()), nx))
+                match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_t").append(ci.add(1).toString()))) } _: {} }
+            }
+            _: {}
+        }
+        ci: ci.add(1)
+    }
+    return emitHMatchArmBodies(ctx, arms, pis, n)
+}
+
+fn emitHMatchStmt(ctx HeapCodegenContext, node MatchStmtNode) HeapCodegenContext {
+    let arms Array<MatchStmtArm>: node.arms
+    let condR HeapCodegenResult: hval.emitHValue(ctx, node.condition)
+    ctx: condR.ctx
+    let condVal String: condR.name
+    let condTy String: condR.llvmType
+    let nr IrResult: ir.nextLabel(ctx.builder, "ms")
+    let n String: nr.name
+    ctx: hctx.withHBuilder(ctx, nr.builder)
+    let pis Array<Int64>: hval.collectHStmtPatIdxs(arms)
+    match hctx.isVariant(ctx, condR.suruType) {
+        true: { return emitHMatchStmtVariant(ctx, arms, pis, n, condVal) }
+        _: {}
+    }
+    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) } _: {} }
+    let ci Int64: 0
+    while ci.lt(pis.len()) {
+        let arm MatchStmtArm: arms.at(pis.at(ci))
+        let pr HeapCodegenResult: hval.emitHValue(ctx, arm.pattern)
+        ctx: pr.ctx
+        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
+        ctx: hctx.withHBuilder(ctx, cr.builder)
+        let nx String: match ci.add(1).lt(pis.len()) { true: n.append("_t").append(ci.add(1).toString()), _: n.append("_w") }
+        ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, n.append("_a").append(ci.toString()), nx))
+        match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_t").append(ci.add(1).toString()))) } _: {} }
+        ci: ci.add(1)
+    }
+    return emitHMatchArmBodies(ctx, arms, pis, n)
 }
 
 fn emitHStmt(ctx HeapCodegenContext, stmt AstNode) HeapCodegenContext {
@@ -408,7 +457,16 @@ fn emitHFnDecl(ctx HeapCodegenContext, node FnDeclNode) HeapCodegenContext {
     inner: emitHStmts(inner, node.body)
     match inner.blockOpen {
         true: {
-            let b2 IrBuilder: match isMain { true: ir.emitRet(inner.builder, "i64", "0"), _: ir.emitRetVoid(inner.builder) }
+            // For main: ret i64 0.  For void-returning Suru functions: ret void.
+            // For non-void non-main (e.g. blockOpen=true from dead code after exhaustive match):
+            // emit unreachable — the open block is dead code that LLVM must not validate.
+            let b2 IrBuilder: match isMain {
+                true: ir.emitRet(inner.builder, "i64", "0"),
+                _: match retTy.equals("void") {
+                    true: ir.emitRetVoid(inner.builder),
+                    _: ir.emitUnreachable(inner.builder)
+                }
+            }
             inner: hctx.withHBuilder(inner, b2)
         }
         _: {}

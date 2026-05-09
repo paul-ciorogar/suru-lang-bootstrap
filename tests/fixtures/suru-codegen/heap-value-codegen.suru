@@ -161,11 +161,18 @@ fn findStructField(fields Array<StructFieldNode>, name String) AstNode {
 fn emitFieldAccess(ctx HeapCodegenContext, node FieldAccessNode) HeapCodegenResult {
     let rr HeapCodegenResult: emitHValue(ctx, node.receiver)
     ctx: rr.ctx
+    // For variant receivers, suru_variant_inner is identity but maintains parity with C# codegen.
+    let structPtr String: rr.name
+    match hctx.isVariant(ctx, rr.suruType) { true: {
+        let innerR IrResult: ir.emitCall(ctx.builder, "ptr", "suru_variant_inner", ["ptr ".append(rr.name)])
+        ctx: hctx.withHBuilder(ctx, innerR.builder)
+        structPtr: innerR.name
+    } _: {} }
     let decl TypeDecl: hctx.lookupHType(ctx, rr.suruType)
     let fi TypeFieldEntry: hctx.lookupHField(decl, node.fieldName)
     let idx Int64: hctx.fieldIndex(decl, node.fieldName)
     let byteOff Int64: idx.multiply(8).add(32)
-    let gf IrResult: ir.emitGEP(ctx.builder, "i8", rr.name, "i64 ".append(byteOff.toString()))
+    let gf IrResult: ir.emitGEP(ctx.builder, "i8", structPtr, "i64 ".append(byteOff.toString()))
     ctx: hctx.withHBuilder(ctx, gf.builder)
     let rl IrResult: ir.emitLoad(ctx.builder, "i64", gf.name)
     ctx: hctx.withHBuilder(ctx, rl.builder)

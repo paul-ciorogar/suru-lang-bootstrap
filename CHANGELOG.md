@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 15c + 15d — Variant Creation, Field Access & Match Dispatch (Suru-in-Suru)
+
+Implements variant creation, field access, and match dispatch in the Suru-in-Suru heap codegen, cross-validated against `tests/fixtures/sum-types/main.suru`. Also fixes a latent `ret void`/`unreachable` bug in `emitHFnDecl` for non-void-returning Suru functions.
+
+- **`tests/fixtures/suru-codegen/heap-codegen-context.suru`** (modified): Added `findParentForVariant(ctx, variantName) SumTypeDecl` (walks `ctx.sumTypes` to find the sum type containing a given variant; returns empty decl if not found). Added `"void" → "void"` mapping to `heapLlvmTypeOf` so void Suru functions are correctly declared as LLVM `void` functions.
+- **`tests/fixtures/suru-codegen/heap-stmt-codegen.suru`** (modified): `emitHLetStmt` now checks `isVariant` and — when the annotation names a variant — overwrites the flat struct header via GEP to set `type_tag=7` and `variant_idx` in-place (mirrors C# `IRFunctionCodeGenerator.EmitStmt`). Extracted `emitHMatchArmBodies` (shared tail: labeled arm bodies → wildcard → merge label) from `emitHMatchStmt` to enable reuse. Added `emitHMatchStmtVariant` — calls `@suru_variant_tag` once, then emits `icmp eq i64 tag, variantIdx` per arm using `findParentForVariant` + `variantIdx`. `emitHMatchStmt` now dispatches to `emitHMatchStmtVariant` when `isVariant(ctx, condR.suruType)` is true. Fixed `emitHFnDecl` end-of-function fallback: void-returning functions still get `ret void`; non-void functions with an open block (dead code from exhaustive match) now get `unreachable` instead of the incorrect `ret void`.
+- **`tests/fixtures/suru-codegen/heap-value-codegen.suru`** (modified): `emitFieldAccess` now calls `@suru_variant_inner` (identity) on variant receivers before the field GEP, for parity with C# `IRStructCodeGenerator.EmitFieldAccess`.
+- **`tests/Suru.Tests/IRSuruStage15cTests.cs`** (new): `VariantCreationAndFieldAccessAndMatchDispatch` — compiles `sum-types/main.suru` via the heap driver, links with five Suru runtime modules, asserts output `"2283\ncircle\nsquare\n"`. 172/172 tests green.
+
 ### Stage 15b — Sum Type Context & Registration
 
 Adds `SumTypeDecl` to `HeapCodegenContext` and wires up sum type registration in the heap codegen pipeline, making variant indices available for Stages 15c/15d.
