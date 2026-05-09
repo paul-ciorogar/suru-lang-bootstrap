@@ -1,0 +1,221 @@
+// Stage 15f — suru build driver (canonical Suru compiler source)
+//
+// This is the Suru compiler written in Suru.  It implements the full
+// compilation pipeline used to bootstrap the language:
+//
+//   lex → parse → resolveIncludes → semantic analysis → codegen → writeFile
+//
+// Include resolution handles transitive and diamond includes via a depth-first
+// recursive pass with path-deduplication.  Semantic analysis runs pre-passes
+// over ALL resolved declarations (types, functions from libraries and main file)
+// and statement analysis over the main file's OWN code only, mirroring the C#
+// SemanticAnalyzer's SourcePath skip for external declarations.  The driver
+// exits with code 1 and prints errors if semantic analysis fails, so invalid
+// programs are rejected before codegen.
+//
+// Usage:
+//   suru-build <source.suru> <output.ll>
+
+include "../suru-lexer/suru-lexer.suru"                   as lex
+include "../suru-parser/suru-parser.suru"                  as parser
+include "../suru-codegen/heap-stmt-codegen.suru"           as codegen
+include "../suru-semantic/suru-semantic.suru"              as semantic
+include "../suru-semantic/suru-semantic-passes.suru"       as passes
+include "../suru-semantic/suru-semantic-stmts.suru"        as semstmts
+include "../suru-semantic/suru-semantic-fns.suru"          as fns
+
+// ─── Include resolution ────────────────────────────────────────────────────────
+
+// Return the directory prefix of an absolute path (everything up to and
+// including the last '/').  Used to resolve relative include paths.
+fn dirName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(0, i.add(1)) } _: {} }
+        i: i.take(1)
+    }
+    return "./"
+}
+
+// Carries accumulated declarations and the set of already-resolved absolute
+// paths so transitive and diamond includes are handled in a single recursive
+// pass without re-processing any file.
+type ResolveState: { decls Array<AstNode>, resolved Array<String> }
+
+// Linear scan: true if path already appears in the resolved list.
+fn pathResolved(resolved Array<String>, path String) Bool {
+    let i Int64: 0
+    while i.lt(resolved.len()) {
+        match resolved.at(i).equals(path) {
+            true: { return true }
+            _:    {}
+        }
+        i: i.add(1)
+    }
+    return false
+}
+
+// Depth-first recursive resolver.  For each IncludeNode in stmts:
+//   - skip if the absolute path is already in state.resolved (diamond dedup)
+//   - otherwise mark as resolved, recurse into that file's own includes first,
+//     then add its FnDeclNode / TypeDeclNode / SumTypeDeclNode to state.decls.
+// Non-include declaration nodes in stmts are added directly to state.decls.
+// All other node kinds (LetNode, ExprStmt, …) are skipped — they belong only
+// to the file that defines them and must not leak into other compilation units.
+fn resolveIncludesRec(stmts Array<AstNode>, dir String, state ResolveState) ResolveState {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            IncludeNode: {
+                let fullPath String: dir.append(s.path)
+                match pathResolved(state.resolved, fullPath) {
+                    false: {
+                        state.resolved.add(fullPath)
+                        let src String: readFile(fullPath)
+                        let toks Array<Token>: lex.tokenize(src)
+                        let mod AstModule: parser.parse(toks)
+                        state: resolveIncludesRec(mod.stmts, dirName(fullPath), state)
+                    }
+                    _: {}
+                }
+            }
+            FnDeclNode:      { state.decls.add(s) }
+            TypeDeclNode:    { state.decls.add(s) }
+            SumTypeDeclNode: { state.decls.add(s) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return state
+}
+
+// Resolve all transitive includes from mainStmts, then append the main file's
+// own non-include nodes.
+fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
+    let state ResolveState: { decls: [], resolved: [] }
+    let i Int64: 0
+    while i.lt(mainStmts.len()) {
+        let s AstNode: mainStmts.at(i)
+        match s {
+            IncludeNode: {
+                let fullPath String: dir.append(s.path)
+                match pathResolved(state.resolved, fullPath) {
+                    false: {
+                        state.resolved.add(fullPath)
+                        let src String: readFile(fullPath)
+                        let toks Array<Token>: lex.tokenize(src)
+                        let mod AstModule: parser.parse(toks)
+                        state: resolveIncludesRec(mod.stmts, dirName(fullPath), state)
+                    }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    // Transitive declarations are already in state.decls; append main file's
+    // own nodes (everything except include directives) after them.
+    let all Array<AstNode>: state.decls
+    let j Int64: 0
+    while j.lt(mainStmts.len()) {
+        let s AstNode: mainStmts.at(j)
+        match s {
+            IncludeNode: {}
+            _: { all.add(s) }
+        }
+        j: j.add(1)
+    }
+    return all
+}
+
+// ─── Semantic analysis helpers ─────────────────────────────────────────────────
+
+// collectNonInclude — returns only the non-IncludeNode statements from stmts.
+// Used to separate the main file's own declarations from resolved-include
+// declarations so statement analysis does not re-analyze library code.
+fn collectNonInclude(stmts Array<AstNode>) Array<AstNode> {
+    let result Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        match stmts.at(i) {
+            IncludeNode: {}
+            _: { result.add(stmts.at(i)) }
+        }
+        i: i.add(1)
+    }
+    return result
+}
+
+// analyzeModuleStatement — pass-3 dispatch for top-level statements.
+// Extends stmts.analyzeStatement with a FnDeclNode arm so function bodies
+// are fully analyzed.  TypeDeclNode and SumTypeDeclNode are silently skipped
+// (already handled by pre-passes).
+fn analyzeModuleStatement(state AnalyzerState, stmt AstNode) AnalyzerState {
+    match stmt {
+        FnDeclNode:      { fns.analyzeFunctionDeclaration(state, stmt) }
+        TypeDeclNode:    {}
+        SumTypeDeclNode: {}
+        _:               { semstmts.analyzeStatement(state, stmt) }
+    }
+    return state
+}
+
+// analyzeModuleStatements — iterates the module statement list.
+fn analyzeModuleStatements(state AnalyzerState, moduleStmts Array<AstNode>) AnalyzerState {
+    let i Int64: 0
+    while i.lt(moduleStmts.len()) {
+        analyzeModuleStatement(state, moduleStmts.at(i))
+        i: i.add(1)
+    }
+    return state
+}
+
+// printErrorsFrom — recursive helper that prints errors starting at index i.
+// Prefixes each message with the source file path, matching C# output format.
+fn printErrorsFrom(state AnalyzerState, path String, i Int64) {
+    let errors Array<AnalysisError>: state.errors
+    match i.lt(errors.len()) {
+        true: {
+            let err AnalysisError: errors.at(i)
+            let line String: path.append(": ").append(err.message)
+            printLn(line)
+            printErrorsFrom(state, path, i.add(1))
+        }
+        _: {}
+    }
+}
+
+// ─── Entry point ───────────────────────────────────────────────────────────────
+
+fn main(args Array<String>) {
+    let sourcePath String: args.at(1)
+    let outputPath String: args.at(2)
+    let source String: readFile(sourcePath)
+    let tokens Array<Token>: lex.tokenize(source)
+    let mod AstModule: parser.parse(tokens)
+    let stmts Array<AstNode>: resolveIncludes(mod.stmts, dirName(sourcePath))
+
+    // Semantic analysis:
+    //   Pre-passes over ALL stmts — registers types/functions from included libraries
+    //   and the main file so cross-module references resolve during analysis.
+    //   Statement analysis over the main file's OWN statements only to avoid
+    //   false errors in library code.
+    let state AnalyzerState: semantic.makeAnalyzerState()
+    passes.runPrePasses(state, stmts)
+    let ownStmts Array<AstNode>: collectNonInclude(mod.stmts)
+    analyzeModuleStatements(state, ownStmts)
+    printErrorsFrom(state, sourcePath, 0)
+    let errors Array<AnalysisError>: state.errors
+    match errors.len().gt(0) {
+        true: exit(1)
+        _:    {}
+    }
+
+    // Code generation proceeds only when semantic analysis passes.
+    let ctx HeapCodegenContext: hctx.makeHeapContext()
+    ctx: codegen.emitHModule(ctx, stmts)
+    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
+    writeFile(outputPath, out)
+}
