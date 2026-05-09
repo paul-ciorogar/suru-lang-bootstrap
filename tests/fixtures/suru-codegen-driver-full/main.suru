@@ -1,0 +1,91 @@
+// Stage 14e — Full Pipeline Driver with Include Resolution
+//
+// Extends the Stage 14d heap driver to resolve single-level include directives
+// before codegen.  For each IncludeNode found in the parsed main module the
+// driver reads, lexes, and parses the referenced file, merges its FnDeclNode /
+// TypeDeclNode / SumTypeDeclNode entries into the main stmt list, and then
+// invokes emitHModule on the combined list.
+//
+// Namespace calls (e.g. lib.double(21)) are handled transparently by
+// emitHMethod in heap-value-codegen.suru — the receiver VarRef "lib" is not in
+// the variable map and not a builtin type, so the call is emitted as a direct
+// call to @double with the method arguments.
+//
+// Usage:
+//   suru-codegen-driver-full <source.suru> <output.ll>
+
+include "../suru-lexer/suru-lexer.suru"          as lex
+include "../suru-parser/suru-parser.suru"         as parser
+include "../suru-codegen/heap-stmt-codegen.suru"  as codegen
+
+// Return the directory prefix of an absolute path (everything up to and
+// including the last '/').  Used to resolve relative include paths.
+fn dirName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(0, i.add(1)) } _: {} }
+        i: i.take(1)
+    }
+    return "./"
+}
+
+// Collect only declaration nodes (fn, type, sum-type) from a stmt list.
+// Used to pull in declarations from included files without their top-level
+// expression statements or include directives.
+fn collectDecls(stmts Array<AstNode>) Array<AstNode> {
+    let out Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            FnDeclNode:      { out.add(s) }
+            TypeDeclNode:    { out.add(s) }
+            SumTypeDeclNode: { out.add(s) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return out
+}
+
+// Perform single-level include resolution.  For each IncludeNode in mainStmts
+// the referenced file is read, parsed, and its declarations prepended to the
+// result.  All other nodes (FnDeclNode, TypeDeclNode, LetNode, etc.) from the
+// main file are appended after the included declarations.
+fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
+    let all Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(mainStmts.len()) {
+        let s AstNode: mainStmts.at(i)
+        match s {
+            IncludeNode: {
+                let fullPath String: dir.append(s.path)
+                let src String: readFile(fullPath)
+                let toks Array<Token>: lex.tokenize(src)
+                let mod AstModule: parser.parse(toks)
+                let decls Array<AstNode>: collectDecls(mod.stmts)
+                let j Int64: 0
+                while j.lt(decls.len()) {
+                    all.add(decls.at(j))
+                    j: j.add(1)
+                }
+            }
+            _: { all.add(s) }
+        }
+        i: i.add(1)
+    }
+    return all
+}
+
+fn main(args Array<String>) {
+    let sourcePath String: args.at(1)
+    let outputPath String: args.at(2)
+    let source String: readFile(sourcePath)
+    let tokens Array<Token>: lex.tokenize(source)
+    let mod AstModule: parser.parse(tokens)
+    let stmts Array<AstNode>: resolveIncludes(mod.stmts, dirName(sourcePath))
+    let ctx HeapCodegenContext: hctx.makeHeapContext()
+    ctx: codegen.emitHModule(ctx, stmts)
+    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
+    writeFile(outputPath, out)
+}

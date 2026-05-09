@@ -226,16 +226,35 @@ fn emitHMethod(ctx HeapCodegenContext, node MethodCallNode) HeapCodegenResult {
     match recvAst {
         VarRefNode: {
             let rv VarRefNode: recvAst
-            match rv.name.equals("Int64") {
-                true: {
-                    let ar HeapCodegenResult: emitHValue(ctx, node.args.at(0))
-                    ctx: ar.ctx
-                    let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_int64_from_string", ["ptr ".append(ar.name)])
+            match rv.name.equals("Int64") { true: {
+                let ar HeapCodegenResult: emitHValue(ctx, node.args.at(0))
+                ctx: ar.ctx
+                let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_int64_from_string", ["ptr ".append(ar.name)])
+                ctx: hctx.withHBuilder(ctx, r.builder)
+                return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+            } _: {} }
+            // Namespace alias call: receiver not in scope and not a builtin type.
+            match hctx.lookupHVar(ctx, rv.name).name.equals("") { true: {
+                let notBuiltin Bool: true
+                match rv.name.equals("Int64")   { true: { notBuiltin: false } _: {} }
+                match rv.name.equals("Float64") { true: { notBuiltin: false } _: {} }
+                match rv.name.equals("Bool")    { true: { notBuiltin: false } _: {} }
+                match rv.name.equals("String")  { true: { notBuiltin: false } _: {} }
+                match notBuiltin { true: {
+                    let nsArgs Array<String>: []
+                    let ai Int64: 0
+                    while ai.lt(node.args.len()) {
+                        let ar HeapCodegenResult: emitHValue(ctx, node.args.at(ai))
+                        ctx: ar.ctx
+                        nsArgs.add(ar.llvmType.append(" ").append(ar.name))
+                        ai: ai.add(1)
+                    }
+                    let retTy String: hctx.lookupHFn(ctx, node.methodName).returnLlvmType
+                    let r IrResult: ir.emitCall(ctx.builder, retTy, node.methodName, nsArgs)
                     ctx: hctx.withHBuilder(ctx, r.builder)
-                    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
-                }
-                _: {}
-            }
+                    return { ctx: ctx, name: r.name, llvmType: retTy, suruType: "" }
+                } _: {} }
+            } _: {} }
         }
         _: {}
     }

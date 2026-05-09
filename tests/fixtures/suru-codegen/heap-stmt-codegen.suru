@@ -4,7 +4,8 @@
 // assembly (string scanning, type/fn registration, emitHModule).
 // Includes heap-value-codegen.suru to pull in Group A (emitHValue) and primitives.
 
-include "heap-value-codegen.suru" as hval
+include "heap-value-codegen.suru"  as hval
+include "heap-type-helpers.suru"   as htypes
 
 // ─── LLVM string escaping ─────────────────────────────────────────────────────
 
@@ -164,72 +165,6 @@ fn registerHFunctions(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenC
     return ctx
 }
 
-// ─── Per-type clone/drop ──────────────────────────────────────────────────────
-
-fn cloneHeapFieldText(off Int64, fi Int64) String {
-    let o String: off.toString()
-    let idx String: fi.toString()
-    let r String: "  %fsg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
-    r: r.append("  %frw").append(idx).append(" = load i64, ptr %fsg").append(idx).append("\n")
-    r: r.append("  %fpt").append(idx).append(" = inttoptr i64 %frw").append(idx).append(" to ptr\n")
-    r: r.append("  %fcl").append(idx).append(" = call ptr @suru_clone_dyn(ptr %fpt").append(idx).append(")\n")
-    r: r.append("  %fpi").append(idx).append(" = ptrtoint ptr %fcl").append(idx).append(" to i64\n")
-    r: r.append("  %fdg").append(idx).append(" = getelementptr i8, ptr %new, i64 ").append(o).append("\n")
-    r: r.append("  store i64 %fpi").append(idx).append(", ptr %fdg").append(idx).append("\n")
-    return r
-}
-
-fn dropHeapFieldText(off Int64, fi Int64) String {
-    let o String: off.toString()
-    let idx String: fi.toString()
-    let r String: "  %dg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
-    r: r.append("  %dr").append(idx).append(" = load i64, ptr %dg").append(idx).append("\n")
-    r: r.append("  %dp").append(idx).append(" = inttoptr i64 %dr").append(idx).append(" to ptr\n")
-    r: r.append("  call void @suru_drop_dyn(ptr %dp").append(idx).append(")\n")
-    return r
-}
-
-fn emitTypeCloneDrop(ctx HeapCodegenContext, decl TypeDecl) HeapCodegenContext {
-    let name String: decl.name
-    let fc Int64: decl.fields.len()
-    let size String: 32.add(fc.multiply(8)).toString()
-    let h String: "define ptr @suru_clone_".append(name).append("(ptr %s) {\nentry:\n")
-    h: h.append("  %new = call ptr @malloc(i64 ").append(size).append(")\n")
-    h: h.append("  call ptr @memcpy(ptr %new, ptr %s, i64 ").append(size).append(")\n")
-    let fi Int64: 0
-    while fi.lt(fc) {
-        let off Int64: 32.add(fi.multiply(8))
-        match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
-            true: {}
-            _: { h: h.append(cloneHeapFieldText(off, fi)) }
-        }
-        fi: fi.add(1)
-    }
-    h: h.append("  ret ptr %new\n}\n\n")
-    h: h.append("define void @suru_drop_".append(name).append("(ptr %s) {\nentry:\n"))
-    fi: 0
-    while fi.lt(fc) {
-        let off Int64: 32.add(fi.multiply(8))
-        match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
-            true: {}
-            _: { h: h.append(dropHeapFieldText(off, fi)) }
-        }
-        fi: fi.add(1)
-    }
-    h: h.append("  call void @free(ptr %s)\n  ret void\n}\n\n")
-    ctx: hctx.withHHelpers(ctx, ctx.helpers.append(h))
-    return ctx
-}
-
-fn emitAllTypeCloneDrop(ctx HeapCodegenContext) HeapCodegenContext {
-    let i Int64: 0
-    while i.lt(ctx.types.len()) {
-        ctx: emitTypeCloneDrop(ctx, ctx.types.at(i))
-        i: i.add(1)
-    }
-    return ctx
-}
-
 // ─── Statement emitters ───────────────────────────────────────────────────────
 
 fn emitHPrintLn(ctx HeapCodegenContext, argNode AstNode) HeapCodegenContext {
@@ -308,6 +243,12 @@ fn emitHExprStmt(ctx HeapCodegenContext, node ExprStmtNode) HeapCodegenContext {
                 let vr HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
                 ctx: vr.ctx
                 return hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_print_error", ["ptr ".append(vr.name)]))
+            } _: {} }
+            match c.name.equals("exit") { true: {
+                let vr HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
+                ctx: vr.ctx
+                ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "exit", ["i64 ".append(vr.name)]))
+                return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitUnreachable(ctx.builder)), false)
             } _: {} }
             let isCloneDrop Bool: c.name.equals("clone")
             match c.name.equals("drop") { true: { isCloneDrop: true } _: {} }
@@ -482,7 +423,7 @@ fn emitHModule(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext 
     ctx: registerHTypes(ctx, stmts)
     ctx: registerHFunctions(ctx, stmts)
     ctx: hctx.withHBuilder(ctx, prim.emitAllHeapDecls(ctx.builder))
-    ctx: emitAllTypeCloneDrop(ctx)
+    ctx: htypes.emitAllTypeCloneDrop(ctx)
     let i Int64: 0
     while i.lt(stmts.len()) {
         let stmt AstNode: stmts.at(i)

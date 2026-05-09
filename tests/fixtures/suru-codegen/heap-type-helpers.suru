@@ -1,0 +1,76 @@
+// Stage 14e — Per-type clone/drop helper emitters.
+//
+// Extracted from heap-stmt-codegen.suru to keep that file under 500 lines.
+// Generates @suru_clone_T / @suru_drop_T function bodies for every declared
+// named type so the vtable-based clone/drop dispatch in suru_struct.ll can
+// call into them.
+
+include "heap-codegen-context.suru" as hctx
+
+// Build the IR text for cloning one heap field at byte offset `off` (field index `fi`).
+fn cloneHeapFieldText(off Int64, fi Int64) String {
+    let o String: off.toString()
+    let idx String: fi.toString()
+    let r String: "  %fsg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  %frw").append(idx).append(" = load i64, ptr %fsg").append(idx).append("\n")
+    r: r.append("  %fpt").append(idx).append(" = inttoptr i64 %frw").append(idx).append(" to ptr\n")
+    r: r.append("  %fcl").append(idx).append(" = call ptr @suru_clone_dyn(ptr %fpt").append(idx).append(")\n")
+    r: r.append("  %fpi").append(idx).append(" = ptrtoint ptr %fcl").append(idx).append(" to i64\n")
+    r: r.append("  %fdg").append(idx).append(" = getelementptr i8, ptr %new, i64 ").append(o).append("\n")
+    r: r.append("  store i64 %fpi").append(idx).append(", ptr %fdg").append(idx).append("\n")
+    return r
+}
+
+// Build the IR text for dropping one heap field at byte offset `off` (field index `fi`).
+fn dropHeapFieldText(off Int64, fi Int64) String {
+    let o String: off.toString()
+    let idx String: fi.toString()
+    let r String: "  %dg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  %dr").append(idx).append(" = load i64, ptr %dg").append(idx).append("\n")
+    r: r.append("  %dp").append(idx).append(" = inttoptr i64 %dr").append(idx).append(" to ptr\n")
+    r: r.append("  call void @suru_drop_dyn(ptr %dp").append(idx).append(")\n")
+    return r
+}
+
+// Emit @suru_clone_T and @suru_drop_T for one TypeDecl into ctx.helpers.
+fn emitTypeCloneDrop(ctx HeapCodegenContext, decl TypeDecl) HeapCodegenContext {
+    let name String: decl.name
+    let fc Int64: decl.fields.len()
+    let size String: 32.add(fc.multiply(8)).toString()
+    let h String: "define ptr @suru_clone_".append(name).append("(ptr %s) {\nentry:\n")
+    h: h.append("  %new = call ptr @malloc(i64 ").append(size).append(")\n")
+    h: h.append("  call ptr @memcpy(ptr %new, ptr %s, i64 ").append(size).append(")\n")
+    let fi Int64: 0
+    while fi.lt(fc) {
+        let off Int64: 32.add(fi.multiply(8))
+        match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
+            true: {}
+            _: { h: h.append(cloneHeapFieldText(off, fi)) }
+        }
+        fi: fi.add(1)
+    }
+    h: h.append("  ret ptr %new\n}\n\n")
+    h: h.append("define void @suru_drop_".append(name).append("(ptr %s) {\nentry:\n"))
+    fi: 0
+    while fi.lt(fc) {
+        let off Int64: 32.add(fi.multiply(8))
+        match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
+            true: {}
+            _: { h: h.append(dropHeapFieldText(off, fi)) }
+        }
+        fi: fi.add(1)
+    }
+    h: h.append("  call void @free(ptr %s)\n  ret void\n}\n\n")
+    ctx: hctx.withHHelpers(ctx, ctx.helpers.append(h))
+    return ctx
+}
+
+// Emit clone/drop helpers for every TypeDecl registered in ctx.types.
+fn emitAllTypeCloneDrop(ctx HeapCodegenContext) HeapCodegenContext {
+    let i Int64: 0
+    while i.lt(ctx.types.len()) {
+        ctx: emitTypeCloneDrop(ctx, ctx.types.at(i))
+        i: i.add(1)
+    }
+    return ctx
+}

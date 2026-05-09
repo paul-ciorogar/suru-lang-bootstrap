@@ -15,6 +15,7 @@ fn emitAllHeapDecls(b IrBuilder) IrBuilder {
     b: ir.emitDeclare(b, "ptr",    "memcpy",                 "ptr, ptr, i64")
     b: ir.emitDeclare(b, "void",   "suru_println",           "ptr")
     b: ir.emitDeclare(b, "void",   "suru_print_error",       "ptr")
+    b: ir.emitDeclare(b, "void",   "exit",                   "i64")
     b: ir.emitDeclare(b, "ptr",    "suru_box_int64",         "i64")
     b: ir.emitDeclare(b, "ptr",    "suru_box_bool",          "i1")
     b: ir.emitDeclare(b, "ptr",    "suru_box_int32",         "i32")
