@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 14e — Full Pipeline & Cross-Validation
+
+Extends the Suru-in-Suru code generator to cross-validate against six additional corpus programs and adds include-directive resolution to a new full-pipeline driver.
+
+- **`tests/fixtures/suru-codegen/heap-type-helpers.suru`** (new): Per-type clone/drop helpers extracted from `heap-stmt-codegen.suru` to keep all files ≤ 500 lines. Contains `cloneHeapFieldText`, `dropHeapFieldText`, `emitTypeCloneDrop`, `emitAllTypeCloneDrop`.
+- **`tests/fixtures/suru-codegen/heap-stmt-codegen.suru`** (modified, 438 lines): Includes `heap-type-helpers.suru as htypes`; delegates `emitAllTypeCloneDrop` to the new file. Adds `exit()` handling in `emitHExprStmt` (emits `call void @exit(i64 n)` + `unreachable`, sets `blockOpen=false`).
+- **`tests/fixtures/suru-codegen/heap-codegen-primitives.suru`** (modified): Adds `declare void @exit(i64)` to `emitAllHeapDecls`.
+- **`tests/fixtures/suru-codegen/heap-value-codegen.suru`** (modified, 500 lines): Adds namespace alias call support in `emitHMethod` — when receiver VarRef is not in scope and not a builtin type, emit a direct `call @methodName(args...)` using the registered function signature. Enables `lib.double(21)` after include-resolution merges `lib.suru` declarations into the module.
+- **`tests/fixtures/suru-codegen-driver-full/main.suru`** (new): Full pipeline driver with single-level include resolution. `dirName(path)` extracts directory prefix; `collectDecls` picks FnDeclNode/TypeDeclNode/SumTypeDeclNode from a file's stmts; `resolveIncludes` reads and parses each IncludeNode's file and prepends its declarations before the main file's stmts.
+- **`tests/Suru.Tests/IRSuruStage14eTests.cs`** (new): Six cross-validation tests in two classes — `IRSuruStage14eSimpleTests` (heap driver: `while-loop`, `comparisons`, `negative-literals`, `print`, `exit_test`) and `IRSuruStage14eFullTests` (full driver: `include-test`). 169/169 tests green.
+
 ### Stage 14d — Heap Types in Suru-in-Suru Codegen
 
 Extends the Suru-in-Suru code generator with String, Array, and Struct codegen. Cross-validates against the C# codegen on `strings/main.suru`, `arrays/main.suru`, and `structs/main.suru`.
