@@ -1,0 +1,282 @@
+// Stage 14d — Heap Codegen Context Types
+//
+// Extended context for heap type codegen (String, Array, Struct).
+// HeapCodegenContext extends the Stage 14b CodegenContext with:
+//   - type registry (TypeDecl) for struct field lookup
+//   - suruType tracking on every variable (e.g. "String", "Array:Int64", "Named")
+//   - separate accumulators for string globals, helper fns, and function bodies
+//     so the final .ll output can be assembled in the correct order:
+//     preamble (header+decls) | strGlobals | helpers | fn bodies
+//   - strIndex for pre-registered string literal globals (populated before fn emit)
+//   - strCount for unique naming of string globals and clone/drop temps
+//
+// suruType encoding:
+//   scalars:       "Int64" | "Bool" | "Int32" | "Float64"
+//   heap strings:  "String"
+//   heap arrays:   "Array:" + elemSuruType  (e.g. "Array:Int64", "Array:Lvl1")
+//   heap structs:  the declared type name   (e.g. "Named", "DataStruct")
+
+include "codegen-types.suru" as cg
+include "ir-builder.suru"    as ir
+
+// ─── Type registry ────────────────────────────────────────────────────────────
+
+// One field in a TypeDecl.  typeName is the Suru type annotation string.
+type TypeFieldEntry: { name String, typeName String }
+
+// Compiled view of a TypeDeclaration AST node.  Populated from TypeDeclNode nodes
+// in a pre-pass so struct field layout is available during codegen.
+type TypeDecl: { name String, fields Array<TypeFieldEntry> }
+
+// ─── String literal registry ──────────────────────────────────────────────────
+
+// Maps a string literal text to its pre-assigned LLVM global name (@.str_N).
+// Populated by scanStringLiterals / registerStringLiterals before fn bodies are emitted.
+type StrIndexEntry: { text String, globalName String }
+
+// ─── Extended variable entry ──────────────────────────────────────────────────
+
+// Variable entry extended with suruType so method dispatch (string/array/struct)
+// can route correctly without re-parsing the llvmType (which is always "ptr" for heap).
+type HeapVarEntry: { name String, allocaName String, llvmType String, suruType String }
+
+// ─── Context and result ───────────────────────────────────────────────────────
+
+// All state threaded through heap-type codegen functions.
+// builder    — accumulated preamble (header + decls)
+// fns        — accumulated function body text (appended after emitHFnDecl)
+// strGlobals — accumulated @.str_N global lines (emitted between decls and helpers)
+// helpers    — accumulated @suru_clone_T / @suru_drop_T function bodies
+// strCount   — monotonically increasing counter for unique names
+type HeapCodegenContext: {
+    builder           IrBuilder
+    fns               String
+    strGlobals        String
+    helpers           String
+    vars              Array<HeapVarEntry>
+    fnSigs            Array<FnSig>
+    types             Array<TypeDecl>
+    strIndex          Array<StrIndexEntry>
+    strCount          Int64
+    currentReturnType String
+    currentReturnName String
+    blockOpen         Bool
+}
+
+// Returned by value-producing heap emitters.
+// suruType carries the Suru type name so callers can dispatch further method calls.
+type HeapCodegenResult: { ctx HeapCodegenContext, name String, llvmType String, suruType String }
+
+// ─── Constructor ─────────────────────────────────────────────────────────────
+
+fn makeHeapContext() HeapCodegenContext {
+    let vars   Array<HeapVarEntry>:  []
+    let fnSigs Array<FnSig>:         []
+    let types  Array<TypeDecl>:      []
+    let idx    Array<StrIndexEntry>: []
+    return {
+        builder:           ir.makeBuilder()
+        fns:               ""
+        strGlobals:        ""
+        helpers:           ""
+        vars:              vars
+        fnSigs:            fnSigs
+        types:             types
+        strIndex:          idx
+        strCount:          0
+        currentReturnType: ""
+        currentReturnName: ""
+        blockOpen:         false
+    }
+}
+
+// ─── Single-field updaters ────────────────────────────────────────────────────
+
+fn withHBuilder(ctx HeapCodegenContext, b IrBuilder) HeapCodegenContext {
+    return { builder: b, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+fn withHBlockOpen(ctx HeapCodegenContext, open Bool) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: open }
+}
+
+fn withHReturnType(ctx HeapCodegenContext, retType String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+fn withHReturnName(ctx HeapCodegenContext, rn String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: rn, blockOpen: ctx.blockOpen }
+}
+
+fn withHStrCount(ctx HeapCodegenContext, n Int64) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: n, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+fn withHStrGlobals(ctx HeapCodegenContext, sg String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: sg, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+fn withHFns(ctx HeapCodegenContext, fns String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+fn withHHelpers(ctx HeapCodegenContext, helpers String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+}
+
+// ─── Variable table ───────────────────────────────────────────────────────────
+
+fn lookupHVar(ctx HeapCodegenContext, name String) HeapVarEntry {
+    let vars Array<HeapVarEntry>: ctx.vars
+    let i Int64: 0
+    while i.lt(vars.len()) {
+        let e HeapVarEntry: vars.at(i)
+        match e.name.equals(name) { true: { return e } _: {} }
+        i: i.add(1)
+    }
+    return { name: "", allocaName: "", llvmType: "", suruType: "" }
+}
+
+fn addHVar(ctx HeapCodegenContext, name String, allocaName String, llvmType String, suruType String) HeapCodegenContext {
+    ctx.vars.add({ name: name, allocaName: allocaName, llvmType: llvmType, suruType: suruType })
+    return ctx
+}
+
+// ─── Function registry ────────────────────────────────────────────────────────
+
+fn lookupHFn(ctx HeapCodegenContext, name String) FnSig {
+    let i Int64: 0
+    while i.lt(ctx.fnSigs.len()) {
+        let s FnSig: ctx.fnSigs.at(i)
+        match s.name.equals(name) { true: { return s } _: {} }
+        i: i.add(1)
+    }
+    return { name: "", returnLlvmType: "" }
+}
+
+fn addHFn(ctx HeapCodegenContext, name String, retLlvmType String) HeapCodegenContext {
+    ctx.fnSigs.add({ name: name, returnLlvmType: retLlvmType })
+    return ctx
+}
+
+// ─── Type registry ────────────────────────────────────────────────────────────
+
+fn lookupHType(ctx HeapCodegenContext, name String) TypeDecl {
+    let i Int64: 0
+    while i.lt(ctx.types.len()) {
+        let d TypeDecl: ctx.types.at(i)
+        match d.name.equals(name) { true: { return d } _: {} }
+        i: i.add(1)
+    }
+    let empty Array<TypeFieldEntry>: []
+    return { name: "", fields: empty }
+}
+
+fn addHType(ctx HeapCodegenContext, decl TypeDecl) HeapCodegenContext {
+    ctx.types.add(decl)
+    return ctx
+}
+
+fn lookupHField(decl TypeDecl, fieldName String) TypeFieldEntry {
+    let i Int64: 0
+    while i.lt(decl.fields.len()) {
+        let f TypeFieldEntry: decl.fields.at(i)
+        match f.name.equals(fieldName) { true: { return f } _: {} }
+        i: i.add(1)
+    }
+    return { name: "", typeName: "" }
+}
+
+fn fieldIndex(decl TypeDecl, fieldName String) Int64 {
+    let i Int64: 0
+    while i.lt(decl.fields.len()) {
+        match decl.fields.at(i).name.equals(fieldName) { true: { return i } _: {} }
+        i: i.add(1)
+    }
+    return -1
+}
+
+// ─── String literal index ─────────────────────────────────────────────────────
+
+fn lookupStrGlobal(ctx HeapCodegenContext, text String) String {
+    let i Int64: 0
+    while i.lt(ctx.strIndex.len()) {
+        let e StrIndexEntry: ctx.strIndex.at(i)
+        match e.text.equals(text) { true: { return e.globalName } _: {} }
+        i: i.add(1)
+    }
+    return ""
+}
+
+fn addStrIndex(ctx HeapCodegenContext, text String, globalName String) HeapCodegenContext {
+    ctx.strIndex.add({ text: text, globalName: globalName })
+    return ctx
+}
+
+// ─── Type classification helpers ──────────────────────────────────────────────
+
+fn isScalarSuruType(suruType String) Bool {
+    match suruType.equals("Int64")   { true: { return true } _: {} }
+    match suruType.equals("Bool")    { true: { return true } _: {} }
+    match suruType.equals("Int32")   { true: { return true } _: {} }
+    match suruType.equals("Float64") { true: { return true } _: {} }
+    return false
+}
+
+// True when suruType encodes an array (e.g. "Array:Int64", "Array:Lvl1").
+fn isArraySuruType(suruType String) Bool {
+    match suruType.len().lt(6) { true: { return false } _: {} }
+    return suruType.slice(0, 6).equals("Array:")
+}
+
+// Extract the element Suru type from an array suruType like "Array:Int64" → "Int64".
+fn elemSuruType(suruType String) String {
+    return suruType.slice(6, suruType.len())
+}
+
+// True when a type annotation string names an Array (e.g. "Array<Int64>").
+fn isArrayTypeName(typeName String) Bool {
+    match typeName.len().lt(5) { true: { return false } _: {} }
+    return typeName.slice(0, 5).equals("Array")
+}
+
+// Extract the element type from a generic type annotation: "Array<Int64>" → "Int64".
+fn extractElemType(typeName String) String {
+    let i Int64: 0
+    let start Int64: -1
+    while i.lt(typeName.len()) {
+        match typeName.at(i).equals("<") { true: { start: i } _: {} }
+        i: i.add(1)
+    }
+    match start.equals(-1) { true: { return "" } _: {} }
+    return typeName.slice(start.add(1), typeName.len().take(1))
+}
+
+// Convert a Suru type annotation name to the suruType encoding used in HeapVarEntry.
+fn makeSuruType(typeName String) String {
+    match isArrayTypeName(typeName) {
+        true: { return "Array:".append(extractElemType(typeName)) }
+        _: {}
+    }
+    return typeName
+}
+
+// LLVM type for a Suru type name (replicates cg.llvmTypeOf for heap-context use).
+fn heapLlvmTypeOf(suruType String) String {
+    match suruType.equals("Int64")   { true: { return "i64"    } _: {} }
+    match suruType.equals("Bool")    { true: { return "i1"     } _: {} }
+    match suruType.equals("Int32")   { true: { return "i32"    } _: {} }
+    match suruType.equals("Float64") { true: { return "double" } _: {} }
+    return "ptr"
+}
+
+// SuruType integer type_tag for a Suru type name (for array elem_tag).
+fn suruTypeTag(suruType String) String {
+    match suruType.equals("Bool")    { true: { return "0" } _: {} }
+    match suruType.equals("Int32")   { true: { return "1" } _: {} }
+    match suruType.equals("Int64")   { true: { return "2" } _: {} }
+    match suruType.equals("Float64") { true: { return "3" } _: {} }
+    match suruType.equals("String")  { true: { return "6" } _: {} }
+    match isArraySuruType(suruType)  { true: { return "5" } _: {} }
+    return "4"
+}

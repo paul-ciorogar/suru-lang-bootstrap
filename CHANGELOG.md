@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 14d — Heap Types in Suru-in-Suru Codegen
+
+Extends the Suru-in-Suru code generator with String, Array, and Struct codegen. Cross-validates against the C# codegen on `strings/main.suru`, `arrays/main.suru`, and `structs/main.suru`.
+
+- **`tests/fixtures/suru-codegen/heap-codegen-context.suru`** (new, 282 lines): Extended context for heap-type codegen. Defines `TypeFieldEntry`, `TypeDecl`, `StrIndexEntry`, `HeapVarEntry`, `HeapCodegenContext` (adds `fns`, `strGlobals`, `helpers`, `types`, `strIndex`, `strCount` to the scalar context), and `HeapCodegenResult`. Context helpers, type registry, string index, field lookup, and type classification helpers (`isScalarSuruType`, `isArraySuruType`, `elemSuruType`, `makeSuruType`, `heapLlvmTypeOf`, `suruTypeTag`).
+- **`tests/fixtures/suru-codegen/heap-codegen-primitives.suru`** (new): Pure IR building helpers — no `emitHValue` calls. String literal global emitter (with null-terminated content), string method dispatch (`len` via GEP+load of `%suru.String` field 1; others via `suru_string_*` calls), array method dispatch (`len` via GEP+load of `%suru.Array` field 2; `set` with correct arg-order swap `(arr, idx, boxedVal)`; others via `suru_array_*`), struct header initialization, struct field encode/decode (`emitStructFieldToI64`/`emitFromI64`), `emitAllHeapDecls`.
+- **`tests/fixtures/suru-codegen/heap-value-codegen.suru`** (new, 481 lines): Group A — `emitHValue` and all its mutual recursion partners. String literal emit (malloc+memcpy+`suru_string_create`), array literal emit (header init + per-element `emitToI64`), struct literal emit (malloc + header + per-field store), field access (GEP + load + `emitStructFieldFromI64`), string/array/struct method dispatch, `emitHCallExpr` (handles `clone`/`drop` as builtins → `suru_clone_dyn`/`suru_drop_dyn`), `emitHMatchExpr`, `collectHStmtPatIdxs`.
+- **`tests/fixtures/suru-codegen/heap-stmt-codegen.suru`** (new, 497 lines): Group B — `emitHStmt*` + module assembly. `emitHPrintLn` (boxes scalars by `llvmType` check); `emitHLetStmt` (sets `currentReturnName` via `makeSuruType` for array/struct literal dispatch); `emitHFnDecl` (fresh inner context with `makeSuruType(node.returnType)` as `currentReturnName`); `emitTypeCloneDrop` (memcpy-based clone + per-heap-field re-clone/drop); `emitHModule` (scan string literals → register globals → register types → register fns → emit decls → emit clone/drop helpers → emit fn bodies → emit `@main` wrapper; output in preamble|strGlobals|helpers|fns order).
+- **`tests/fixtures/suru-codegen-driver-heap/main.suru`** (new): Stage 14d driver fixture — lexes, parses, calls `emitHModule`, writes assembled `.ll` output.
+- **`tests/Suru.Tests/IRSuruStage14dTests.cs`** (new): Three cross-validation tests: `StringsCrossValidation`, `ArraysCrossValidation`, `StructsCrossValidation` — each runs the heap driver on the corresponding fixture, links with Suru runtime modules, and asserts output matches the C# compiler's binary.
+- **Key bugs fixed during implementation:** `invert()` on Bool is identity (`sub i1 0, x = x`) — use explicit `true`/`_` arm ordering instead; `suru_string_len` and `suru_array_len` don't exist in the runtime — use GEP+load; `suru_array_set(arr, idx, val)` argument order is swapped from Suru call order `arr.set(val, idx)`.
+- 163/163 tests green.
+
 ### Stage 14c — Control Flow & Match Codegen (Suru-in-Suru)
 
 Extends the Suru-in-Suru codegen with while loops, match-as-expression, match-as-statement, function parameter alloca, assignment statements, recursive calls, and the `compare` method. Cross-validates against the C# codegen on `fibonacci.suru` (match expression + recursion, pure integers).

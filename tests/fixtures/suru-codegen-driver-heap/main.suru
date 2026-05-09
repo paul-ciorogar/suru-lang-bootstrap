@@ -1,0 +1,13 @@
+include "../suru-lexer/suru-lexer.suru"         as lex
+include "../suru-parser/suru-parser.suru"        as parser
+include "../suru-codegen/heap-stmt-codegen.suru" as codegen
+
+fn main(args Array<String>) {
+    let source String:          readFile(args.at(1))
+    let tokens Array<Token>:    lex.tokenize(source)
+    let mod AstModule:          parser.parse(tokens)
+    let ctx HeapCodegenContext: hctx.makeHeapContext()
+    ctx: codegen.emitHModule(ctx, mod.stmts)
+    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
+    writeFile(args.at(2), out)
+}

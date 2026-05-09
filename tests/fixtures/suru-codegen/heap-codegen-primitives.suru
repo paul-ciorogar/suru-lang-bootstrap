@@ -1,0 +1,373 @@
+// Stage 14d — Heap Codegen Primitives
+//
+// Pure IR building helpers for heap types (String, Array, Struct).
+// No calls to emitHValue.  Included by heap-value-codegen.suru.
+//
+// Transitive from heap-codegen-context.suru: ir (IrBuilder / emitters), cg (FnSig).
+
+include "heap-codegen-context.suru" as hctx
+
+// ─── Runtime declare stubs ────────────────────────────────────────────────────
+
+fn emitAllHeapDecls(b IrBuilder) IrBuilder {
+    b: ir.emitDeclare(b, "ptr",    "malloc",                 "i64")
+    b: ir.emitDeclare(b, "void",   "free",                   "ptr")
+    b: ir.emitDeclare(b, "ptr",    "memcpy",                 "ptr, ptr, i64")
+    b: ir.emitDeclare(b, "void",   "suru_println",           "ptr")
+    b: ir.emitDeclare(b, "void",   "suru_print_error",       "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_box_int64",         "i64")
+    b: ir.emitDeclare(b, "ptr",    "suru_box_bool",          "i1")
+    b: ir.emitDeclare(b, "ptr",    "suru_box_int32",         "i32")
+    b: ir.emitDeclare(b, "ptr",    "suru_box_float64",       "double")
+    b: ir.emitDeclare(b, "i64",    "suru_unbox_int64",       "ptr")
+    b: ir.emitDeclare(b, "i1",     "suru_unbox_bool",        "ptr")
+    b: ir.emitDeclare(b, "i32",    "suru_unbox_int32",       "ptr")
+    b: ir.emitDeclare(b, "double", "suru_unbox_float64",     "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_string_create",     "ptr, i64")
+    b: ir.emitDeclare(b, "ptr",    "suru_string_append",     "ptr, ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_string_at",         "ptr, i64")
+    b: ir.emitDeclare(b, "i1",     "suru_string_equals",     "ptr, ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_string_slice",      "ptr, i64, i64")
+    b: ir.emitDeclare(b, "i64",    "suru_string_ord",        "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_string_clone",      "ptr")
+    b: ir.emitDeclare(b, "void",   "suru_string_drop",       "ptr")
+    b: ir.emitDeclare(b, "i64",    "suru_int64_from_string", "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_int64_to_string",   "i64")
+    b: ir.emitDeclare(b, "ptr",    "suru_array_at",          "ptr, i64")
+    b: ir.emitDeclare(b, "void",   "suru_array_add",         "ptr, ptr")
+    b: ir.emitDeclare(b, "void",   "suru_array_set",         "ptr, i64, ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_array_slice",       "ptr, i64, i64")
+    b: ir.emitDeclare(b, "ptr",    "suru_array_clone_dyn",   "ptr")
+    b: ir.emitDeclare(b, "void",   "suru_array_drop_dyn",    "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_clone_dyn",         "ptr")
+    b: ir.emitDeclare(b, "void",   "suru_drop_dyn",          "ptr")
+    b: ir.emitDeclare(b, "void",   "suru_variant_create",    "ptr, i64, ptr")
+    b: ir.emitDeclare(b, "i64",    "suru_variant_tag",       "ptr")
+    b: ir.emitDeclare(b, "ptr",    "suru_variant_inner",     "ptr")
+    b: ir.emit(b, "\n")
+    return b
+}
+
+// ─── String literal global registration ──────────────────────────────────────
+
+// Append @.str_N private constant to ctx.strGlobals.
+// escapedText is already in LLVM c-string escape form; byteLen includes \00.
+// Returns updated ctx and global name in `name`.
+fn emitStringLiteralGlobal(ctx HeapCodegenContext, escapedText String, byteLen Int64) HeapCodegenResult {
+    let n Int64: ctx.strCount
+    let gname String: "@.str_".append(n.toString())
+    let line String: gname
+        .append(" = private unnamed_addr constant [").append(byteLen.toString())
+        .append(" x i8] c\"").append(escapedText).append("\\00\"\n")
+    ctx: hctx.withHStrCount(ctx, n.add(1))
+    ctx: hctx.withHStrGlobals(ctx, ctx.strGlobals.append(line))
+    return { ctx: ctx, name: gname, llvmType: "ptr", suruType: "" }
+}
+
+// ─── String instruction helpers ───────────────────────────────────────────────
+
+// Emit @suru_string_create(ptr buf, i64 charLen) → ptr.
+fn emitStringCreate(ctx HeapCodegenContext, bufName String, charLen String) HeapCodegenResult {
+    let a Array<String>: []
+    a.add("ptr ".append(bufName))
+    a.add("i64 ".append(charLen))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_create", a)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// Helper: call fnName(ptr recv) → retType result.
+fn emitStrCall0(ctx HeapCodegenContext, recv String, fnName String, retType String, retSuru String) HeapCodegenResult {
+    let a Array<String>: []
+    a.add("ptr ".append(recv))
+    let r IrResult: ir.emitCall(ctx.builder, retType, fnName, a)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: retType, suruType: retSuru }
+}
+
+// Helper: call fnName(ptr recv, arg0) → retType result.
+fn emitStrCall1(ctx HeapCodegenContext, recv String, fnName String, arg0 String, retType String, retSuru String) HeapCodegenResult {
+    let a Array<String>: []
+    a.add("ptr ".append(recv))
+    a.add(arg0)
+    let r IrResult: ir.emitCall(ctx.builder, retType, fnName, a)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: retType, suruType: retSuru }
+}
+
+// Emit one @suru_string_* call.
+// recv — SSA name of the String ptr; args — pre-formatted LLVM arg strings.
+fn emitStringMethodRaw(ctx HeapCodegenContext, recv String, methodName String, args Array<String>) HeapCodegenResult {
+    match methodName.equals("append") { true: { return emitStrCall1(ctx, recv, "suru_string_append", args.at(0), "ptr", "String") } _: {} }
+    match methodName.equals("at")     { true: { return emitStrCall1(ctx, recv, "suru_string_at",     args.at(0), "ptr", "String") } _: {} }
+    match methodName.equals("equals") { true: { return emitStrCall1(ctx, recv, "suru_string_equals", args.at(0), "i1",  "Bool")   } _: {} }
+    match methodName.equals("len") {
+        true: {
+            let gr IrResult: ir.emitGEP(ctx.builder, "%suru.String", recv, "i32 0, i32 1")
+            let lr IrResult: ir.emitLoad(gr.builder, "i64", gr.name)
+            ctx: hctx.withHBuilder(ctx, lr.builder)
+            return { ctx: ctx, name: lr.name, llvmType: "i64", suruType: "Int64" }
+        }
+        _: {}
+    }
+    match methodName.equals("ord")    { true: { return emitStrCall0(ctx, recv, "suru_string_ord",    "i64", "Int64")  } _: {} }
+    match methodName.equals("clone")  { true: { return emitStrCall0(ctx, recv, "suru_string_clone",  "ptr", "String") } _: {} }
+    match methodName.equals("slice") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            a.add(args.at(0))
+            a.add(args.at(1))
+            let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_slice", a)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+        }
+        _: {}
+    }
+    match methodName.equals("drop") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_string_drop", a))
+            return { ctx: ctx, name: "", llvmType: "void", suruType: "" }
+        }
+        _: {}
+    }
+    printError("emitStringMethodRaw: unknown method")
+    exit(1)
+}
+
+// ─── Array element encoding ───────────────────────────────────────────────────
+
+// Helper: call boxFn(valLlvmType val) → ptr, then ptrtoint → i64.
+fn emitBoxPtrToInt(ctx HeapCodegenContext, valName String, valLlvmType String, boxFn String, srcSuru String) HeapCodegenResult {
+    let a Array<String>: []
+    a.add(valLlvmType.append(" ").append(valName))
+    let rb IrResult: ir.emitCall(ctx.builder, "ptr", boxFn, a)
+    ctx: hctx.withHBuilder(ctx, rb.builder)
+    let re IrResult: ir.emitPtrToInt(ctx.builder, rb.name)
+    ctx: hctx.withHBuilder(ctx, re.builder)
+    return { ctx: ctx, name: re.name, llvmType: "i64", suruType: srcSuru }
+}
+
+// Encode a value for storage in an array data buffer (i64-encoded ptrtoint-of-box).
+// Scalars are boxed first so the runtime can clone/drop them by type_tag.
+fn emitToI64(ctx HeapCodegenContext, valName String, suruType String) HeapCodegenResult {
+    match suruType.equals("Int64")   { true: { return emitBoxPtrToInt(ctx, valName, "i64",    "suru_box_int64",   suruType) } _: {} }
+    match suruType.equals("Bool")    { true: { return emitBoxPtrToInt(ctx, valName, "i1",     "suru_box_bool",    suruType) } _: {} }
+    match suruType.equals("Int32")   { true: { return emitBoxPtrToInt(ctx, valName, "i32",    "suru_box_int32",   suruType) } _: {} }
+    match suruType.equals("Float64") { true: { return emitBoxPtrToInt(ctx, valName, "double", "suru_box_float64", suruType) } _: {} }
+    let re IrResult: ir.emitPtrToInt(ctx.builder, valName)
+    ctx: hctx.withHBuilder(ctx, re.builder)
+    return { ctx: ctx, name: re.name, llvmType: "i64", suruType: suruType }
+}
+
+// Helper: call unboxFn(ptr boxPtr) → retLlvmType result.
+fn emitUnboxPtr(ctx HeapCodegenContext, boxPtr String, retLlvmType String, unboxFn String, srcSuru String) HeapCodegenResult {
+    let a Array<String>: []
+    a.add("ptr ".append(boxPtr))
+    let r IrResult: ir.emitCall(ctx.builder, retLlvmType, unboxFn, a)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: retLlvmType, suruType: srcSuru }
+}
+
+// Decode a ptr from suru_array_at back to the element value.
+// Scalar elements are in a Box — unbox to get raw value.  Heap elements are direct.
+fn emitFromI64(ctx HeapCodegenContext, boxPtr String, elemSuruType String) HeapCodegenResult {
+    match elemSuruType.equals("Int64")   { true: { return emitUnboxPtr(ctx, boxPtr, "i64",    "suru_unbox_int64",   "Int64") } _: {} }
+    match elemSuruType.equals("Bool")    { true: { return emitUnboxPtr(ctx, boxPtr, "i1",     "suru_unbox_bool",    "Bool") } _: {} }
+    match elemSuruType.equals("Int32")   { true: { return emitUnboxPtr(ctx, boxPtr, "i32",    "suru_unbox_int32",   "Int32") } _: {} }
+    match elemSuruType.equals("Float64") { true: { return emitUnboxPtr(ctx, boxPtr, "double", "suru_unbox_float64", "Float64") } _: {} }
+    return { ctx: ctx, name: boxPtr, llvmType: "ptr", suruType: elemSuruType }
+}
+
+// ─── Array header initialization ──────────────────────────────────────────────
+
+// Allocate and initialize a suru.Array header (40 bytes) + data buffer (count*8 bytes).
+// Stores: type_tag=5, elem_tag, len=count, cap=count, data ptr.
+// name = array header ptr; suruType = data buffer ptr (internal caller convention).
+fn emitArrayHeaderInit(ctx HeapCodegenContext, elemTag String, count String) HeapCodegenResult {
+    let rh Array<String>: []
+    rh.add("i64 40")
+    let rhdr IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", rh)
+    ctx: hctx.withHBuilder(ctx, rhdr.builder)
+    let hdr String: rhdr.name
+    let g0 IrResult: ir.emitGEP(ctx.builder, "i8", hdr, "i64 0")
+    ctx: hctx.withHBuilder(ctx, g0.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "5", g0.name))
+    let g8 IrResult: ir.emitGEP(ctx.builder, "i8", hdr, "i64 8")
+    ctx: hctx.withHBuilder(ctx, g8.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", elemTag, g8.name))
+    let g16 IrResult: ir.emitGEP(ctx.builder, "i8", hdr, "i64 16")
+    ctx: hctx.withHBuilder(ctx, g16.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", count, g16.name))
+    let g24 IrResult: ir.emitGEP(ctx.builder, "i8", hdr, "i64 24")
+    ctx: hctx.withHBuilder(ctx, g24.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", count, g24.name))
+    let rsz IrResult: ir.emitBinop(ctx.builder, "mul", "i64", count, "8")
+    ctx: hctx.withHBuilder(ctx, rsz.builder)
+    let rd Array<String>: []
+    rd.add("i64 ".append(rsz.name))
+    let rdp IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", rd)
+    ctx: hctx.withHBuilder(ctx, rdp.builder)
+    let dataPtr String: rdp.name
+    let g32 IrResult: ir.emitGEP(ctx.builder, "i8", hdr, "i64 32")
+    ctx: hctx.withHBuilder(ctx, g32.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "ptr", dataPtr, g32.name))
+    return { ctx: ctx, name: hdr, llvmType: "ptr", suruType: dataPtr }
+}
+
+// GEP into a data buffer at integer index idx and store an i64-encoded element.
+fn emitArrayElementStore(ctx HeapCodegenContext, dataPtr String, idx String, encodedVal String) HeapCodegenContext {
+    let rg IrResult: ir.emitGEP(ctx.builder, "i64", dataPtr, "i64 ".append(idx))
+    ctx: hctx.withHBuilder(ctx, rg.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", encodedVal, rg.name))
+    return ctx
+}
+
+// ─── Array method dispatch ────────────────────────────────────────────────────
+
+// Emit one @suru_array_* call.
+// recv — SSA name of the Array ptr; args — pre-formatted LLVM arg strings;
+// elemSuruType — element Suru type (used to unbox at() result).
+fn emitArrayMethodRaw(ctx HeapCodegenContext, recv String, methodName String, args Array<String>, elemSuruType String) HeapCodegenResult {
+    match methodName.equals("len") {
+        true: {
+            let gr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", recv, "i32 0, i32 2")
+            let lr IrResult: ir.emitLoad(gr.builder, "i64", gr.name)
+            ctx: hctx.withHBuilder(ctx, lr.builder)
+            return { ctx: ctx, name: lr.name, llvmType: "i64", suruType: "Int64" }
+        }
+        _: {}
+    }
+    match methodName.equals("at") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            a.add(args.at(0))
+            let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_array_at", a)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return emitFromI64(ctx, r.name, elemSuruType)
+        }
+        _: {}
+    }
+    match methodName.equals("add") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            a.add(args.at(0))
+            ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_array_add", a))
+            return { ctx: ctx, name: "", llvmType: "void", suruType: "" }
+        }
+        _: {}
+    }
+    match methodName.equals("set") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            a.add(args.at(1))
+            a.add(args.at(0))
+            ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_array_set", a))
+            return { ctx: ctx, name: "", llvmType: "void", suruType: "" }
+        }
+        _: {}
+    }
+    match methodName.equals("slice") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            a.add(args.at(0))
+            a.add(args.at(1))
+            let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_array_slice", a)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Array:".append(elemSuruType) }
+        }
+        _: {}
+    }
+    match methodName.equals("clone") {
+        true: { return emitStrCall0(ctx, recv, "suru_array_clone_dyn", "ptr", "Array:".append(elemSuruType)) }
+        _: {}
+    }
+    match methodName.equals("drop") {
+        true: {
+            let a Array<String>: []
+            a.add("ptr ".append(recv))
+            ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_array_drop_dyn", a))
+            return { ctx: ctx, name: "", llvmType: "void", suruType: "" }
+        }
+        _: {}
+    }
+    printError("emitArrayMethodRaw: unknown method")
+    exit(1)
+}
+
+// ─── Struct helpers ───────────────────────────────────────────────────────────
+
+// Write the 32-byte vtable header into a malloc'd block at mem.
+// type_tag=4, variant_idx=0, clone_fn=@suru_clone_T, drop_fn=@suru_drop_T.
+fn emitStructHeader(ctx HeapCodegenContext, mem String, typeName String) HeapCodegenContext {
+    let g0 IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 0")
+    ctx: hctx.withHBuilder(ctx, g0.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "4", g0.name))
+    let g8 IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 8")
+    ctx: hctx.withHBuilder(ctx, g8.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "0", g8.name))
+    let g16 IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 16")
+    ctx: hctx.withHBuilder(ctx, g16.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "ptr", "@suru_clone_".append(typeName), g16.name))
+    let g24 IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 24")
+    ctx: hctx.withHBuilder(ctx, g24.builder)
+    ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "ptr", "@suru_drop_".append(typeName), g24.name))
+    return ctx
+}
+
+// Encode a struct field to i64 for storage in a field slot.
+// Scalars are widened directly (no Box — field type is compile-time known).
+fn emitStructFieldToI64(ctx HeapCodegenContext, valName String, suruType String) HeapCodegenResult {
+    match suruType.equals("Bool")  { true: {
+        let r IrResult: ir.emitZext(ctx.builder, "i1", valName, "i64")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Bool" }
+    } _: {} }
+    match suruType.equals("Int32") { true: {
+        let r IrResult: ir.emitSext(ctx.builder, "i32", valName, "i64")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int32" }
+    } _: {} }
+    match suruType.equals("Int64") { true: {
+        return { ctx: ctx, name: valName, llvmType: "i64", suruType: "Int64" }
+    } _: {} }
+    match suruType.equals("Float64") { true: {
+        let r IrResult: ir.emitBitcast(ctx.builder, "double", valName, "i64")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Float64" }
+    } _: {} }
+    let r IrResult: ir.emitPtrToInt(ctx.builder, valName)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: suruType }
+}
+
+// Decode an i64 struct field slot back to the Suru value.
+fn emitStructFieldFromI64(ctx HeapCodegenContext, rawName String, suruType String) HeapCodegenResult {
+    match suruType.equals("Bool")  { true: {
+        let r IrResult: ir.emitTrunc(ctx.builder, "i64", rawName, "i1")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "i1", suruType: "Bool" }
+    } _: {} }
+    match suruType.equals("Int32") { true: {
+        let r IrResult: ir.emitTrunc(ctx.builder, "i64", rawName, "i32")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "i32", suruType: "Int32" }
+    } _: {} }
+    match suruType.equals("Int64") { true: {
+        return { ctx: ctx, name: rawName, llvmType: "i64", suruType: "Int64" }
+    } _: {} }
+    match suruType.equals("Float64") { true: {
+        let r IrResult: ir.emitBitcast(ctx.builder, "i64", rawName, "double")
+        ctx: hctx.withHBuilder(ctx, r.builder)
+        return { ctx: ctx, name: r.name, llvmType: "double", suruType: "Float64" }
+    } _: {} }
+    let r IrResult: ir.emitIntToPtr(ctx.builder, rawName)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: suruType }
+}

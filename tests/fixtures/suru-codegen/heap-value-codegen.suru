@@ -1,0 +1,481 @@
+// Stage 14d — Heap Value Codegen (Group A)
+//
+// emitHValue and all functions it calls recursively:
+//   emitHCallExpr, emitHMatchExpr, emitHMethod,
+//   emitStringLiteral, emitStringMethod,
+//   emitArrayLiteral, emitArrayMethod,
+//   emitStructLiteral, emitFieldAccess.
+//
+// All mutually recursive with emitHValue so they must co-locate here.
+// emitHStmt / emitHModule live in heap-stmt-codegen.suru.
+//
+// Transitive: hctx (context helpers), ir (IR emitters), prim (heap primitives).
+
+include "heap-codegen-primitives.suru" as prim
+include "../suru-parser/suru-parser-ast.suru" as ast
+
+// ─── Type peek (for match result alloca) ─────────────────────────────────────
+
+fn peekHType(ctx HeapCodegenContext, node AstNode) String {
+    match node {
+        IntLitNode:    { return "i64" }
+        BoolLitNode:   { return "i1"  }
+        FloatLitNode:  { return "double" }
+        VarRefNode: {
+            let e HeapVarEntry: hctx.lookupHVar(ctx, node.name)
+            return hctx.heapLlvmTypeOf(e.suruType)
+        }
+        CallNode: { return hctx.lookupHFn(ctx, node.name).returnLlvmType }
+        MethodCallNode: {
+            let isArith Bool: node.methodName.equals("add")
+            match node.methodName.equals("take")     { true: { isArith: true } _: {} }
+            match node.methodName.equals("multiply") { true: { isArith: true } _: {} }
+            match node.methodName.equals("split")    { true: { isArith: true } _: {} }
+            match node.methodName.equals("invert")   { true: { isArith: true } _: {} }
+            match node.methodName.equals("compare")  { true: { isArith: true } _: {} }
+            match isArith { true: { return "i64" } _: {} }
+            match node.methodName.equals("toString") { true: { return "ptr" } _: {} }
+            match node.methodName.equals("append")   { true: { return "ptr" } _: {} }
+            match node.methodName.equals("at")       { true: { return "ptr" } _: {} }
+            match node.methodName.equals("slice")    { true: { return "ptr" } _: {} }
+            match node.methodName.equals("clone")    { true: { return "ptr" } _: {} }
+            return "i1"
+        }
+        MatchExprNode: {
+            let arms Array<MatchArm>: node.arms
+            let i Int64: 0
+            while i.lt(arms.len()) {
+                let arm MatchArm: arms.at(i)
+                match arm.isWildcard { true: {} _: { return peekHType(ctx, arm.body) } }
+                i: i.add(1)
+            }
+            return "i64"
+        }
+        _: { return "ptr" }
+    }
+}
+
+fn collectHPatIdxs(arms Array<MatchArm>) Array<Int64> {
+    let pis Array<Int64>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        match arms.at(i).isWildcard { true: {} _: { pis.add(i) } }
+        i: i.add(1)
+    }
+    return pis
+}
+
+fn collectHStmtPatIdxs(arms Array<MatchStmtArm>) Array<Int64> {
+    let pis Array<Int64>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        match arms.at(i).isWildcard { true: {} _: { pis.add(i) } }
+        i: i.add(1)
+    }
+    return pis
+}
+
+// ─── String literal ───────────────────────────────────────────────────────────
+
+// Emit the heap allocation for a string literal whose global was pre-registered.
+fn emitStringLiteral(ctx HeapCodegenContext, text String) HeapCodegenResult {
+    let globalName String: hctx.lookupStrGlobal(ctx, text)
+    let byteLen Int64: text.len().add(1)
+    let byteLenStr String: byteLen.toString()
+    let charLenStr String: text.len().toString()
+    let rmbuf IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", ["i64 ".append(byteLenStr)])
+    ctx: hctx.withHBuilder(ctx, rmbuf.builder)
+    let cpArgs Array<String>: []
+    cpArgs.add("ptr ".append(rmbuf.name))
+    cpArgs.add("ptr ".append(globalName))
+    cpArgs.add("i64 ".append(byteLenStr))
+    let rmc IrResult: ir.emitCall(ctx.builder, "ptr", "memcpy", cpArgs)
+    ctx: hctx.withHBuilder(ctx, rmc.builder)
+    return prim.emitStringCreate(ctx, rmbuf.name, charLenStr)
+}
+
+// ─── Array literal ────────────────────────────────────────────────────────────
+
+fn emitArrayLiteral(ctx HeapCodegenContext, node ArrayLitNode, elemSuruType String) HeapCodegenResult {
+    let elemTag String: hctx.suruTypeTag(elemSuruType)
+    let count String: node.elems.len().toString()
+    let initR HeapCodegenResult: prim.emitArrayHeaderInit(ctx, elemTag, count)
+    ctx: initR.ctx
+    let arrPtr String: initR.name
+    let dataPtr String: initR.suruType
+    let i Int64: 0
+    while i.lt(node.elems.len()) {
+        let elemR HeapCodegenResult: emitHValue(ctx, node.elems.at(i))
+        ctx: elemR.ctx
+        let encR HeapCodegenResult: prim.emitToI64(ctx, elemR.name, elemSuruType)
+        ctx: encR.ctx
+        ctx: prim.emitArrayElementStore(ctx, dataPtr, i.toString(), encR.name)
+        i: i.add(1)
+    }
+    return { ctx: ctx, name: arrPtr, llvmType: "ptr", suruType: "Array:".append(elemSuruType) }
+}
+
+// ─── Struct literal ───────────────────────────────────────────────────────────
+
+fn emitStructLiteral(ctx HeapCodegenContext, typeName String, node StructLitNode) HeapCodegenResult {
+    let decl TypeDecl: hctx.lookupHType(ctx, typeName)
+    let fieldCount Int64: decl.fields.len()
+    let structSize Int64: fieldCount.add(4).multiply(8)
+    let rmem IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", ["i64 ".append(structSize.toString())])
+    ctx: hctx.withHBuilder(ctx, rmem.builder)
+    let mem String: rmem.name
+    ctx: prim.emitStructHeader(ctx, mem, typeName)
+    let i Int64: 0
+    while i.lt(fieldCount) {
+        let fi TypeFieldEntry: decl.fields.at(i)
+        let fieldSuruType String: hctx.makeSuruType(fi.typeName)
+        // find field value from struct literal (by name)
+        let fval AstNode: findStructField(node.fields, fi.name)
+        let vr HeapCodegenResult: emitHValue(ctx, fval)
+        ctx: vr.ctx
+        let encR HeapCodegenResult: prim.emitStructFieldToI64(ctx, vr.name, fieldSuruType)
+        ctx: encR.ctx
+        let byteOff Int64: i.multiply(8).add(32)
+        let gf IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 ".append(byteOff.toString()))
+        ctx: hctx.withHBuilder(ctx, gf.builder)
+        ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", encR.name, gf.name))
+        i: i.add(1)
+    }
+    return { ctx: ctx, name: mem, llvmType: "ptr", suruType: typeName }
+}
+
+// Find the value AstNode for a named field in a struct literal.
+fn findStructField(fields Array<StructFieldNode>, name String) AstNode {
+    let i Int64: 0
+    while i.lt(fields.len()) {
+        let f StructFieldNode: fields.at(i)
+        match f.name.equals(name) { true: { return f.value } _: {} }
+        i: i.add(1)
+    }
+    printError("findStructField: field not found")
+    exit(1)
+}
+
+// ─── Field access ─────────────────────────────────────────────────────────────
+
+fn emitFieldAccess(ctx HeapCodegenContext, node FieldAccessNode) HeapCodegenResult {
+    let rr HeapCodegenResult: emitHValue(ctx, node.receiver)
+    ctx: rr.ctx
+    let decl TypeDecl: hctx.lookupHType(ctx, rr.suruType)
+    let fi TypeFieldEntry: hctx.lookupHField(decl, node.fieldName)
+    let idx Int64: hctx.fieldIndex(decl, node.fieldName)
+    let byteOff Int64: idx.multiply(8).add(32)
+    let gf IrResult: ir.emitGEP(ctx.builder, "i8", rr.name, "i64 ".append(byteOff.toString()))
+    ctx: hctx.withHBuilder(ctx, gf.builder)
+    let rl IrResult: ir.emitLoad(ctx.builder, "i64", gf.name)
+    ctx: hctx.withHBuilder(ctx, rl.builder)
+    let fieldSuruType String: hctx.makeSuruType(fi.typeName)
+    return prim.emitStructFieldFromI64(ctx, rl.name, fieldSuruType)
+}
+
+// ─── String method ────────────────────────────────────────────────────────────
+
+fn emitStringMethod(ctx HeapCodegenContext, recv String, methodName String, argNodes Array<AstNode>) HeapCodegenResult {
+    let args Array<String>: []
+    let i Int64: 0
+    while i.lt(argNodes.len()) {
+        let ar HeapCodegenResult: emitHValue(ctx, argNodes.at(i))
+        ctx: ar.ctx
+        args.add(ar.llvmType.append(" ").append(ar.name))
+        i: i.add(1)
+    }
+    return prim.emitStringMethodRaw(ctx, recv, methodName, args)
+}
+
+// ─── Array method ─────────────────────────────────────────────────────────────
+
+fn emitArrayMethod(ctx HeapCodegenContext, recv String, arrSuruType String, methodName String, argNodes Array<AstNode>) HeapCodegenResult {
+    let elemSuruType String: hctx.elemSuruType(arrSuruType)
+    let args Array<String>: []
+    let i Int64: 0
+    while i.lt(argNodes.len()) {
+        let ar HeapCodegenResult: emitHValue(ctx, argNodes.at(i))
+        ctx: ar.ctx
+        // For add: box element. For set: box value (i=0); index (i=1) stays i64.
+        let needsBox Bool: methodName.equals("add")
+        match methodName.equals("set") { true: {
+            match i.equals(0) { true: { needsBox: true } _: {} }
+        } _: {} }
+        match needsBox {
+            true: {
+                let encR HeapCodegenResult: prim.emitToI64(ctx, ar.name, elemSuruType)
+                ctx: encR.ctx
+                let boxR IrResult: ir.emitIntToPtr(ctx.builder, encR.name)
+                ctx: hctx.withHBuilder(ctx, boxR.builder)
+                args.add("ptr ".append(boxR.name))
+            }
+            _: { args.add(ar.llvmType.append(" ").append(ar.name)) }
+        }
+        i: i.add(1)
+    }
+    return prim.emitArrayMethodRaw(ctx, recv, methodName, args, elemSuruType)
+}
+
+// ─── Method dispatch ──────────────────────────────────────────────────────────
+
+fn emitHMethod(ctx HeapCodegenContext, node MethodCallNode) HeapCodegenResult {
+    // Static type methods (e.g. Int64.from(str)).
+    // Use a typed intermediate for node.receiver — matching on field access
+    // does not auto-narrow the field expression inside the arm body.
+    let recvAst AstNode: node.receiver
+    match recvAst {
+        VarRefNode: {
+            let rv VarRefNode: recvAst
+            match rv.name.equals("Int64") {
+                true: {
+                    let ar HeapCodegenResult: emitHValue(ctx, node.args.at(0))
+                    ctx: ar.ctx
+                    let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_int64_from_string", ["ptr ".append(ar.name)])
+                    ctx: hctx.withHBuilder(ctx, r.builder)
+                    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+    // Emit receiver
+    let rr HeapCodegenResult: emitHValue(ctx, node.receiver)
+    ctx: rr.ctx
+    let recv String: rr.name
+    let recvTy String: rr.llvmType
+    // String method
+    match rr.suruType.equals("String") {
+        true: { return emitStringMethod(ctx, recv, node.methodName, node.args) }
+        _: {}
+    }
+    // Array method
+    match hctx.isArraySuruType(rr.suruType) {
+        true: { return emitArrayMethod(ctx, recv, rr.suruType, node.methodName, node.args) }
+        _: {}
+    }
+    // toString on Int64
+    match rr.suruType.equals("Int64") {
+        true: {
+            match node.methodName.equals("toString") {
+                true: {
+                    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_int64_to_string", ["i64 ".append(recv)])
+                    ctx: hctx.withHBuilder(ctx, r.builder)
+                    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+    // Scalar arithmetic / comparison
+    match node.methodName.equals("invert") {
+        true: {
+            let r IrResult: ir.emitBinop(ctx.builder, "sub", "i64", "0", recv)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+        }
+        _: {}
+    }
+    match node.methodName.equals("compare") {
+        true: {
+            let ar HeapCodegenResult: emitHValue(ctx, node.args.at(0))
+            ctx: ar.ctx
+            let r1 IrResult: ir.emitICmp(ctx.builder, "sgt", recvTy, recv, ar.name)
+            ctx: hctx.withHBuilder(ctx, r1.builder)
+            let r2 IrResult: ir.emitICmp(ctx.builder, "slt", recvTy, recv, ar.name)
+            ctx: hctx.withHBuilder(ctx, r2.builder)
+            let r3 IrResult: ir.emitZext(ctx.builder, "i1", r1.name, "i64")
+            ctx: hctx.withHBuilder(ctx, r3.builder)
+            let r4 IrResult: ir.emitZext(ctx.builder, "i1", r2.name, "i64")
+            ctx: hctx.withHBuilder(ctx, r4.builder)
+            let r5 IrResult: ir.emitBinop(ctx.builder, "sub", "i64", r3.name, r4.name)
+            ctx: hctx.withHBuilder(ctx, r5.builder)
+            return { ctx: ctx, name: r5.name, llvmType: "i64", suruType: "Int64" }
+        }
+        _: {}
+    }
+    let ar HeapCodegenResult: emitHValue(ctx, node.args.at(0))
+    ctx: ar.ctx
+    let isArith Bool: node.methodName.equals("add")
+    match node.methodName.equals("take")     { true: { isArith: true } _: {} }
+    match node.methodName.equals("multiply") { true: { isArith: true } _: {} }
+    match node.methodName.equals("split")    { true: { isArith: true } _: {} }
+    match isArith {
+        true: {
+            let op String: "add"
+            match node.methodName.equals("take")     { true: { op: "sub"  } _: {} }
+            match node.methodName.equals("multiply") { true: { op: "mul"  } _: {} }
+            match node.methodName.equals("split")    { true: { op: "sdiv" } _: {} }
+            let r IrResult: ir.emitBinop(ctx.builder, op, recvTy, recv, ar.name)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return { ctx: ctx, name: r.name, llvmType: recvTy, suruType: rr.suruType }
+        }
+        _: {}
+    }
+    let pred String: "eq"
+    match node.methodName.equals("lt")  { true: { pred: "slt" } _: {} }
+    match node.methodName.equals("gt")  { true: { pred: "sgt" } _: {} }
+    match node.methodName.equals("lte") { true: { pred: "sle" } _: {} }
+    match node.methodName.equals("gte") { true: { pred: "sge" } _: {} }
+    let r IrResult: ir.emitICmp(ctx.builder, pred, recvTy, recv, ar.name)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: "i1", suruType: "Bool" }
+}
+
+// ─── Call expression ──────────────────────────────────────────────────────────
+
+fn emitHCallExpr(ctx HeapCodegenContext, node CallNode) HeapCodegenResult {
+    let isClone Bool: node.name.equals("clone")
+    let isDrop Bool: node.name.equals("drop")
+    let args Array<String>: []
+    let i Int64: 0
+    while i.lt(node.args.len()) {
+        let ar HeapCodegenResult: emitHValue(ctx, node.args.at(i))
+        ctx: ar.ctx
+        args.add(ar.llvmType.append(" ").append(ar.name))
+        i: i.add(1)
+    }
+    match isClone {
+        true: {
+            let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_clone_dyn", args)
+            ctx: hctx.withHBuilder(ctx, r.builder)
+            return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "" }
+        }
+        _: {}
+    }
+    match isDrop {
+        true: {
+            ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_drop_dyn", args))
+            return { ctx: ctx, name: "", llvmType: "void", suruType: "" }
+        }
+        _: {}
+    }
+    let retTy String: hctx.lookupHFn(ctx, node.name).returnLlvmType
+    let r IrResult: ir.emitCall(ctx.builder, retTy, node.name, args)
+    ctx: hctx.withHBuilder(ctx, r.builder)
+    return { ctx: ctx, name: r.name, llvmType: retTy, suruType: "" }
+}
+
+// ─── Match expression ─────────────────────────────────────────────────────────
+
+fn emitHMatchExpr(ctx HeapCodegenContext, node MatchExprNode) HeapCodegenResult {
+    let arms Array<MatchArm>: node.arms
+    // Determine result alloca type from first non-wildcard arm body
+    let resultTy String: "i64"
+    let fi Int64: 0
+    while fi.lt(arms.len()) {
+        let arm MatchArm: arms.at(fi)
+        resultTy: match arm.isWildcard { true: resultTy, _: peekHType(ctx, arm.body) }
+        fi: match arm.isWildcard { true: fi.add(1), _: arms.len() }
+    }
+    // Result alloca must dominate all arms (LLVM dominance requirement)
+    let rp IrResult: ir.emitAlloca(ctx.builder, resultTy)
+    let resultPtr String: rp.name
+    ctx: hctx.withHBuilder(ctx, rp.builder)
+    // Emit condition
+    let condR HeapCodegenResult: emitHValue(ctx, node.condition)
+    ctx: condR.ctx
+    let condVal String: condR.name
+    let condTy String: condR.llvmType
+    let nr IrResult: ir.nextLabel(ctx.builder, "mx")
+    let n String: nr.name
+    ctx: hctx.withHBuilder(ctx, nr.builder)
+    let pis Array<Int64>: collectHPatIdxs(arms)
+    match pis.len().equals(0) {
+        true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) }
+        _: {}
+    }
+    // Comparison chain
+    let ci Int64: 0
+    while ci.lt(pis.len()) {
+        let arm MatchArm: arms.at(pis.at(ci))
+        let pr HeapCodegenResult: emitHValue(ctx, arm.pattern)
+        ctx: pr.ctx
+        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
+        ctx: hctx.withHBuilder(ctx, cr.builder)
+        let nx String: match ci.add(1).lt(pis.len()) {
+            true: n.append("_t").append(ci.add(1).toString())
+            _:    n.append("_w")
+        }
+        ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name,
+            n.append("_a").append(ci.toString()), nx))
+        match ci.add(1).lt(pis.len()) {
+            true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder,
+                n.append("_t").append(ci.add(1).toString()))) }
+            _: {}
+        }
+        ci: ci.add(1)
+    }
+    // Arm bodies
+    let ai Int64: 0
+    while ai.lt(pis.len()) {
+        let arm MatchArm: arms.at(pis.at(ai))
+        ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a").append(ai.toString())))
+        let vr HeapCodegenResult: emitHValue(ctx, arm.body)
+        ctx: vr.ctx
+        let b IrBuilder: ir.emitStore(ctx.builder, resultTy, vr.name, resultPtr)
+        ctx: hctx.withHBuilder(ctx, ir.emitBr(b, n.append("_m")))
+        ai: ai.add(1)
+    }
+    // Wildcard arm
+    ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_w")))
+    let wi Int64: 0
+    while wi.lt(arms.len()) {
+        let arm MatchArm: arms.at(wi)
+        match arm.isWildcard {
+            true: {
+                let vr HeapCodegenResult: emitHValue(ctx, arm.body)
+                ctx: vr.ctx
+                ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, resultTy, vr.name, resultPtr))
+                wi: arms.len()
+            }
+            _: {}
+        }
+        wi: wi.add(1)
+    }
+    ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m")))
+    ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_m")))
+    let lr IrResult: ir.emitLoad(ctx.builder, resultTy, resultPtr)
+    ctx: hctx.withHBuilder(ctx, lr.builder)
+    let resSuruType String: match resultTy.equals("i64") { true: "Int64", _: match resultTy.equals("i1") { true: "Bool", _: "ptr" } }
+    return { ctx: ctx, name: lr.name, llvmType: resultTy, suruType: resSuruType }
+}
+
+// ─── Main value emitter ───────────────────────────────────────────────────────
+
+fn emitHValue(ctx HeapCodegenContext, node AstNode) HeapCodegenResult {
+    match node {
+        IntLitNode:    { return { ctx: ctx, name: node.text, llvmType: "i64", suruType: "Int64" } }
+        BoolLitNode: {
+            let v String: match node.boolVal { true: "1", _: "0" }
+            return { ctx: ctx, name: v, llvmType: "i1", suruType: "Bool" }
+        }
+        FloatLitNode: { return { ctx: ctx, name: node.text, llvmType: "double", suruType: "Float64" } }
+        VarRefNode: {
+            let e HeapVarEntry: hctx.lookupHVar(ctx, node.name)
+            match e.name.equals("") {
+                true: { return { ctx: ctx, name: node.name, llvmType: "i64", suruType: node.name } }
+                _: {
+                    let r IrResult: ir.emitLoad(ctx.builder, e.llvmType, e.allocaName)
+                    ctx: hctx.withHBuilder(ctx, r.builder)
+                    return { ctx: ctx, name: r.name, llvmType: e.llvmType, suruType: e.suruType }
+                }
+            }
+        }
+        StrLitNode:     { return emitStringLiteral(ctx, node.text) }
+        ArrayLitNode: {
+            let elemTy String: hctx.elemSuruType(ctx.currentReturnName)
+            return emitArrayLiteral(ctx, node, elemTy)
+        }
+        StructLitNode:  { return emitStructLiteral(ctx, ctx.currentReturnName, node) }
+        FieldAccessNode: { return emitFieldAccess(ctx, node) }
+        MethodCallNode: { return emitHMethod(ctx, node) }
+        CallNode:       { return emitHCallExpr(ctx, node) }
+        MatchExprNode:  { return emitHMatchExpr(ctx, node) }
+        _: {
+            printError("emitHValue: unsupported node")
+            exit(1)
+        }
+    }
+}
