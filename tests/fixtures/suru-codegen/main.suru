@@ -1,0 +1,81 @@
+// Stage 14a — Suru IR Emitter: "Hello World!" test driver
+//
+// Emits a minimal but complete LLVM IR program that prints "Hello World!\n"
+// and writes it to the file path given as args.at(1).
+//
+// Usage:   suru-codegen <output.ll>
+// Purpose: Integration test for the IR builder primitives in ir-builder.suru.
+//          The C# test compiles this fixture, runs it to produce a .ll file,
+//          compiles that .ll with clang, and verifies the binary prints the
+//          expected output.
+//
+// The emitted program:
+//   - Declares printf from libc
+//   - Defines @suru_main() -> i32  (calls printf, returns 0)
+//   - Defines @main(i32, ptr) -> i32  (calls @suru_main, returns its result)
+//
+// Type annotations use plain type names (IrBuilder, IrResult) even though the
+// library is included as namespace `ir` — named types from includes are always
+// available by their unqualified name.  Only function calls use the `ir.` prefix.
+
+include "ir-builder.suru" as ir
+
+// Emit a printf("Hello World!\n") call inside the current function body,
+// then emit a `ret i32 0`.  Assumes the named global string constant exists.
+//   strName — LLVM global name of the string constant, e.g. "@str0"
+//   byteLen — total byte count of the global (chars + newline + null)
+fn emitPrintfCall(b IrBuilder, strName String, byteLen Int64) IrBuilder {
+    // GEP into the global [N x i8] constant to obtain a char*
+    let byteLenStr String: "[".append(byteLen.toString()).append(" x i8]")
+    let r0 IrResult: ir.emitGEP(b, byteLenStr, strName, "i32 0, i32 0")
+    b: r0.builder
+
+    // printf is variadic — the call site needs the full function type "i32 (ptr, ...)"
+    let printfArgs Array<String>: ["ptr ".append(r0.name)]
+    let r1 IrResult: ir.emitCall(b, "i32 (ptr, ...)", "printf", printfArgs)
+    b: r1.builder
+
+    b: ir.emitRetI32Zero(b)
+    return b
+}
+
+// Emit a @main(i32, ptr) -> i32 wrapper that calls @suru_main and returns its value.
+fn emitMainWrapper(b IrBuilder) IrBuilder {
+    b: ir.emitFnStart(b, "i32", "main", "i32 %argc, ptr %argv")
+    let noArgs Array<String>: []
+    let r IrResult: ir.emitCall(b, "i32", "suru_main", noArgs)
+    b: r.builder
+    b: ir.emitRet(b, "i32", r.name)
+    b: ir.emitFnEnd(b)
+    return b
+}
+
+fn main(args Array<String>) {
+    let b IrBuilder: ir.makeBuilder()
+
+    // ── Module header ─────────────────────────────────────────────────────────
+    b: ir.emitModuleHeader(b)
+
+    // ── Global string constant ────────────────────────────────────────────────
+    // "Hello World!\n\0" = 12 chars + '\n'(0x0A) + '\0'(0x00) = 14 bytes
+    // In LLVM c-string escape syntax \0A = newline, \00 = null terminator.
+    // The Suru string literal uses \\ to produce a literal backslash in the output.
+    let byteLen Int64: 14
+    b: ir.emitGlobalStrConst(b, "@str0", "Hello World!\\0A\\00", byteLen)
+    b: ir.emit(b, "\n")
+
+    // ── External declarations ─────────────────────────────────────────────────
+    b: ir.emitDeclare(b, "i32", "printf", "ptr, ...")
+    b: ir.emit(b, "\n")
+
+    // ── @suru_main ────────────────────────────────────────────────────────────
+    b: ir.emitFnStart(b, "i32", "suru_main", "")
+    b: emitPrintfCall(b, "@str0", byteLen)
+    b: ir.emitFnEnd(b)
+
+    // ── @main wrapper ─────────────────────────────────────────────────────────
+    b: emitMainWrapper(b)
+
+    // ── Write .ll to the path given as the first CLI argument ─────────────────
+    writeFile(args.at(1), b.output)
+}

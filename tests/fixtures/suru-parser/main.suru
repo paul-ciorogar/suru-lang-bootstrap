@@ -2,15 +2,9 @@ include "../suru-lexer/suru-lexer.suru" as lexer
 include "suru-parser.suru" as parser
 
 fn main(args Array<String>) {
-    printError("main: start")
     let path String: args.at(1)
-    printError("main: got path")
     let source String: readFile(path)
-    printError("main: read file")
     let tokens Array<Token>: lexer.tokenize(source)
-    printError("main: tokenized")
     let ast AstModule: parser.parse(tokens)
-    printError("main: parsed")
     parser.printModule(ast, path)
-    printError("main: done")
 }

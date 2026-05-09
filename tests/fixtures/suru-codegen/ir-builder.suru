@@ -1,0 +1,305 @@
+// Stage 14a — IR Builder Primitives
+//
+// Pure string-building functions that emit LLVM IR text (.ll).
+// No dependencies on other Suru fixtures — used as the foundation for all
+// later codegen sub-stages.
+//
+// Design:
+//   IrBuilder holds the accumulated output and two counters that ensure every
+//   SSA temporary (%tN) and every basic-block label (prefix_N) is unique
+//   within a function.  All functions are pure — they accept an IrBuilder and
+//   return a new one (or an IrResult that bundles the updated builder with the
+//   freshly-minted SSA name).  Callers chain calls by threading the returned
+//   builder into the next call.
+//
+//   args to emitCall / emitVoidCall are pre-formatted strings like "i64 %t0"
+//   so the caller controls the exact LLVM type annotation on each argument.
+
+type IrBuilder: {
+    output     String
+    tmpCount   Int64
+    labelCount Int64
+}
+
+// Returned by instruction emitters that produce an SSA value.
+type IrResult: {
+    builder IrBuilder
+    name    String
+}
+
+// ─── Core helpers ────────────────────────────────────────────────────────────
+
+fn makeBuilder() IrBuilder {
+    return { output: "", tmpCount: 0, labelCount: 0 }
+}
+
+// Append raw text to the builder output.
+fn emit(b IrBuilder, text String) IrBuilder {
+    return { output: b.output.append(text), tmpCount: b.tmpCount, labelCount: b.labelCount }
+}
+
+// Return a new IrBuilder with a replaced output but unchanged counters.
+// Used internally to avoid repeating the counter fields on every emit.
+fn withOutput(b IrBuilder, out String) IrBuilder {
+    return { output: out, tmpCount: b.tmpCount, labelCount: b.labelCount }
+}
+
+// Allocate the next SSA temporary name (%t0, %t1, …) and advance tmpCount.
+fn nextTmp(b IrBuilder) IrResult {
+    let name String: "%t".append(b.tmpCount.toString())
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount.add(1), labelCount: b.labelCount }
+    return { builder: nb, name: name }
+}
+
+// Allocate a unique label name (prefix_0, prefix_1, …) and advance labelCount.
+fn nextLabel(b IrBuilder, prefix String) IrResult {
+    let name String: prefix.append("_").append(b.labelCount.toString())
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount, labelCount: b.labelCount.add(1) }
+    return { builder: nb, name: name }
+}
+
+// Comma-join pre-formatted LLVM argument strings, e.g. ["i64 %t0", "ptr %t1"].
+fn joinArgs(args Array<String>) String {
+    let result String: ""
+    let i Int64: 0
+    while i.lt(args.len()) {
+        match i.gt(0) {
+            true: { result: result.append(", ") }
+            _: {}
+        }
+        result: result.append(args.at(i))
+        i: i.add(1)
+    }
+    return result
+}
+
+// ─── Module-level emitters ───────────────────────────────────────────────────
+
+// Emit the standard Suru module header: ModuleID comment, source_filename, and
+// forward declarations of the three Suru heap-struct types.  Callers append
+// global constants and declare/define stubs after this.
+fn emitModuleHeader(b IrBuilder) IrBuilder {
+    let hdr String: "; ModuleID = 'suru_module'\n"
+        .append("source_filename = \"suru_module\"\n")
+        .append("\n")
+        .append("%suru.String = type { i64, i64, ptr }\n")
+        .append("%suru.Array  = type { i64, i64, i64, i64, ptr }\n")
+        .append("%suru.Box    = type { i64, i64 }\n")
+        .append("\n")
+    return withOutput(b, b.output.append(hdr))
+}
+
+// Emit a private unnamed_addr constant for a string literal that will be used
+// as the source bytes for a heap String.
+//   name           — LLVM global name including @, e.g. "@str0"
+//   escapedContent — content already in LLVM c-string escape format, e.g. "hello\\0A\\00"
+//   byteLen        — number of bytes LLVM allocates (= char count including null terminator)
+fn emitGlobalStrConst(b IrBuilder, name String, escapedContent String, byteLen Int64) IrBuilder {
+    let line String: name
+        .append(" = private unnamed_addr constant [")
+        .append(byteLen.toString())
+        .append(" x i8] c\"")
+        .append(escapedContent)
+        .append("\"\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// Emit an extern function declaration.
+//   retType — LLVM return type, e.g. "i32" or "void"
+//   fnName  — unqualified name without @, e.g. "printf"
+//   params  — comma-separated parameter types, e.g. "ptr, ..."
+fn emitDeclare(b IrBuilder, retType String, fnName String, params String) IrBuilder {
+    let line String: "declare ".append(retType).append(" @").append(fnName).append("(").append(params).append(")\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// Emit the opening of a function definition and the mandatory entry: label.
+//   retType — LLVM return type
+//   fnName  — unqualified name without @
+//   params  — comma-separated "type %name" pairs, e.g. "i64 %x, ptr %y"; "" for no params
+fn emitFnStart(b IrBuilder, retType String, fnName String, params String) IrBuilder {
+    let line String: "define ".append(retType).append(" @").append(fnName)
+        .append("(").append(params).append(") {\n")
+        .append("entry:\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// Emit the closing brace of a function definition, followed by a blank line.
+fn emitFnEnd(b IrBuilder) IrBuilder {
+    return withOutput(b, b.output.append("}\n\n"))
+}
+
+// Emit a basic-block label (for mid-function labels after emitFnStart).
+fn emitLabel(b IrBuilder, name String) IrBuilder {
+    return withOutput(b, b.output.append(name).append(":\n"))
+}
+
+// ─── Instruction emitters ────────────────────────────────────────────────────
+// Convention: functions that produce an SSA value return IrResult; those that
+// emit terminators or side-effect-only instructions return IrBuilder.
+
+// %tN = alloca type
+fn emitAlloca(b IrBuilder, ty String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = alloca ").append(ty).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = load type, ptr ptrVal
+fn emitLoad(b IrBuilder, ty String, ptrVal String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = load ").append(ty).append(", ptr ").append(ptrVal).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// store type val, ptr ptrVal
+fn emitStore(b IrBuilder, ty String, val String, ptrVal String) IrBuilder {
+    let line String: "  store ".append(ty).append(" ").append(val).append(", ptr ").append(ptrVal).append("\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// %tN = getelementptr inbounds elemType, ptr ptrVal, indices
+//   indices — pre-formatted LLVM index list, e.g. "i32 0, i32 0"
+fn emitGEP(b IrBuilder, elemType String, ptrVal String, indices String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name)
+        .append(" = getelementptr inbounds ").append(elemType)
+        .append(", ptr ").append(ptrVal)
+        .append(", ").append(indices).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = op type a, b_
+//   op — LLVM arithmetic/bitwise opcode, e.g. "add", "sub", "mul", "sdiv", "xor"
+fn emitBinop(b IrBuilder, op String, ty String, a String, b_ String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = ").append(op).append(" ").append(ty)
+        .append(" ").append(a).append(", ").append(b_).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = icmp pred type a, b_
+//   pred — comparison predicate, e.g. "eq", "slt", "sgt", "sle", "sge", "ne"
+fn emitICmp(b IrBuilder, pred String, ty String, a String, b_ String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = icmp ").append(pred).append(" ").append(ty)
+        .append(" ").append(a).append(", ").append(b_).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = fcmp pred double a, b_
+//   pred — floating-point predicate, e.g. "oeq", "olt", "ogt", "ole", "oge"
+fn emitFCmp(b IrBuilder, pred String, a String, b_ String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = fcmp ").append(pred).append(" double ")
+        .append(a).append(", ").append(b_).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = call callType @fn(args...)
+//   callType — return type or full function type for variadic calls,
+//              e.g. "i64" for plain or "i32 (ptr, ...)" for printf
+//   fn       — function name without @, e.g. "suru_string_append"
+//   args     — pre-formatted "type value" pairs, e.g. ["ptr %t0", "i64 5"]
+fn emitCall(b IrBuilder, callType String, fnName String, args Array<String>) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = call ").append(callType)
+        .append(" @").append(fnName).append("(").append(joinArgs(args)).append(")\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// call void @fnName(args...)  — for side-effect calls with no result
+fn emitVoidCall(b IrBuilder, fnName String, args Array<String>) IrBuilder {
+    let line String: "  call void @".append(fnName).append("(").append(joinArgs(args)).append(")\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// ret type val
+fn emitRet(b IrBuilder, ty String, val String) IrBuilder {
+    let line String: "  ret ".append(ty).append(" ").append(val).append("\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// ret void
+fn emitRetVoid(b IrBuilder) IrBuilder {
+    return withOutput(b, b.output.append("  ret void\n"))
+}
+
+// ret i32 0  — convenience for @main / @suru_main wrappers that return exit code
+fn emitRetI32Zero(b IrBuilder) IrBuilder {
+    return withOutput(b, b.output.append("  ret i32 0\n"))
+}
+
+// br label %target  — unconditional branch
+fn emitBr(b IrBuilder, target String) IrBuilder {
+    let line String: "  br label %".append(target).append("\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// br i1 cond, label %thenLabel, label %elseLabel
+fn emitCondBr(b IrBuilder, cond String, thenLabel String, elseLabel String) IrBuilder {
+    let line String: "  br i1 ".append(cond)
+        .append(", label %").append(thenLabel)
+        .append(", label %").append(elseLabel).append("\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// %tN = zext fromType val to toType
+fn emitZext(b IrBuilder, fromType String, val String, toType String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = zext ").append(fromType)
+        .append(" ").append(val).append(" to ").append(toType).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = sext fromType val to toType
+fn emitSext(b IrBuilder, fromType String, val String, toType String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = sext ").append(fromType)
+        .append(" ").append(val).append(" to ").append(toType).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = trunc fromType val to toType
+fn emitTrunc(b IrBuilder, fromType String, val String, toType String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = trunc ").append(fromType)
+        .append(" ").append(val).append(" to ").append(toType).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = ptrtoint ptr ptrVal to i64
+fn emitPtrToInt(b IrBuilder, ptrVal String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = ptrtoint ptr ").append(ptrVal).append(" to i64\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = inttoptr i64 val to ptr
+fn emitIntToPtr(b IrBuilder, val String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = inttoptr i64 ").append(val).append(" to ptr\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// %tN = bitcast fromType val to toType
+fn emitBitcast(b IrBuilder, fromType String, val String, toType String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = bitcast ").append(fromType)
+        .append(" ").append(val).append(" to ").append(toType).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// unreachable  — placed after exit() calls or exhaustive returns
+fn emitUnreachable(b IrBuilder) IrBuilder {
+    return withOutput(b, b.output.append("  unreachable\n"))
+}
+
+// %tN = xor type a, b_  — used for boolean not (xor i1 val, 1)
+fn emitXor(b IrBuilder, ty String, a String, b_ String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name).append(" = xor ").append(ty)
+        .append(" ").append(a).append(", ").append(b_).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+

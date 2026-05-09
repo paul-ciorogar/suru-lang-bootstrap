@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 14a — IR Builder Primitives
+
+Foundation for the Suru-in-Suru code generator. A pure string-building IR emitter
+library with no dependencies on other Suru fixtures.
+
+- **`tests/fixtures/suru-codegen/ir-builder.suru`** (new): `IrBuilder` struct (`output String, tmpCount Int64, labelCount Int64`) and `IrResult` struct (`builder IrBuilder, name String`). Core helpers: `makeBuilder`, `emit`, `withOutput`, `nextTmp`, `nextLabel`, `joinArgs`. Module-level emitters: `emitModuleHeader`, `emitGlobalStrConst`, `emitDeclare`, `emitFnStart`, `emitFnEnd`, `emitLabel`. Instruction emitters (all LLVM IR instructions used by the C# codegen): `emitAlloca`, `emitLoad`, `emitStore`, `emitGEP`, `emitBinop`, `emitICmp`, `emitFCmp`, `emitCall`, `emitVoidCall`, `emitRet`, `emitRetVoid`, `emitRetI32Zero`, `emitBr`, `emitCondBr`, `emitZext`, `emitSext`, `emitTrunc`, `emitPtrToInt`, `emitIntToPtr`, `emitBitcast`, `emitUnreachable`, `emitXor`.
+- **`tests/fixtures/suru-codegen/main.suru`** (new): Test driver that uses the IR builder to emit a hardcoded "Hello World!" `.ll` program and writes it to `args.at(1)`. Demonstrates the full builder API: module header, global string constant, extern declaration, function definition with GEP and variadic call, and `@main` wrapper.
+- **`tests/Suru.Tests/IRSuruCodegenTests.cs`** (new): Two integration tests. `HelloWorldEmitsValidLl` compiles the fixture, runs it to produce `.ll`, compiles with clang, runs and asserts output `"Hello World!\n"`. `EmittedIrContainsExpectedStructure` checks structural landmarks in the emitted text without requiring clang.
+- **`TODO.md`**: Stage 14 split into sub-stages 14a–14e; Stage 14a marked complete.
+- 158/158 tests green.
+
+---
+
 ### Stage 13k — Flat Struct Layout, Vtable Dispatch & Type Narrowing
 
 Replaces the linked-list struct representation with a flat fixed-layout allocation, adds per-type vtable-based clone/drop, unifies the variant representation with the struct layout, and adds type narrowing inside variant match arms.
