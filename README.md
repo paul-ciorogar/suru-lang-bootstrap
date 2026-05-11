@@ -6,6 +6,8 @@
 
 Suru Lang prioritizes interactive development, transforming editors into REPL-like environments through LSP integration. The language emphasizes minimal syntax with maximum expressiveness, enabling developers to write clear, readable code without unnecessary ceremony.
 
+> **Self-hosting milestone reached.** The Suru compiler is written in Suru and compiles itself. Binary A (the compiler compiled by the C# bootstrap) produces binary B (the compiler compiled by itself); both binaries generate byte-for-byte identical output on the full corpus.
+
 ## Language Guide
 
 ### Printing
@@ -599,8 +601,8 @@ Suru is being implemented in stages toward compiling its own source. Each stage 
 | 13b | **Declaration pre-passes in Suru** (`suru-semantic-passes.suru`) — type resolution, type/function table population | ✅ Complete |
 | 13c–e | **Semantic Analyzer in Suru** (statement, function, and expression analysis) | ✅ Complete |
 | 13f | **Semantic cross-validation CLI** (`tests/fixtures/suru-check/`) — `suru-check` validates Suru programs; output matches C# reference | ✅ Complete |
-| 14 | Code Generator in Suru | ⬜ Planned |
-| 15 | Bootstrap: Suru compiler compiles itself | ⬜ Planned |
+| 14 | **Code Generator in Suru** (`tests/fixtures/suru-codegen/`) — IR builder, scalar/heap/control-flow codegen, full pipeline | ✅ Complete |
+| 15 | **Bootstrap: Suru compiler compiles itself** — binary A (C#-compiled) → binary B (self-compiled); identical output on full corpus | ✅ Complete |
 
 ### Stage 13a — Semantic Analyzer Data Structures
 
