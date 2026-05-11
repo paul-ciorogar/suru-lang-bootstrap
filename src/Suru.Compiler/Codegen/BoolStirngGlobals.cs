@@ -15,6 +15,7 @@ internal class BoolStirngGlobals
     private bool _FmtSAdded      = false;
     private bool _ModeRAdded     = false;
     private bool _ModeWAdded     = false;
+    private bool _ModeAAdded     = false;
 
     public BoolStirngGlobals()
     {
@@ -73,5 +74,11 @@ internal class BoolStirngGlobals
         if (_ModeWAdded) return;
         _sb.AppendLine("@.mode_w = private unnamed_addr constant [2 x i8] c\"w\\00\"");
         _ModeWAdded = true;
+    }
+
+    public void AddModeA() {
+        if (_ModeAAdded) return;
+        _sb.AppendLine("@.mode_a = private unnamed_addr constant [2 x i8] c\"a\\00\"");
+        _ModeAAdded = true;
     }
 }

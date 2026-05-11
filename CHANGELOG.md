@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stage 15h — Bootstrap Round 2 & Self-Hosting Validation
+
+Fixed a `currentReturnTypeName` leak in `ir-codegen.suru` that caused Binary A to emit `@suru_clone_String` / `@suru_drop_String` vtable pointers in struct literals whenever an `Array<String>.add()` call preceded a struct literal return in the same function. These symbols have no definition (String is a built-in, not a user-declared struct), producing linker errors when compiling Binary B.
+
+**Root cause:** the `.add()` and `.set()` array method arms in `emitMethodCall` set `ctx.currentReturnTypeName = elemST` to propagate the element type into struct literal arguments, but never restored the original value. The leaked element type was then used by `emitStructLiteralAlloc` to compute the malloc size and vtable pointers for the *function's* return struct literal.
+
+**Fix:** save and restore `ctx.currentReturnTypeName` around the `emitValue` call in both the `.add()` and `.set()` arms — the same save/restore pattern used by `narrowCondVar`/`restoreCondVar`.
+
+- `tests/fixtures/suru-codegen/ir-codegen.suru`: save/restore `currentReturnTypeName` in `.add()` and `.set()` arms
+- `IRSuruStage15hTests.BinaryBCompilesFromBinaryA`: now passes (Binary B links)
+- `IRSuruStage15hTests.BinaryAAndBinaryBProduceIdenticalOutput`: now passes (self-hosting confirmed)
+
+### Codegen Rewrite — Documentation (Task 12)
+
+Completes the Suru-in-Suru codegen rewrite with a documentation pass. All twelve rewrite tasks are now done; `rewrite.md` is fully marked ✅ COMPLETE.
+
+Old heap-codegen files (`heap-codegen-context.suru`, `heap-codegen-primitives.suru`, `heap-type-helpers.suru`, `heap-value-codegen.suru`, `heap-stmt-codegen.suru`) are intentionally preserved — they back the Stage 14a–15g historical tests and are not used by `suru-build`.
+
+### Codegen Rewrite — Suru-in-Suru Codegen Restructure (Tasks 8–11)
+
+Completes the Suru-in-Suru codegen rewrite by implementing `ir-codegen.suru` (the top-level code generator mirroring `IRCodeGenerator.cs + IRFunctionCodeGenerator.cs + IRMatchCodeGenerator.cs`) and wiring `suru-build/main.suru` to use it.
+
+- **`tests/fixtures/suru-codegen/ir-codegen.suru`** (new, ~1709 lines): Top of the new rewrite DAG. Merges all three C# partial-class files because `emitValue ↔ emitMatchExpr ↔ emitStmt ↔ emitFunction` form a mutually-recursive cluster. Section banners mark logical partial-class boundaries. Key public entry point: `generate(stmts, sourceName, ownFnNames, ownTypeNames) String` — initialises `IrCodegenContext`, runs pre-passes, emits all type clone/drop helpers, emits all function bodies, returns the assembled `.ll` text (`header | globalConsts | strGlobals | decls | suruDecls | extCloneDropDecls | helpers | fns`). Pre-emission pattern: `emitMethodCall` pre-emits receiver and all args via `emitValue`, then passes SSA names to string/array/struct/fileio helper files — helpers never call `emitValue`. LLVM dominance invariant: match-expression result alloca is emitted BEFORE the comparison test chain. `emitMatchStmt` guards each merge branch with `ctx.blockOpen` to prevent double-terminator IR. `narrowCondVar`/`restoreCondVar` temporarily update `ctx.vars` to the concrete variant type within each match arm so field accesses resolve correctly.
+- **`tests/fixtures/suru-build/main.suru`** (modified): Replaced `include "heap-stmt-codegen.suru" as codegen` + manual context assembly with `include "ir-codegen.suru" as irCodegen` + `irCodegen.generate(stmts, baseName(sourcePath), ownFnNames, ownTypeNames)`. Both `main()` and `compileOneFile()` simplified from ~6 lines of context manipulation to 2 lines.
+
 ### Stage 15g — Bootstrap Round 1: Binary A
 
 Extends the `suru-build` smoke test to cover a broader corpus, confirming binary A (the `suru-build` executable compiled by the C# bootstrap compiler) handles recursive functions, while loops, and all string methods correctly.

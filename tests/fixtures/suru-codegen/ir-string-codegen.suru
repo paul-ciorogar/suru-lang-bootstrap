@@ -1,0 +1,342 @@
+// ir-string-codegen.suru — String IR emission helpers.
+//
+// Mirrors IRStringCodeGenerator.cs (C# partial class file).
+//
+// Every Suru String value is a `ptr` to a heap-allocated
+//   %suru.String = { i64 type_tag=6, i64 len, ptr data }  (24 bytes)
+// type_tag=6 at field 0: any heap ptr can be identified as String at runtime.
+// `data` points to a null-terminated i8 buffer; `len` holds the character count.
+//
+// ── Runtime module ────────────────────────────────────────────────────────────
+// All non-trivial string operations (append, at, equals, slice, ord, clone, drop,
+// Int64.from, toString) are implemented in suru_string.ll and linked separately.
+// This file only emits idempotent `declare` stubs and call instructions.
+//
+// ── What stays inline ─────────────────────────────────────────────────────────
+// emitExtractStringData / emitExtractStringLen — simple GEP+load; used by
+//   printLn, writeFile, and match string-pattern code.
+// emitStringLiteralValue — interns the raw bytes as a module-local constant,
+//   malloc+memcpy's them into a heap buffer, then calls suru_string_create.
+//
+// ── Design: no emitValue calls ────────────────────────────────────────────────
+// All functions receive pre-emitted SSA names (caller has already called emitValue).
+// emitStringMethod handles conditional i64 unboxing for index/scalar args before
+// delegating to the individual helpers.
+//
+// Include DAG: depends on ir-box-codegen.suru → ir-codegen-types.suru → ir-builder.suru.
+// Imported by ir-codegen.suru (the mutual-recursion hub).
+
+include "ir-codegen-types.suru" as types
+include "ir-builder.suru" as ir
+include "ir-box-codegen.suru" as box
+
+// ─── Low-level %suru.String field extractors ──────────────────────────────────
+// %suru.String layout: { type_tag@0(i64), len@1(i64), data@2(ptr) }
+// Used directly by printLn/writeFile/string-pattern match — not general string methods.
+
+// GEP to field 2 (data ptr) and load it.
+// Uses double-space formatting (emitGEP2) to match C# EmitExtractStringData.
+// Mirrors C# EmitExtractStringData.
+fn emitExtractStringData(ctx IrCodegenContext, seqVal String) CodegenResult {
+    let gr IrResult: ir.emitGEP2(ctx.builder, "%suru.String", seqVal, "i32 0, i32 2")
+    ctx.builder: gr.builder
+    let lr IrResult: ir.emitLoad(ctx.builder, "ptr", gr.name)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: "ptr", suruType: "String" }
+}
+
+// GEP to field 1 (len) and load it as a raw i64.
+// Mirrors C# EmitExtractStringLen.
+fn emitExtractStringLen(ctx IrCodegenContext, seqVal String) CodegenResult {
+    let gr IrResult: ir.emitGEP(ctx.builder, "%suru.String", seqVal, "i32 0, i32 1")
+    ctx.builder: gr.builder
+    let lr IrResult: ir.emitLoad(ctx.builder, "i64", gr.name)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// ─── String literal value ─────────────────────────────────────────────────────
+
+// Intern a Suru string literal into a module-level [N x i8] constant, then
+// malloc+memcpy the bytes into a heap buffer and call @suru_string_create.
+//
+// byteLen = len+1 (includes null terminator) — used for malloc and memcpy.
+// charLen = len   (excludes null terminator) — passed to suru_string_create.
+//
+// The resulting ptr is a fresh 24-byte suru.String whose data ptr owns the buffer.
+// Mirrors C# EmitStringLiteralValue + EmitCreateStringSeq.
+fn emitStringLiteralValue(ctx IrCodegenContext, text String) CodegenResult {
+    // Intern: emit private constant global if not already seen (idempotent).
+    ctx: types.internString(ctx, text)
+    let gname String: types.lookupStrGlobal(ctx, text)
+    let byteLen Int64: text.len().add(1)
+    let charLen Int64: text.len()
+    // Allocate a heap buffer to own the bytes (including null terminator).
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    let mallocArgs Array<String>: []
+    mallocArgs.add("i64 ".append(byteLen.toString()))
+    let mallocR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", mallocArgs)
+    ctx.builder: mallocR.builder
+    let buf String: mallocR.name
+    // Copy bytes from the intern global into the heap buffer.
+    // memcpy returns the destination ptr but the result is always discarded here.
+    ctx: types.addDecl(ctx, "declare ptr @memcpy(ptr, ptr, i64)\n")
+    let mcArgs Array<String>: []
+    mcArgs.add("ptr ".append(buf))
+    mcArgs.add("ptr ".append(gname))
+    mcArgs.add("i64 ".append(byteLen.toString()))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "ptr", "memcpy", mcArgs)
+    // Wrap the heap buffer in a suru.String header via the runtime constructor.
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_create(ptr, i64)\n")
+    let scArgs Array<String>: []
+    scArgs.add("ptr ".append(buf))
+    scArgs.add("i64 ".append(charLen.toString()))
+    let scR IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_create", scArgs)
+    ctx.builder: scR.builder
+    return { ctx: ctx, name: scR.name, llvmType: "ptr", suruType: "String" }
+}
+
+// ─── String instance methods ──────────────────────────────────────────────────
+
+// .len() → raw i64: GEP+load the len field directly (no runtime call).
+// Mirrors C# EmitStringLen.
+fn emitStringLen(ctx IrCodegenContext, recv String) CodegenResult {
+    return emitExtractStringLen(ctx, recv)
+}
+
+// .append(other) → String: concat two strings into a new heap allocation.
+// Both recv and arg are ptr to suru.String.
+// Mirrors C# EmitStringAppend.
+fn emitStringAppend(ctx IrCodegenContext, recv String, arg String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_append(ptr, ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("ptr ".append(arg))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_append", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// .at(idx) → String: single-character string at byte position idx.
+// idx must already be a raw i64 SSA name (caller handles unboxing).
+// Mirrors C# EmitStringAt.
+fn emitStringAt(ctx IrCodegenContext, recv String, idx String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_at(ptr, i64)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("i64 ".append(idx))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_at", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// .equals(other) → raw i1 Bool: byte-for-byte string comparison.
+// Both recv and other are ptr to suru.String.
+// Mirrors C# EmitStringEquals.
+fn emitStringEquals(ctx IrCodegenContext, recv String, other String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i1   @suru_string_equals(ptr, ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("ptr ".append(other))
+    let r IrResult: ir.emitCall(ctx.builder, "i1", "suru_string_equals", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i1", suruType: "Bool" }
+}
+
+// .compare(rhs) → i64: signed ordering via @strcmp; negative/0/positive.
+// Extracts the data ptr from both strings, calls @strcmp (i32), sext to i64.
+// Mirrors C# EmitStringCompare.
+fn emitStringCompare(ctx IrCodegenContext, recv String, other String) CodegenResult {
+    ctx: types.addDecl(ctx, "declare i32 @strcmp(ptr, ptr)\n")
+    // Extract data ptrs: %suru.String field 2 is ptr data.
+    let ldGr IrResult: ir.emitGEP(ctx.builder, "%suru.String", recv, "i32 0, i32 2")
+    ctx.builder: ldGr.builder
+    let ldR IrResult: ir.emitLoad(ctx.builder, "ptr", ldGr.name)
+    ctx.builder: ldR.builder
+    let rdGr IrResult: ir.emitGEP(ctx.builder, "%suru.String", other, "i32 0, i32 2")
+    ctx.builder: rdGr.builder
+    let rdR IrResult: ir.emitLoad(ctx.builder, "ptr", rdGr.name)
+    ctx.builder: rdR.builder
+    let scArgs Array<String>: []
+    scArgs.add("ptr ".append(ldR.name))
+    scArgs.add("ptr ".append(rdR.name))
+    let cmpR IrResult: ir.emitCall(ctx.builder, "i32", "strcmp", scArgs)
+    ctx.builder: cmpR.builder
+    let sextR IrResult: ir.emitSext(ctx.builder, "i32", cmpR.name, "i64")
+    ctx.builder: sextR.builder
+    return { ctx: ctx, name: sextR.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// .slice(from, to) → String: substring [from, to) as a new heap allocation.
+// fromIdx and toIdx must already be raw i64 SSA names (caller handles unboxing).
+// Mirrors C# EmitStringSlice.
+fn emitStringSlice(ctx IrCodegenContext, recv String, fromIdx String, toIdx String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_slice(ptr, i64, i64)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("i64 ".append(fromIdx))
+    args.add("i64 ".append(toIdx))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_slice", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// .ord() → raw i64: ASCII / UTF-8 code unit of the first byte.
+// Mirrors C# EmitStringOrd.
+fn emitStringOrd(ctx IrCodegenContext, recv String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i64  @suru_string_ord(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_string_ord", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// clone(str) → String: deep copy (new buffer + new header).
+// Mirrors C# EmitCloneString.
+fn emitStringClone(ctx IrCodegenContext, recv String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_clone(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_clone", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// drop(str): deallocate str's data buffer and header.
+// Returns a null placeholder — drop is always used as a statement.
+// Mirrors C# EmitDropString.
+fn emitStringDrop(ctx IrCodegenContext, recv String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare void @suru_string_drop(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_string_drop", args)
+    return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+}
+
+// ─── Int64 / Float64 string conversions ──────────────────────────────────────
+
+// n.toString() → String: format a raw i64 as a decimal string via snprintf.
+// val must be a raw i64 SSA name.
+// Mirrors C# EmitInt64ToString.
+fn emitInt64ToString(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_int64_to_string(i64)\n")
+    let args Array<String>: []
+    args.add("i64 ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_int64_to_string", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// Int64.from(str) → raw i64: parse a decimal string via strtol.
+// seqPtr must be a ptr to suru.String.
+// Mirrors C# EmitInt64FromString.
+fn emitInt64FromString(ctx IrCodegenContext, seqPtr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i64  @suru_int64_from_string(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(seqPtr))
+    let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_int64_from_string", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// Float64.from(str) → raw double: parse a decimal string via strtod.
+// seqPtr must be a ptr to suru.String.
+// Mirrors C# EmitFloat64FromString.
+fn emitFloat64FromString(ctx IrCodegenContext, seqPtr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare double @suru_float64_from_string(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(seqPtr))
+    let r IrResult: ir.emitCall(ctx.builder, "double", "suru_float64_from_string", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "double", suruType: "Float64" }
+}
+
+// f.llvmHex() → String: format a raw double as IEEE-754 hex, e.g. "0xC004000000000000".
+// Used by ir-codegen.suru when emitting float literal constants into LLVM IR text.
+// val must be a raw double SSA name.
+// Mirrors C# EmitFloat64LlvmHex.
+fn emitFloat64LlvmHex(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_float64_to_llvm_hex(double)\n")
+    let args Array<String>: []
+    args.add("double ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_float64_to_llvm_hex", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "String" }
+}
+
+// ─── Dispatch hub ─────────────────────────────────────────────────────────────
+
+// Route a String-receiver method call to the correct emitter.
+// recv:         SSA name of the String ptr (pre-emitted by emitMethodCall).
+// args:         pre-emitted SSA names of each argument.
+// argSuruTypes: Suru type encoding of each arg, for conditional i64 unboxing.
+//
+// Callers: emitMethodCall in ir-codegen.suru (after pre-emitting recv + args).
+// Mirrors the String arm of C# EmitMethodCall.
+fn emitStringMethod(ctx IrCodegenContext, method String, recv String, args Array<String>, argSuruTypes Array<String>) CodegenResult {
+    match method {
+        "len": {
+            return emitStringLen(ctx, recv)
+        }
+        "append": {
+            return emitStringAppend(ctx, recv, args.at(0))
+        }
+        "at": {
+            // .at(idx) requires a raw i64 index; unbox from heap ptr if needed.
+            let idxSsa String: args.at(0)
+            let idxType String: argSuruTypes.at(0)
+            match types.isScalarSuruType(idxType) {
+                true: {}
+                _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, idxSsa)
+                    ctx: ur.ctx
+                    idxSsa: ur.name
+                }
+            }
+            return emitStringAt(ctx, recv, idxSsa)
+        }
+        "equals": {
+            return emitStringEquals(ctx, recv, args.at(0))
+        }
+        "compare": {
+            return emitStringCompare(ctx, recv, args.at(0))
+        }
+        "slice": {
+            // .slice(from, to) requires raw i64 indices; unbox each if needed.
+            let fromSsa String: args.at(0)
+            let fromType String: argSuruTypes.at(0)
+            match types.isScalarSuruType(fromType) {
+                true: {}
+                _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, fromSsa)
+                    ctx: ur.ctx
+                    fromSsa: ur.name
+                }
+            }
+            let toSsa String: args.at(1)
+            let toType String: argSuruTypes.at(1)
+            match types.isScalarSuruType(toType) {
+                true: {}
+                _: {
+                    let ur2 CodegenResult: box.unboxInt64(ctx, toSsa)
+                    ctx: ur2.ctx
+                    toSsa: ur2.name
+                }
+            }
+            return emitStringSlice(ctx, recv, fromSsa, toSsa)
+        }
+        "ord": {
+            return emitStringOrd(ctx, recv)
+        }
+        "clone": {
+            return emitStringClone(ctx, recv)
+        }
+        "drop": {
+            return emitStringDrop(ctx, recv)
+        }
+        _: {
+            return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+        }
+    }
+}

@@ -26,6 +26,7 @@ internal sealed class SuruRuntimeDeclarations
     private bool _stringCreate, _stringClone, _stringDrop;
     private bool _stringAppend, _stringAt, _stringEquals, _stringSlice, _stringOrd;
     private bool _int64FromString, _int64ToString;
+    private bool _float64FromString, _float64ToLlvmHex;
 
     // ─── Array runtime (suru_array.ll) ───────────────────────────────────────
     private bool _arrayAt, _arraySet, _arrayAdd, _arraySlice;
@@ -189,6 +190,20 @@ internal sealed class SuruRuntimeDeclarations
         if (_int64ToString) return;
         _sb.AppendLine("declare ptr  @suru_int64_to_string(i64)");
         _int64ToString = true;
+    }
+
+    internal void AddFloat64FromString()
+    {
+        if (_float64FromString) return;
+        _sb.AppendLine("declare double @suru_float64_from_string(ptr)");
+        _float64FromString = true;
+    }
+
+    internal void AddFloat64ToLlvmHex()
+    {
+        if (_float64ToLlvmHex) return;
+        _sb.AppendLine("declare ptr  @suru_float64_to_llvm_hex(double)");
+        _float64ToLlvmHex = true;
     }
 
     // ─── Array ───────────────────────────────────────────────────────────────

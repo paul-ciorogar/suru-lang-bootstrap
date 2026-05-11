@@ -103,6 +103,13 @@ fn collectTypeDeclarations(state AnalyzerState, stmts Array<AstNode>) AnalyzerSt
                     _: typeNames.add(typed.name)
                 }
             }
+            SumTypeDeclNode: {
+                let sumTyped SumTypeDeclNode: stmt
+                match typeNameExistsAt(typeNames, sumTyped.name, 0) {
+                    true: appendError(state, "type '".append(sumTyped.name).append("' is already declared"))
+                    _: typeNames.add(sumTyped.name)
+                }
+            }
             _: {}
         }
         i: i.add(1)

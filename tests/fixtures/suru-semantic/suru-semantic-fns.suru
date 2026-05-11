@@ -30,6 +30,30 @@ fn checkHasReturnInWhile(stmt WhileNode) Bool {
     return checkHasReturnAt(body, 0)
 }
 
+// allMatchArmsHaveReturn — true when every arm of a MatchStmtNode has a return/exit
+// path.  Typed as Array<MatchStmtArm> so arm.stmts resolves without an undeclared-field GEP.
+// Mirrors C# CheckHasReturn stage-13j extension.
+fn allMatchArmsHaveReturn(arms Array<MatchStmtArm>, i Int64) Bool {
+    match i.lt(arms.len()) {
+        true: {
+            let arm MatchStmtArm: arms.at(i)
+            let armStmts Array<AstNode>: arm.stmts
+            match checkHasReturnAt(armStmts, 0) {
+                true: { return allMatchArmsHaveReturn(arms, i.add(1)) }
+                _: { return false }
+            }
+        }
+        _: { return true }
+    }
+}
+
+// Typed bridge: accepts a generic AstNode, casts to MatchStmtNode so .arms resolves.
+fn checkHasReturnInMatchStmt(node AstNode) Bool {
+    let matchNode MatchStmtNode: node
+    let arms Array<MatchStmtArm>: matchNode.arms
+    return allMatchArmsHaveReturn(arms, 0)
+}
+
 // isExitCall — true when an ExprStmtNode contains a direct call to exit().
 // Uses typed intermediate so CallNode.name (String) dispatches correctly.
 //
@@ -62,6 +86,10 @@ fn checkHasReturnAt(stmts Array<AstNode>, i Int64) Bool {
                 _: checkHasReturnAt(stmts, i.add(1))
             }
             ExprStmtNode: match isExitCall(stmts.at(i)) {
+                true: true
+                _: checkHasReturnAt(stmts, i.add(1))
+            }
+            MatchStmtNode: match checkHasReturnInMatchStmt(stmts.at(i)) {
                 true: true
                 _: checkHasReturnAt(stmts, i.add(1))
             }

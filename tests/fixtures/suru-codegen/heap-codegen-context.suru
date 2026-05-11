@@ -53,19 +53,24 @@ type HeapVarEntry: { name String, allocaName String, llvmType String, suruType S
 // helpers    — accumulated @suru_clone_T / @suru_drop_T function bodies
 // strCount   — monotonically increasing counter for unique names
 type HeapCodegenContext: {
-    builder           IrBuilder
-    fns               String
-    strGlobals        String
-    helpers           String
-    vars              Array<HeapVarEntry>
-    fnSigs            Array<FnSig>
-    types             Array<TypeDecl>
-    sumTypes          Array<SumTypeDecl>
-    strIndex          Array<StrIndexEntry>
-    strCount          Int64
-    currentReturnType String
-    currentReturnName String
-    blockOpen         Bool
+    builder              IrBuilder
+    fns                  String
+    strGlobals           String
+    decls                String
+    suruDecls            String
+    extCloneDropDecls    String
+    helpers              String
+    vars                 Array<HeapVarEntry>
+    fnSigs               Array<FnSig>
+    types                Array<TypeDecl>
+    sumTypes             Array<SumTypeDecl>
+    strIndex             Array<StrIndexEntry>
+    strCount             Int64
+    currentReturnType    String
+    currentReturnName    String
+    blockOpen            Bool
+    declares             Array<String>
+    ownTypeNames         Array<String>
 }
 
 // Returned by value-producing heap emitters.
@@ -75,60 +80,125 @@ type HeapCodegenResult: { ctx HeapCodegenContext, name String, llvmType String, 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 fn makeHeapContext() HeapCodegenContext {
-    let vars     Array<HeapVarEntry>:  []
-    let fnSigs   Array<FnSig>:         []
-    let types    Array<TypeDecl>:      []
-    let sumTypes Array<SumTypeDecl>:   []
-    let idx      Array<StrIndexEntry>: []
+    let vars         Array<HeapVarEntry>:  []
+    let fnSigs       Array<FnSig>:         []
+    let types        Array<TypeDecl>:      []
+    let sumTypes     Array<SumTypeDecl>:   []
+    let idx          Array<StrIndexEntry>: []
+    let decl         Array<String>:        []
+    let ownTypeNames Array<String>:        []
     return {
-        builder:           ir.makeBuilder()
-        fns:               ""
-        strGlobals:        ""
-        helpers:           ""
-        vars:              vars
-        fnSigs:            fnSigs
-        types:             types
-        sumTypes:          sumTypes
-        strIndex:          idx
-        strCount:          0
-        currentReturnType: ""
-        currentReturnName: ""
-        blockOpen:         false
+        builder:              ir.makeBuilder()
+        fns:                  ""
+        strGlobals:           ""
+        decls:                ""
+        suruDecls:            ""
+        extCloneDropDecls:    ""
+        helpers:              ""
+        vars:                 vars
+        fnSigs:               fnSigs
+        types:                types
+        sumTypes:             sumTypes
+        strIndex:             idx
+        strCount:             0
+        currentReturnType:    ""
+        currentReturnName:    ""
+        blockOpen:            false
+        declares:             decl
+        ownTypeNames:         ownTypeNames
     }
 }
 
 // ─── Single-field updaters ────────────────────────────────────────────────────
 
 fn withHBuilder(ctx HeapCodegenContext, b IrBuilder) HeapCodegenContext {
-    return { builder: b, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: b, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHBlockOpen(ctx HeapCodegenContext, open Bool) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: open }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: open, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHReturnType(ctx HeapCodegenContext, retType String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHReturnName(ctx HeapCodegenContext, rn String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: rn, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: rn, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHStrCount(ctx HeapCodegenContext, n Int64) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: n, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: n, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHStrGlobals(ctx HeapCodegenContext, sg String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: sg, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: sg, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
+}
+
+fn withHDecls(ctx HeapCodegenContext, d String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: d, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
+}
+
+fn withHSuruDecls(ctx HeapCodegenContext, d String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: d, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHFns(ctx HeapCodegenContext, fns String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: fns, strGlobals: ctx.strGlobals, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
 }
 
 fn withHHelpers(ctx HeapCodegenContext, helpers String) HeapCodegenContext {
-    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, helpers: helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen }
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
+}
+
+fn withHExtCloneDropDecls(ctx HeapCodegenContext, d String) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: d, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
+}
+
+fn withHOwnTypeNames(ctx HeapCodegenContext, names Array<String>) HeapCodegenContext {
+    return { builder: ctx.builder, fns: ctx.fns, strGlobals: ctx.strGlobals, decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: ctx.helpers, vars: ctx.vars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: ctx.currentReturnType, currentReturnName: ctx.currentReturnName, blockOpen: ctx.blockOpen, declares: ctx.declares, ownTypeNames: names }
+}
+
+// ─── Declaration tracker ─────────────────────────────────────────────────────
+
+// addDecl appends `line` to ctx.decls (C runtime externals) only if not already declared.
+// Mirrors C# Externals.Add* — malloc/free/fopen/strlen/exit go here (one space before @).
+fn addDecl(ctx HeapCodegenContext, line String) HeapCodegenContext {
+    let i Int64: 0
+    while i.lt(ctx.declares.len()) {
+        match ctx.declares.at(i).equals(line) { true: { return ctx } _: {} }
+        i: i.add(1)
+    }
+    ctx.declares.add(line)
+    return withHDecls(ctx, ctx.decls.append(line))
+}
+
+// addSuruDecl appends `line` to ctx.suruDecls (Suru runtime declares) only if not already declared.
+// Mirrors C# SuruRuntimeDeclarations.Add* — suru_clone_dyn/suru_string_*/etc go here (two spaces).
+fn addSuruDecl(ctx HeapCodegenContext, line String) HeapCodegenContext {
+    let i Int64: 0
+    while i.lt(ctx.declares.len()) {
+        match ctx.declares.at(i).equals(line) { true: { return ctx } _: {} }
+        i: i.add(1)
+    }
+    ctx.declares.add(line)
+    return withHSuruDecls(ctx, ctx.suruDecls.append(line))
+}
+
+// addExtCloneDropDecl appends external type clone/drop declare stubs to ctx.extCloneDropDecls.
+// Idempotent — uses ctx.declares set to avoid duplicate stubs for the same type.
+// Mirrors C# _externalTypeCloneDrop HashSet + sb.AppendLine in IRCodeGenerator.Emit().
+fn addExtCloneDropDecl(ctx HeapCodegenContext, typeName String) HeapCodegenContext {
+    let cloneLine String: "declare ptr  @suru_clone_".append(typeName).append("(ptr)\n")
+    let dropLine  String: "declare void @suru_drop_".append(typeName).append("(ptr)\n")
+    let i Int64: 0
+    while i.lt(ctx.declares.len()) {
+        match ctx.declares.at(i).equals(cloneLine) { true: { return ctx } _: {} }
+        i: i.add(1)
+    }
+    ctx.declares.add(cloneLine)
+    let newDecls String: ctx.extCloneDropDecls.append(cloneLine).append(dropLine)
+    return withHExtCloneDropDecls(ctx, newDecls)
 }
 
 // ─── Variable table ───────────────────────────────────────────────────────────
@@ -145,8 +215,53 @@ fn lookupHVar(ctx HeapCodegenContext, name String) HeapVarEntry {
 }
 
 fn addHVar(ctx HeapCodegenContext, name String, allocaName String, llvmType String, suruType String) HeapCodegenContext {
+    // Overwrite existing binding if present — matches C# Dictionary<> assignment semantics
+    // so that re-declaring a variable in a second while loop (e.g. `let s AstNode: ...`)
+    // updates the alloca pointer rather than shadowing it with a stale old entry.
+    let i Int64: 0
+    while i.lt(ctx.vars.len()) {
+        let v HeapVarEntry: ctx.vars.at(i)
+        match v.name.equals(name) {
+            true: {
+                ctx.vars.set({ name: name, allocaName: allocaName, llvmType: llvmType, suruType: suruType }, i)
+                return ctx
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
     ctx.vars.add({ name: name, allocaName: allocaName, llvmType: llvmType, suruType: suruType })
     return ctx
+}
+
+// Update an existing variable's suruType in ctx.vars (first match, linear scan).
+// Caller must save the original entry and restore it after the narrowed region.
+fn updateHVar(ctx HeapCodegenContext, varName String, entry HeapVarEntry) HeapCodegenContext {
+    let i Int64: 0
+    while i.lt(ctx.vars.len()) {
+        let v HeapVarEntry: ctx.vars.at(i)
+        match v.name.equals(varName) {
+            true: {
+                ctx.vars.set(entry, i)
+                return ctx
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// True when name is a declared sum type (e.g. "AstNode", "Shape").
+// Used to dispatch match statements on sum-type conditions (e.g. match node { CallNode: … })
+// even when the condition variable is not itself a variant of another sum type.
+fn isSumType(ctx HeapCodegenContext, name String) Bool {
+    let i Int64: 0
+    while i.lt(ctx.sumTypes.len()) {
+        match ctx.sumTypes.at(i).name.equals(name) { true: { return true } _: {} }
+        i: i.add(1)
+    }
+    return false
 }
 
 // ─── Function registry ────────────────────────────────────────────────────────
@@ -158,11 +273,11 @@ fn lookupHFn(ctx HeapCodegenContext, name String) FnSig {
         match s.name.equals(name) { true: { return s } _: {} }
         i: i.add(1)
     }
-    return { name: "", returnLlvmType: "" }
+    return { name: "", returnLlvmType: "", returnSuruType: "" }
 }
 
-fn addHFn(ctx HeapCodegenContext, name String, retLlvmType String) HeapCodegenContext {
-    ctx.fnSigs.add({ name: name, returnLlvmType: retLlvmType })
+fn addHFn(ctx HeapCodegenContext, name String, retLlvmType String, retSuruType String) HeapCodegenContext {
+    ctx.fnSigs.add({ name: name, returnLlvmType: retLlvmType, returnSuruType: retSuruType })
     return ctx
 }
 
@@ -302,9 +417,11 @@ fn elemSuruType(suruType String) String {
 }
 
 // True when a type annotation string names an Array (e.g. "Array<Int64>").
+// Must check for "Array<" (with angle bracket) to avoid matching user-defined
+// types whose names begin with "Array" (e.g. ArrayLitNode).
 fn isArrayTypeName(typeName String) Bool {
-    match typeName.len().lt(5) { true: { return false } _: {} }
-    return typeName.slice(0, 5).equals("Array")
+    match typeName.len().lt(6) { true: { return false } _: {} }
+    return typeName.slice(0, 6).equals("Array<")
 }
 
 // Extract the element type from a generic type annotation: "Array<Int64>" → "Int64".
@@ -330,12 +447,24 @@ fn makeSuruType(typeName String) String {
 
 // LLVM type for a Suru type name (replicates cg.llvmTypeOf for heap-context use).
 fn heapLlvmTypeOf(suruType String) String {
-    match suruType.equals("void")    { true: { return "void"   } _: {} }
+    // Void functions use ptr return type in the C# codegen convention (ret ptr null).
+    match suruType.equals("void")    { true: { return "ptr"    } _: {} }
     match suruType.equals("Int64")   { true: { return "i64"    } _: {} }
     match suruType.equals("Bool")    { true: { return "i1"     } _: {} }
     match suruType.equals("Int32")   { true: { return "i32"    } _: {} }
     match suruType.equals("Float64") { true: { return "double" } _: {} }
     return "ptr"
+}
+
+// True when the given name appears in an Array<String> names list.
+// Used to distinguish own vs external function/type names in per-module emit.
+fn namesContain(names Array<String>, name String) Bool {
+    let i Int64: 0
+    while i.lt(names.len()) {
+        match names.at(i).equals(name) { true: { return true } _: {} }
+        i: i.add(1)
+    }
+    return false
 }
 
 // SuruType integer type_tag for a Suru type name (for array elem_tag).

@@ -1,0 +1,2017 @@
+// ir-codegen.suru — Main LLVM IR code generator.
+//
+// Mirrors IRCodeGenerator.cs + IRFunctionCodeGenerator.cs + IRMatchCodeGenerator.cs.
+// All three C# partial-class files are merged here because emitValue, emitMatchExpr,
+// emitMatchStmt, emitStmt, emitStmts, emitWhile, and emitFunction form a mutually-
+// recursive cluster that Suru's acyclic include DAG cannot split across files.
+//
+// Section banners mark logical partial-class boundaries for cross-referencing:
+//   // ─── [mirrors IRCodeGenerator.cs] ─────────────────────────────────────────
+//   // ─── [mirrors IRFunctionCodeGenerator.cs] ──────────────────────────────────
+//   // ─── [mirrors IRMatchCodeGenerator.cs] ─────────────────────────────────────
+//
+// Design: helper files (string/array/struct/fileio) receive pre-emitted SSA names
+// and never call emitValue. emitValue pre-emits all sub-expressions, then delegates.
+//
+// Include DAG: top of the new rewrite DAG — depends on all seven helper files.
+// Imported by suru-build/main.suru as the codegen entry point.
+
+include "../suru-parser/suru-parser-ast.suru" as ast
+include "ir-builder.suru" as ir
+include "ir-codegen-types.suru" as types
+include "ir-box-codegen.suru" as box
+include "ir-string-codegen.suru" as irStr
+include "ir-array-codegen.suru" as irArr
+include "ir-struct-codegen.suru" as irStruct
+include "ir-fileio-codegen.suru" as irFile
+include "ir-type-clone-drop-codegen.suru" as irCD
+
+// ─── [mirrors IRCodeGenerator.cs] ─────────────────────────────────────────────
+
+// Pre-pass 0: register TypeDecl/SumTypeDecl into context registries.
+// Mirrors C# Emit() type-collection loop.
+fn registerTypes(ctx IrCodegenContext, stmts Array<AstNode>) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            TypeDeclNode: {
+                let fields Array<TypeFieldEntry>: []
+                let j Int64: 0
+                while j.lt(s.fields.len()) {
+                    let p Param: s.fields.at(j)
+                    let fe TypeFieldEntry: { name: p.name, typeName: p.typeName }
+                    fields.add(fe)
+                    j: j.add(1)
+                }
+                let td TypeDecl: { name: s.name, fields: fields }
+                ctx: types.addType(ctx, td)
+            }
+            SumTypeDeclNode: {
+                let sd SumTypeDecl: { name: s.name, variants: s.variants }
+                ctx: types.addSumType(ctx, sd)
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Pre-pass 1: register same-file function signatures into ctx.functions.
+// Only functions whose names are in ctx.ownFnNames get registered — external
+// (included) functions are excluded here; they may be added by the caller.
+// Mirrors C# _userFunctions pre-pass in Emit().
+fn registerFunctions(ctx IrCodegenContext, stmts Array<AstNode>) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            FnDeclNode: {
+                match types.isOwnFn(ctx, s.name) {
+                    true: {
+                        let retSuru String: types.makeSuruType(s.returnType)
+                        let retLlvm String: match s.returnType.equals("void") {
+                            true: "ptr"
+                            _:    box.llvmTypeOf(retSuru)
+                        }
+                        let paramTypes Array<String>: []
+                        let j Int64: 0
+                        while j.lt(s.params.len()) {
+                            paramTypes.add(types.makeSuruType(s.params.at(j).typeName))
+                            j: j.add(1)
+                        }
+                        let fe2 FnEntry: { name: s.name, returnLlvmType: retLlvm, returnSuruType: retSuru, paramSuruTypes: paramTypes }
+                        ctx: types.addFn(ctx, fe2)
+                    }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Pre-pass 2: register module-level scalar constant names in ctx.globalVars.
+// Mirrors C# _globalVars population in Emit().
+fn registerConstants(ctx IrCodegenContext, stmts Array<AstNode>) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            LetNode: {
+                let val AstNode: s.value
+                let suruTy String: ""
+                match val {
+                    BoolLitNode:  { suruTy: "Bool" }
+                    IntLitNode:   { suruTy: "Int64" }
+                    FloatLitNode: { suruTy: "Float64" }
+                    _: {}
+                }
+                match suruTy.equals("") {
+                    true: {}
+                    _: {
+                        let gv GlobalVar: { suruName: s.name, globalName: "@".append(s.name), suruType: suruTy }
+                        ctx.globalVars.add(gv)
+                    }
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Emit LLVM global constant declarations for all registered module-level scalars.
+// Called during assembly in generate() — reads ctx.globalVars, matches back to stmts
+// to get the literal text. Mirrors C# global-emit loop in Emit().
+fn emitGlobalConstants(ctx IrCodegenContext, stmts Array<AstNode>) String {
+    let out String: ""
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            LetNode: {
+                let g GlobalVar: types.lookupGlobal(ctx, s.name)
+                match g.suruName.equals("") {
+                    true: {}
+                    _: {
+                        let val AstNode: s.value
+                        match val {
+                            BoolLitNode: {
+                                let bstr String: match val.boolVal { true: "1", _: "0" }
+                                out: out.append(g.globalName).append(" = internal constant i1 ").append(bstr).append("\n")
+                            }
+                            IntLitNode: {
+                                out: out.append(g.globalName).append(" = internal constant i64 ").append(val.text).append("\n")
+                            }
+                            FloatLitNode: {
+                                out: out.append(g.globalName).append(" = internal constant double ").append(val.text).append("\n")
+                            }
+                            _: {}
+                        }
+                    }
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return out
+}
+
+// ─── Variable load ─────────────────────────────────────────────────────────────
+
+// Load from a local alloca or module-level constant global.
+// Mirrors C# EmitLoad().
+fn emitVarLoad(ctx IrCodegenContext, name String) CodegenResult {
+    let v VarEntry: types.lookupVar(ctx, name)
+    match v.name.equals("") {
+        true: {
+            let g GlobalVar: types.lookupGlobal(ctx, name)
+            let lt String: box.llvmTypeOf(g.suruType)
+            let lr IrResult: ir.emitLoad(ctx.builder, lt, g.globalName)
+            ctx.builder: lr.builder
+            return { ctx: ctx, name: lr.name, llvmType: lt, suruType: g.suruType }
+        }
+        _: {}
+    }
+    let lt String: box.llvmTypeOf(v.suruType)
+    let lr IrResult: ir.emitLoad(ctx.builder, lt, v.allocaName)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: lt, suruType: v.suruType }
+}
+
+// ─── Arithmetic helpers ─────────────────────────────────────────────────────────
+
+// For arithmetic/comparison, NamedType (struct field) is treated as Int64 at runtime.
+// Mirrors C# effectiveType pattern in EmitBinOp/EmitCmp.
+fn effectiveSuruType(suruType String) String {
+    match box.isScalarType(suruType) { true: { return suruType } _: {} }
+    match suruType.equals("String")  { true: { return "String"  } _: {} }
+    match types.isArraySuruType(suruType) { true: { return suruType } _: {} }
+    return "Int64"
+}
+
+// Unbox val to raw scalar if it is heap-boxed for the given suruType.
+// Returns val unchanged when suruType is already scalar.
+fn rawVal(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    match box.isScalarType(suruType) {
+        true: { return { ctx: ctx, name: val, llvmType: box.llvmTypeOf(suruType), suruType: suruType } }
+        _: {}
+    }
+    return box.unboxScalar(ctx, val, "Int64")
+}
+
+// Emit binary arithmetic operation. Mirrors C# EmitBinOp().
+fn emitArith(ctx IrCodegenContext, intOp String, floatOp String, lval String, ltype String, rval String, rtype String) CodegenResult {
+    let eff String: effectiveSuruType(ltype)
+    let rr1 CodegenResult: rawVal(ctx, lval, ltype)
+    ctx: rr1.ctx
+    let rr2 CodegenResult: rawVal(rr1.ctx, rval, rtype)
+    ctx: rr2.ctx
+    let op String: match eff.equals("Float64") { true: floatOp, _: intOp }
+    let rawT String: box.rawLlvmTypeOf(eff)
+    let br IrResult: ir.emitBinop(ctx.builder, op, rawT, rr1.name, rr2.name)
+    ctx.builder: br.builder
+    return { ctx: ctx, name: br.name, llvmType: rawT, suruType: eff }
+}
+
+// Emit comparison. Returns i1 result with suruType="Bool". Mirrors C# EmitCmp().
+fn emitCmpOp(ctx IrCodegenContext, intPred String, floatPred String, lval String, ltype String, rval String, rtype String) CodegenResult {
+    let eff String: effectiveSuruType(ltype)
+    let rr1 CodegenResult: rawVal(ctx, lval, ltype)
+    ctx: rr1.ctx
+    let rr2 CodegenResult: rawVal(rr1.ctx, rval, rtype)
+    ctx: rr2.ctx
+    let rawT String: box.rawLlvmTypeOf(eff)
+    let cr IrResult: match eff.equals("Float64") {
+        true: ir.emitFCmp(ctx.builder, floatPred, rr1.name, rr2.name)
+        _:    ir.emitICmp(ctx.builder, intPred, rawT, rr1.name, rr2.name)
+    }
+    ctx.builder: cr.builder
+    return { ctx: ctx, name: cr.name, llvmType: "i1", suruType: "Bool" }
+}
+
+// Emit compare() → i64 -1/0/1. Mirrors C# EmitCompare().
+fn emitCompare(ctx IrCodegenContext, lval String, ltype String, rval String, rtype String) CodegenResult {
+    let eff String: effectiveSuruType(ltype)
+    let rawT String: box.rawLlvmTypeOf(eff)
+    let rr1 CodegenResult: rawVal(ctx, lval, ltype)
+    ctx: rr1.ctx
+    let rr2 CodegenResult: rawVal(rr1.ctx, rval, rtype)
+    ctx: rr2.ctx
+    let gtR IrResult: match eff.equals("Float64") {
+        true: ir.emitFCmp(ctx.builder, "ogt", rr1.name, rr2.name)
+        _:    ir.emitICmp(ctx.builder, "sgt", rawT, rr1.name, rr2.name)
+    }
+    ctx.builder: gtR.builder
+    let ltR IrResult: match eff.equals("Float64") {
+        true: ir.emitFCmp(ctx.builder, "olt", gtR.name, rr2.name)
+        _:    ir.emitICmp(ctx.builder, "slt", rawT, rr1.name, rr2.name)
+    }
+    ctx.builder: ltR.builder
+    let geR IrResult: ir.emitZext(ctx.builder, "i1", gtR.name, "i64")
+    ctx.builder: geR.builder
+    let leR IrResult: ir.emitZext(ctx.builder, "i1", ltR.name, "i64")
+    ctx.builder: leR.builder
+    let subR IrResult: ir.emitBinop(ctx.builder, "sub", "i64", geR.name, leR.name)
+    ctx.builder: subR.builder
+    return { ctx: ctx, name: subR.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// Emit invert() — numeric negation. Bool invert is also numeric (xor not needed).
+// Mirrors C# EmitInvert().
+fn emitInvert(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    let eff String: effectiveSuruType(suruType)
+    let rr CodegenResult: rawVal(ctx, val, suruType)
+    ctx: rr.ctx
+    let res IrResult: match eff.equals("Float64") {
+        true: ir.emitBinop(ctx.builder, "fneg", "double", "", rr.name)
+        _:    ir.emitBinop(ctx.builder, "sub", box.rawLlvmTypeOf(eff), "0", rr.name)
+    }
+    ctx.builder: res.builder
+    return { ctx: ctx, name: res.name, llvmType: box.rawLlvmTypeOf(eff), suruType: eff }
+}
+
+// ─── clone/drop/not/binary helpers ─────────────────────────────────────────────
+
+fn emitCloneDyn(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    match box.isScalarType(suruType) {
+        true: { return { ctx: ctx, name: val, llvmType: box.llvmTypeOf(suruType), suruType: suruType } }
+        _: {}
+    }
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_clone_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_clone_dyn", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: suruType }
+}
+
+fn emitDropDyn(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    match box.isScalarType(suruType) {
+        true: { return { ctx: ctx, name: "0", llvmType: "i1", suruType: "Bool" } }
+        _: {}
+    }
+    ctx: types.addSuruDecl(ctx, "declare void @suru_drop_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(val))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_drop_dyn", args)
+    return { ctx: ctx, name: "0", llvmType: "i1", suruType: "Bool" }
+}
+
+fn emitBoolNot(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    let rawB String: val
+    match box.isScalarType(suruType) {
+        true: {}
+        _: {
+            let ur CodegenResult: box.unboxBool(ctx, val)
+            ctx: ur.ctx
+            rawB: ur.name
+        }
+    }
+    let xr IrResult: ir.emitXor(ctx.builder, "i1", rawB, "true")
+    ctx.builder: xr.builder
+    return { ctx: ctx, name: xr.name, llvmType: "i1", suruType: "Bool" }
+}
+
+fn emitBinaryExpr(ctx IrCodegenContext, lval String, ltype String, rval String, rtype String, op Int64) CodegenResult {
+    let rr1 CodegenResult: rawVal(ctx, lval, ltype)
+    ctx: rr1.ctx
+    let rr2 CodegenResult: rawVal(rr1.ctx, rval, rtype)
+    ctx: rr2.ctx
+    let opStr String: match op.equals(2) { true: "and", _: "or" }
+    let br IrResult: ir.emitBinop(ctx.builder, opStr, "i1", rr1.name, rr2.name)
+    ctx.builder: br.builder
+    return { ctx: ctx, name: br.name, llvmType: "i1", suruType: "Bool" }
+}
+
+// ─── Static type methods ─────────────────────────────────────────────────────────
+
+// Int64.from(str) → call @suru_string_to_int64(ptr str) → i64
+fn emitInt64Static(ctx IrCodegenContext, method String, args Array<AstNode>) CodegenResult {
+    let ar CodegenResult: emitValue(ctx, args.at(0))
+    ctx: ar.ctx
+    return irStr.emitInt64FromString(ctx, ar.name)
+}
+
+// Float64.from(str) → call @suru_string_to_float64(ptr str) → double
+fn emitFloat64Static(ctx IrCodegenContext, method String, args Array<AstNode>) CodegenResult {
+    let ar CodegenResult: emitValue(ctx, args.at(0))
+    ctx: ar.ctx
+    return irStr.emitFloat64FromString(ctx, ar.name)
+}
+
+// Int32.from(val) → trunc i64 val to i32 (or literal coerce)
+fn emitInt32Static(ctx IrCodegenContext, method String, args Array<AstNode>) CodegenResult {
+    let ar CodegenResult: emitValue(ctx, args.at(0))
+    ctx: ar.ctx
+    let raw String: ar.name
+    match box.isScalarType(ar.suruType) {
+        true: {}
+        _: {
+            let ur CodegenResult: box.unboxInt64(ctx, ar.name)
+            ctx: ur.ctx
+            raw: ur.name
+        }
+    }
+    let tr IrResult: ir.emitTrunc(ctx.builder, "i64", raw, "i32")
+    ctx.builder: tr.builder
+    return { ctx: ctx, name: tr.name, llvmType: "i32", suruType: "Int32" }
+}
+
+// ─── User function call ─────────────────────────────────────────────────────────
+
+// Emit a call to a user-defined (same-file or included) function.
+// Looks up the signature in ctx.functions, emits each arg, coerces scalar params.
+// Mirrors C# EmitUserFunctionCall().
+fn emitUserFnCall(ctx IrCodegenContext, fnName String, args Array<AstNode>) CodegenResult {
+    let sig FnEntry: types.lookupFn(ctx, fnName)
+    let argParts Array<String>: []
+    let i Int64: 0
+    while i.lt(args.len()) {
+        let ar CodegenResult: emitValue(ctx, args.at(i))
+        ctx: ar.ctx
+        let pSuruType String: match i.lt(sig.paramSuruTypes.len()) {
+            true: sig.paramSuruTypes.at(i)
+            _:    ar.suruType
+        }
+        let pLlvm String: box.llvmTypeOf(pSuruType)
+        let finalVal String: ar.name
+        match box.isScalarType(pSuruType) {
+            true: {
+                match box.isScalarType(ar.suruType) {
+                    true: {}
+                    _: {
+                        let ur CodegenResult: box.unboxScalar(ctx, ar.name, pSuruType)
+                        ctx: ur.ctx
+                        finalVal: ur.name
+                    }
+                }
+            }
+            _: {}
+        }
+        argParts.add(pLlvm.append(" ").append(finalVal))
+        i: i.add(1)
+    }
+    let retLlvm String: sig.returnLlvmType
+    let rr IrResult: ir.emitCall(ctx.builder, retLlvm, fnName, argParts)
+    ctx.builder: rr.builder
+    return { ctx: ctx, name: rr.name, llvmType: retLlvm, suruType: sig.returnSuruType }
+}
+
+// ─── Array / struct literal helpers ────────────────────────────────────────────
+
+// Emit an array literal: header alloc first, then elements into raw data buffer,
+// then header fields — mirrors C# EmitArrayLiteral exactly so SSA numbering matches.
+//
+// C# order:
+//   hdrPtr = malloc(40)
+//   if count > 0: firstVal = EmitValue(elements[0])    ← eval first elem BEFORE rawData
+//                 rawData  = malloc(count*8)
+//                 slot0    = GEP(rawData, 0); as64_0 = EmitToI64(firstVal); store
+//                 for i=1..count-1: elemVal = EmitValue, slot = GEP, as64 = EmitToI64, store
+//   pre-allocate all 5 header GEP SSA names in one batch
+//   emit header GEPs + stores (lenGep/capGep with double-space after SSA name)
+//
+// Mirrors C# EmitArrayLiteral.
+fn emitArrayLit(ctx IrCodegenContext, elems Array<AstNode>, elemSuruType String) CodegenResult {
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    // Step 1: allocate Array header (40 bytes).
+    let hdrArgs Array<String>: []
+    hdrArgs.add("i64 40")
+    let hdrR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", hdrArgs)
+    ctx.builder: hdrR.builder
+    let hdrPtr String: hdrR.name
+    let count Int64: elems.len()
+    let dataPtr String: "null"
+    let actualElemSuruType String: elemSuruType
+    // Step 2: for non-empty arrays, emit elements into raw data buffer.
+    match count.equals(0) {
+        true: {}
+        _: {
+            // Evaluate first element BEFORE malloc'ing rawData (mirrors C# order).
+            let firstValR CodegenResult: emitValue(ctx, elems.at(0))
+            ctx: firstValR.ctx
+            actualElemSuruType: firstValR.suruType
+            // malloc raw data buffer: count * 8 bytes.
+            let rawArgs Array<String>: []
+            rawArgs.add("i64 ".append(count.multiply(8).toString()))
+            let rawR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", rawArgs)
+            ctx.builder: rawR.builder
+            dataPtr: rawR.name
+            // Slot 0: GEP first, then EmitToI64(firstVal), then store.
+            let slot0R IrResult: ir.emitGEP(ctx.builder, "i64", dataPtr, "i64 0")
+            ctx.builder: slot0R.builder
+            let as64_0 CodegenResult: irArr.emitToI64(ctx, firstValR.name, firstValR.suruType)
+            ctx: as64_0.ctx
+            ctx.builder: ir.emitStore(ctx.builder, "i64", as64_0.name, slot0R.name)
+            // Slots 1..count-1: eval elem, GEP slot, EmitToI64, store.
+            let i Int64: 1
+            while i.lt(count) {
+                let elemValR CodegenResult: emitValue(ctx, elems.at(i))
+                ctx: elemValR.ctx
+                let slotR IrResult: ir.emitGEP(ctx.builder, "i64", dataPtr, "i64 ".append(i.toString()))
+                ctx.builder: slotR.builder
+                let as64 CodegenResult: irArr.emitToI64(ctx, elemValR.name, elemValR.suruType)
+                ctx: as64.ctx
+                ctx.builder: ir.emitStore(ctx.builder, "i64", as64.name, slotR.name)
+                i: i.add(1)
+            }
+        }
+    }
+    // Step 3: pre-allocate all 5 header GEP SSA names in one batch (mirrors C#
+    // var ttagGep=NextTmp(); var etagGep=NextTmp(); var lenGep=NextTmp(); etc.).
+    let ttagNR IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: ttagNR.builder
+    let etagNR IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: etagNR.builder
+    let lenNR  IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: lenNR.builder
+    let capNR  IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: capNR.builder
+    let dataNR IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: dataNR.builder
+    let etag String: types.suruTypeTag(actualElemSuruType)
+    // Step 4: emit header field GEPs + stores.
+    // ttagGep and etagGep use single space; lenGep and capGep use double space
+    // (mirrors C# alignment: var lenGep  = NextTmp() with two spaces before =).
+    let ttagLine String: "  ".append(ttagNR.name).append(" = getelementptr %suru.Array, ptr ").append(hdrPtr).append(", i32 0, i32 0\n")
+    ctx.builder: ir.emit(ctx.builder, ttagLine)
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "5", ttagNR.name)
+    let etagLine String: "  ".append(etagNR.name).append(" = getelementptr %suru.Array, ptr ").append(hdrPtr).append(", i32 0, i32 1\n")
+    ctx.builder: ir.emit(ctx.builder, etagLine)
+    ctx.builder: ir.emitStore(ctx.builder, "i64", etag, etagNR.name)
+    let lenLine String: "  ".append(lenNR.name).append("  = getelementptr %suru.Array, ptr ").append(hdrPtr).append(", i32 0, i32 2\n")
+    ctx.builder: ir.emit(ctx.builder, lenLine)
+    ctx.builder: ir.emitStore(ctx.builder, "i64", count.toString(), lenNR.name)
+    let capLine String: "  ".append(capNR.name).append("  = getelementptr %suru.Array, ptr ").append(hdrPtr).append(", i32 0, i32 3\n")
+    ctx.builder: ir.emit(ctx.builder, capLine)
+    ctx.builder: ir.emitStore(ctx.builder, "i64", count.toString(), capNR.name)
+    let dataLine String: "  ".append(dataNR.name).append(" = getelementptr %suru.Array, ptr ").append(hdrPtr).append(", i32 0, i32 4\n")
+    ctx.builder: ir.emit(ctx.builder, dataLine)
+    ctx.builder: ir.emitStore(ctx.builder, "ptr", dataPtr, dataNR.name)
+    return { ctx: ctx, name: hdrPtr, llvmType: "ptr", suruType: "Array:".append(actualElemSuruType) }
+}
+
+// Emit a struct literal: allocate first, then for each TypeDecl field GEP the slot
+// BEFORE evaluating the field value — this mirrors C# EmitStructLiteral which does
+// var fGep = NextTmp() (allocates the GEP SSA name) then calls EmitValue(fieldExpr),
+// so the GEP name has a lower number than the field value's intermediate SSA names.
+// typeName is the declared struct type (from let annotation or current fn return type).
+// Mirrors C# EmitStructLiteral().
+fn emitStructLit(ctx IrCodegenContext, fields Array<StructFieldNode>, typeName String) CodegenResult {
+    // Step 1: allocate struct memory and write the 32-byte header.
+    let allocR CodegenResult: irStruct.emitStructLiteralAlloc(ctx, typeName)
+    ctx: allocR.ctx
+    let mem String: allocR.name
+    // Step 2: for each TypeDecl field (canonical order), GEP the slot FIRST, then
+    // evaluate the field value, then encode as i64 and store.
+    // Absent fields (not in the literal) are zero-initialized.
+    let decl TypeDecl: types.lookupType(ctx, typeName)
+    let i Int64: 0
+    while i.lt(decl.fields.len()) {
+        let tdFieldName String: decl.fields.at(i).name
+        let offset Int64: irStruct.fieldOffset(i)
+        let fGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 ".append(offset.toString()))
+        ctx.builder: fGr.builder
+        // Linear scan: find this TypeDecl field in the literal's provided fields.
+        let foundIdx Int64: -1
+        let k Int64: 0
+        while k.lt(fields.len()) {
+            match fields.at(k).name.equals(tdFieldName) { true: { foundIdx: k } _: {} }
+            k: k.add(1)
+        }
+        match foundIdx.equals(-1) {
+            true: {
+                ctx.builder: ir.emitStore(ctx.builder, "i64", "0", fGr.name)
+            }
+            _: {
+                let fr CodegenResult: emitValue(ctx, fields.at(foundIdx).value)
+                ctx: fr.ctx
+                let asI64 CodegenResult: irStruct.structFieldToI64(ctx, fr.name, fr.suruType)
+                ctx: asI64.ctx
+                ctx.builder: ir.emitStore(ctx.builder, "i64", asI64.name, fGr.name)
+            }
+        }
+        i: i.add(1)
+    }
+    return { ctx: ctx, name: mem, llvmType: "ptr", suruType: typeName }
+}
+
+// ─── Main value dispatch ────────────────────────────────────────────────────────
+
+// Emit IR for any expression node, returning the SSA name and Suru type.
+// Mirrors C# EmitValue().  All sub-expressions are emitted here or in helpers;
+// helper files (string/array/struct) never call emitValue themselves.
+fn emitValue(ctx IrCodegenContext, expr AstNode) CodegenResult {
+    match expr {
+        IntLitNode: {
+            return { ctx: ctx, name: expr.text, llvmType: "i64", suruType: "Int64" }
+        }
+        BoolLitNode: {
+            let bv String: match expr.boolVal { true: "1", _: "0" }
+            return { ctx: ctx, name: bv, llvmType: "i1", suruType: "Bool" }
+        }
+        FloatLitNode: {
+            // LLVM requires float literals in IEEE-754 hex form (e.g. 0x3FF3333333333333).
+            // fval.llvmHex() calls @suru_float64_to_llvm_hex at the codegen binary's runtime,
+            // converting the parsed decimal to the exact hex constant that C# produces via
+            // BitConverter.DoubleToInt64Bits.
+            let fval Float64: Float64.from(expr.text)
+            let hexLit String: fval.llvmHex()
+            return { ctx: ctx, name: hexLit, llvmType: "double", suruType: "Float64" }
+        }
+        StrLitNode: {
+            return irStr.emitStringLiteralValue(ctx, expr.text)
+        }
+        VarRefNode: {
+            return emitVarLoad(ctx, expr.name)
+        }
+        FieldAccessNode: {
+            let rr CodegenResult: emitValue(ctx, expr.receiver)
+            ctx: rr.ctx
+            return irStruct.emitFieldAccess(ctx, rr.name, rr.suruType, expr.fieldName)
+        }
+        ArrayLitNode: {
+            // Infer element type from first element (if any), else use "Int64".
+            let elemSuruType String: "Int64"
+            match expr.elems.len().gt(0) {
+                true: {
+                    let peekR CodegenResult: peekTypeNode(ctx, expr.elems.at(0))
+                    elemSuruType: peekR.suruType
+                }
+                _: {}
+            }
+            return emitArrayLit(ctx, expr.elems, elemSuruType)
+        }
+        StructLitNode: {
+            // typeName resolved by caller via let annotation — use currentReturnTypeName fallback.
+            return emitStructLit(ctx, expr.fields, ctx.currentReturnTypeName)
+        }
+        CallNode: {
+            match expr.name.equals("readFile") {
+                true: {
+                    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ar.ctx
+                    return irFile.emitReadFile(ctx, ar.name)
+                }
+                _: {}
+            }
+            match expr.name.equals("clone") {
+                true: {
+                    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ar.ctx
+                    return emitCloneDyn(ctx, ar.name, ar.suruType)
+                }
+                _: {}
+            }
+            match expr.name.equals("drop") {
+                true: {
+                    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ar.ctx
+                    return emitDropDyn(ctx, ar.name, ar.suruType)
+                }
+                _: {}
+            }
+            return emitUserFnCall(ctx, expr.name, expr.args)
+        }
+        MethodCallNode: {
+            return emitMethodCall(ctx, expr)
+        }
+        MatchExprNode: {
+            return emitMatchExpr(ctx, expr)
+        }
+        UnaryNode: {
+            let opr CodegenResult: emitValue(ctx, expr.operand)
+            ctx: opr.ctx
+            return emitBoolNot(ctx, opr.name, opr.suruType)
+        }
+        BinaryNode: {
+            let lr CodegenResult: emitValue(ctx, expr.left)
+            ctx: lr.ctx
+            let rr CodegenResult: emitValue(ctx, expr.right)
+            ctx: rr.ctx
+            return emitBinaryExpr(ctx, lr.name, lr.suruType, rr.name, rr.suruType, expr.op)
+        }
+        _: {
+            return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "" }
+        }
+    }
+}
+
+// Peek the Suru type of an expression node without emitting IR.
+// Used by emitMatchExpr to choose the result alloca LLVM type.
+// Returns CodegenResult with only suruType set (name/llvmType are irrelevant).
+// Mirrors C# PeekType() / PeekMethodType().
+fn peekTypeNode(ctx IrCodegenContext, expr AstNode) CodegenResult {
+    let st String: ""
+    match expr {
+        BoolLitNode:  { st: "Bool"   }
+        IntLitNode:   { st: "Int64"  }
+        FloatLitNode: { st: "Float64" }
+        StrLitNode:   { st: "String" }
+        ArrayLitNode: { st: "Array:Int64" }
+        StructLitNode: { st: ctx.currentReturnTypeName }
+        VarRefNode: {
+            let v VarEntry: types.lookupVar(ctx, expr.name)
+            match v.name.equals("") {
+                true: {
+                    let g GlobalVar: types.lookupGlobal(ctx, expr.name)
+                    st: g.suruType
+                }
+                _: { st: v.suruType }
+            }
+        }
+        MethodCallNode: {
+            // Dispatch on method name for common cases; receiver lookup for user fns.
+            // Bind receiver to a local so NarrowCondVar can narrow it inside match arms.
+            let recvNode AstNode: expr.receiver
+            let method String: expr.methodName
+            match method.equals("add")      { true: { match recvNode { VarRefNode: { st: types.lookupVar(ctx, recvNode.name).suruType } _: {} } } _: {} }
+            match method.equals("take")     { true: { match recvNode { VarRefNode: { st: types.lookupVar(ctx, recvNode.name).suruType } _: {} } } _: {} }
+            match method.equals("multiply") { true: { match recvNode { VarRefNode: { st: types.lookupVar(ctx, recvNode.name).suruType } _: {} } } _: {} }
+            match method.equals("split")    { true: { match recvNode { VarRefNode: { st: types.lookupVar(ctx, recvNode.name).suruType } _: {} } } _: {} }
+            match method.equals("invert")   { true: { match recvNode { VarRefNode: { st: types.lookupVar(ctx, recvNode.name).suruType } _: {} } } _: {} }
+            match method.equals("compare")  { true: { st: "Int64" } _: {} }
+            match method.equals("len")      { true: { st: "Int64" } _: {} }
+            match method.equals("ord")      { true: { st: "Int64" } _: {} }
+            match method.equals("lt")       { true: { st: "Bool"  } _: {} }
+            match method.equals("gt")       { true: { st: "Bool"  } _: {} }
+            match method.equals("lte")      { true: { st: "Bool"  } _: {} }
+            match method.equals("gte")      { true: { st: "Bool"  } _: {} }
+            match method.equals("equals")   { true: { st: "Bool"  } _: {} }
+            match method.equals("toString") { true: { st: "String" } _: {} }
+            match method.equals("at") {
+                true: {
+                    // Return the element type of the receiver array rather than a fixed "String".
+                    // This lets FieldAccessNode peek resolve correctly for arrays of named types.
+                    let recvPeek CodegenResult: peekTypeNode(ctx, recvNode)
+                    let elemST String: types.elemSuruType(recvPeek.suruType)
+                    match elemST.equals("") { true: { st: "String" } _: { st: elemST } }
+                }
+                _: {}
+            }
+            match method.equals("append")   { true: { st: "String" } _: {} }
+            match method.equals("slice")    { true: { st: "String" } _: {} }
+            match st.equals("") {
+                true: {
+                    // Unknown method → look up function return type
+                    let sig FnEntry: types.lookupFn(ctx, method)
+                    st: sig.returnSuruType
+                }
+                _: {}
+            }
+        }
+        CallNode: {
+            let sig FnEntry: types.lookupFn(ctx, expr.name)
+            st: sig.returnSuruType
+        }
+        FieldAccessNode: {
+            // Resolve the field's declared type by peeking the receiver's Suru type.
+            let recvR CodegenResult: peekTypeNode(ctx, expr.receiver)
+            let decl TypeDecl: types.lookupType(ctx, recvR.suruType)
+            match decl.name.equals("") {
+                true: {}
+                _: {
+                    let fIdx Int64: types.fieldIndex(decl, expr.fieldName)
+                    let fLen Int64: decl.fields.len()
+                    match fIdx.lt(fLen) {
+                        true: {
+                            let ann String: decl.fields.at(fIdx).typeName
+                            st: types.makeSuruType(ann)
+                        }
+                        _: {}
+                    }
+                }
+            }
+        }
+        MatchExprNode: {
+            // Peek the type of the first non-wildcard arm
+            let i Int64: 0
+            while i.lt(expr.arms.len()) {
+                let arm MatchArm: expr.arms.at(i)
+                match arm.isWildcard {
+                    true: {}
+                    _: {
+                        let pr CodegenResult: peekTypeNode(ctx, arm.body)
+                        st: pr.suruType
+                        i: expr.arms.len()
+                    }
+                }
+                i: i.add(1)
+            }
+        }
+        _: { st: "Int64" }
+    }
+    return { ctx: ctx, name: "", llvmType: box.llvmTypeOf(st), suruType: st }
+}
+
+// ─── Method call dispatch ────────────────────────────────────────────────────────
+
+// Dispatch a MethodCallNode to the appropriate helper.
+// Mirrors C# EmitMethodCall().
+fn emitMethodCall(ctx IrCodegenContext, expr MethodCallNode) CodegenResult {
+    let method String: expr.methodName
+    let recv AstNode: expr.receiver
+
+    // Namespace alias call: receiver VarRef not in local scope → direct fn call.
+    // Mirrors C# alias check + EmitUserFunctionCall cross-module path.
+    match recv {
+        VarRefNode: {
+            let recvName String: recv.name
+            let lookupResult VarEntry: types.lookupVar(ctx, recvName)
+            match lookupResult.name.equals("") {
+                true: {
+                    // Not in local scope — check if static builtin type or namespace alias.
+                    let isBuiltin Bool: types.isBuiltinSuruType(recvName)
+                    match isBuiltin {
+                        true: {}
+                        _: {
+                            // Not in scope, not a builtin type name → namespace call.
+                            return emitUserFnCall(ctx, method, expr.args)
+                        }
+                    }
+                }
+                _: {}
+            }
+            // Static type methods.
+            match recvName.equals("Int64")   { true: { return emitInt64Static(ctx, method, expr.args)   } _: {} }
+            match recvName.equals("Float64") { true: { return emitFloat64Static(ctx, method, expr.args) } _: {} }
+            match recvName.equals("Int32")   { true: { return emitInt32Static(ctx, method, expr.args)   } _: {} }
+        }
+        _: {}
+    }
+
+    // Emit receiver.
+    let rr CodegenResult: emitValue(ctx, recv)
+    ctx: rr.ctx
+    let recvVal String: rr.name
+    let recvSuruType String: rr.suruType
+
+    // argv.at(i) — route to EmitArgAt (args is the fake %suru.String header holding char**).
+    let isArgv Bool: false
+    match recv {
+        VarRefNode: {
+            let i Int64: 0
+            while i.lt(ctx.argvVars.len()) {
+                match ctx.argvVars.at(i).equals(recv.name) { true: { isArgv: true } _: {} }
+                i: i.add(1)
+            }
+        }
+        _: {}
+    }
+    match isArgv {
+        true: {
+            match method.equals("at") {
+                true: {
+                    let idxR CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: idxR.ctx
+                    return irFile.emitArgAt(ctx, recvVal, idxR.name)
+                }
+                _: {}
+            }
+            match method.equals("len") {
+                true: { return irStr.emitStringLen(ctx, recvVal) }
+                _: {}
+            }
+        }
+        _: {}
+    }
+
+    // Array instance methods.
+    match types.isArraySuruType(recvSuruType) {
+        true: {
+            let elemST String: types.elemSuruType(recvSuruType)
+            match method.equals("len")   { true: { return irArr.emitArrayLen(ctx, recvVal) } _: {} }
+            match method.equals("clone") { true: { return irArr.emitArrayClone(ctx, recvVal, elemST) } _: {} }
+            match method.equals("drop")  { true: { return irArr.emitArrayDrop(ctx, recvVal) } _: {} }
+            match method.equals("at") {
+                true: {
+                    let idxR CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: idxR.ctx
+                    let idxRaw String: idxR.name
+                    match box.isScalarType(idxR.suruType) {
+                        true: {}
+                        _: {
+                            let ur CodegenResult: box.unboxInt64(ctx, idxR.name)
+                            ctx: ur.ctx
+                            idxRaw: ur.name
+                        }
+                    }
+                    return irArr.emitArrayAt(ctx, recvVal, idxRaw, elemST)
+                }
+                _: {}
+            }
+            match method.equals("add") {
+                true: {
+                    // Thread elemST so struct literal arguments resolve to the element type,
+                    // not the enclosing function's return type (mirrors C# ResolvedType).
+                    // Save/restore so the mutation doesn't leak to subsequent struct literals.
+                    let savedReturnTypeName String: ctx.currentReturnTypeName
+                    ctx.currentReturnTypeName: elemST
+                    let vr CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: vr.ctx
+                    ctx.currentReturnTypeName: savedReturnTypeName
+                    ctx: irArr.emitArrayAdd(ctx, recvVal, vr.name, elemST)
+                    return { ctx: ctx, name: "0", llvmType: "i1", suruType: "Bool" }
+                }
+                _: {}
+            }
+            match method.equals("set") {
+                true: {
+                    // Thread elemST so struct literal arguments resolve to the element type.
+                    // Save/restore so the mutation doesn't leak to subsequent struct literals.
+                    let savedReturnTypeName String: ctx.currentReturnTypeName
+                    ctx.currentReturnTypeName: elemST
+                    let vr CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: vr.ctx
+                    ctx.currentReturnTypeName: savedReturnTypeName
+                    let ir2 CodegenResult: emitValue(ctx, expr.args.at(1))
+                    ctx: ir2.ctx
+                    let idxRaw String: ir2.name
+                    match box.isScalarType(ir2.suruType) {
+                        true: {}
+                        _: {
+                            let ur CodegenResult: box.unboxInt64(ctx, ir2.name)
+                            ctx: ur.ctx
+                            idxRaw: ur.name
+                        }
+                    }
+                    ctx: irArr.emitArraySet(ctx, recvVal, vr.name, elemST, idxRaw)
+                    return { ctx: ctx, name: "0", llvmType: "i1", suruType: "Bool" }
+                }
+                _: {}
+            }
+            // .slice(from, to) → sub-array via suru_array_slice.
+            // Mirrors C# EmitArraySlice in IRArrayCodeGenerator.
+            match method.equals("slice") {
+                true: {
+                    let s1 CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: s1.ctx
+                    let s2 CodegenResult: emitValue(ctx, expr.args.at(1))
+                    ctx: s2.ctx
+                    let i1r String: s1.name
+                    let i2r String: s2.name
+                    match box.isScalarType(s1.suruType) {
+                        true: {}
+                        _: {
+                            let u CodegenResult: box.unboxInt64(ctx, s1.name)
+                            ctx: u.ctx
+                            i1r: u.name
+                        }
+                    }
+                    match box.isScalarType(s2.suruType) {
+                        true: {}
+                        _: {
+                            let u2 CodegenResult: box.unboxInt64(ctx, s2.name)
+                            ctx: u2.ctx
+                            i2r: u2.name
+                        }
+                    }
+                    return irArr.emitArraySlice(ctx, recvVal, i1r, i2r, elemST)
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+
+    // String instance methods.
+    match recvSuruType.equals("String") {
+        true: {
+            match method.equals("len")    { true: { return irStr.emitStringLen(ctx, recvVal) } _: {} }
+            match method.equals("clone")  { true: { return irStr.emitStringClone(ctx, recvVal) } _: {} }
+            match method.equals("drop")   { true: { return irStr.emitStringDrop(ctx, recvVal) } _: {} }
+            match method.equals("ord")    { true: { return irStr.emitStringOrd(ctx, recvVal) } _: {} }
+            match method.equals("toString") { true: { return { ctx: ctx, name: recvVal, llvmType: "ptr", suruType: "String" } } _: {} }
+            match method.equals("llvmHex") { true: { return irStr.emitFloat64LlvmHex(ctx, recvVal) } _: {} }
+            match method.equals("append") {
+                true: {
+                    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ar.ctx
+                    return irStr.emitStringAppend(ctx, recvVal, ar.name)
+                }
+                _: {}
+            }
+            match method.equals("equals") {
+                true: {
+                    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ar.ctx
+                    return irStr.emitStringEquals(ctx, recvVal, ar.name)
+                }
+                _: {}
+            }
+            match method.equals("at") {
+                true: {
+                    let ir2 CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: ir2.ctx
+                    let idxRaw String: ir2.name
+                    match box.isScalarType(ir2.suruType) {
+                        true: {}
+                        _: {
+                            let ur CodegenResult: box.unboxInt64(ctx, ir2.name)
+                            ctx: ur.ctx
+                            idxRaw: ur.name
+                        }
+                    }
+                    return irStr.emitStringAt(ctx, recvVal, idxRaw)
+                }
+                _: {}
+            }
+            match method.equals("slice") {
+                true: {
+                    let s1 CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: s1.ctx
+                    let s2 CodegenResult: emitValue(ctx, expr.args.at(1))
+                    ctx: s2.ctx
+                    let i1r String: s1.name
+                    let i2r String: s2.name
+                    match box.isScalarType(s1.suruType) {
+                        true: {}
+                        _: {
+                            let u CodegenResult: box.unboxInt64(ctx, s1.name)
+                            ctx: u.ctx
+                            i1r: u.name
+                        }
+                    }
+                    match box.isScalarType(s2.suruType) {
+                        true: {}
+                        _: {
+                            let u2 CodegenResult: box.unboxInt64(ctx, s2.name)
+                            ctx: u2.ctx
+                            i2r: u2.name
+                        }
+                    }
+                    return irStr.emitStringSlice(ctx, recvVal, i1r, i2r)
+                }
+                _: {}
+            }
+            match method.equals("compare") {
+                true: {
+                    let cr CodegenResult: emitValue(ctx, expr.args.at(0))
+                    ctx: cr.ctx
+                    return irStr.emitStringCompare(ctx, recvVal, cr.name)
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+
+    // llvmHex on Float64 receiver — converts a double to LLVM IEEE-754 hex string.
+    // Must be dispatched for Float64 receivers; llvmHex is never called on String.
+    match recvSuruType.equals("Float64") {
+        true: {
+            match method.equals("llvmHex") { true: { return irStr.emitFloat64LlvmHex(ctx, recvVal) } _: {} }
+        }
+        _: {}
+    }
+
+    // toString on Int64/NamedType (struct field returned as i64).
+    match method.equals("toString") {
+        true: {
+            let rawI String: recvVal
+            match box.isScalarType(recvSuruType) {
+                true: {}
+                _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, recvVal)
+                    ctx: ur.ctx
+                    rawI: ur.name
+                }
+            }
+            return irStr.emitInt64ToString(ctx, rawI)
+        }
+        _: {}
+    }
+
+    // Struct clone/drop dispatch.
+    match method.equals("clone") { true: { return irStruct.emitStructClone(ctx, recvVal, recvSuruType) } _: {} }
+    match method.equals("drop")  { true: { return irStruct.emitStructDrop(ctx, recvVal)  } _: {} }
+
+    // invert / compare — arithmetic on receiver.
+    match method.equals("invert")  { true: { return emitInvert(ctx, recvVal, recvSuruType) } _: {} }
+    match method.equals("compare") {
+        true: {
+            let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+            ctx: ar.ctx
+            return emitCompare(ctx, recvVal, recvSuruType, ar.name, ar.suruType)
+        }
+        _: {}
+    }
+
+    // Arithmetic / comparison fallthrough.
+    let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+    ctx: ar.ctx
+    match method.equals("add")      { true: { return emitArith(ctx, "add",  "fadd", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("take")     { true: { return emitArith(ctx, "sub",  "fsub", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("multiply") { true: { return emitArith(ctx, "mul",  "fmul", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("split")    { true: { return emitArith(ctx, "sdiv", "fdiv", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("lt")     { true: { return emitCmpOp(ctx, "slt", "olt", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("gt")     { true: { return emitCmpOp(ctx, "sgt", "ogt", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("lte")    { true: { return emitCmpOp(ctx, "sle", "ole", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("gte")    { true: { return emitCmpOp(ctx, "sge", "oge", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+    match method.equals("equals") { true: { return emitCmpOp(ctx, "eq",  "oeq", recvVal, recvSuruType, ar.name, ar.suruType) } _: {} }
+
+    // Unreachable: unknown method — return dummy value.
+    return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "" }
+}
+
+// ─── [mirrors IRMatchCodeGenerator.cs] ─────────────────────────────────────────
+
+// Narrow the condition variable's suruType to the concrete variant type for the
+// duration of a match arm so field accesses resolve without re-binding.
+// Only narrows when the variable's type is a sum type name.
+// Mirrors C# NarrowCondVar().
+fn narrowCondVar(ctx IrCodegenContext, condVarName String, variantTypeName String) IrCodegenContext {
+    match condVarName.equals("")    { true: { return ctx } _: {} }
+    match variantTypeName.equals("") { true: { return ctx } _: {} }
+    let v VarEntry: types.lookupVar(ctx, condVarName)
+    match v.name.equals("") { true: { return ctx } _: {} }
+    match types.isSumTypeName(ctx, v.suruType) {
+        true: {
+            let narrowed VarEntry: { name: v.name, allocaName: v.allocaName, suruType: variantTypeName }
+            ctx: types.updateVar(ctx, condVarName, narrowed)
+        }
+        _: {}
+    }
+    return ctx
+}
+
+// Restore the condition variable's original VarEntry after a narrowed arm.
+// Mirrors C# RestoreCondVar().
+fn restoreCondVar(ctx IrCodegenContext, condVarName String, original VarEntry) IrCodegenContext {
+    match condVarName.equals("") { true: { return ctx } _: {} }
+    return types.updateVar(ctx, condVarName, original)
+}
+
+// Collect the non-wildcard patterns from a MatchArm array.
+// Returns an array of AstNode patterns (one per non-wildcard arm, in order).
+fn collectPatterns(arms Array<MatchArm>) Array<AstNode> {
+    let pats Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        let arm MatchArm: arms.at(i)
+        match arm.isWildcard { true: {} _: { pats.add(arm.pattern) } }
+        i: i.add(1)
+    }
+    return pats
+}
+
+// Collect the non-wildcard patterns from a MatchStmtArm array.
+fn collectStmtPatterns(arms Array<MatchStmtArm>) Array<AstNode> {
+    let pats Array<AstNode>: []
+    let i Int64: 0
+    while i.lt(arms.len()) {
+        let arm MatchStmtArm: arms.at(i)
+        match arm.isWildcard { true: {} _: { pats.add(arm.pattern) } }
+        i: i.add(1)
+    }
+    return pats
+}
+
+// Emit the comparison chain for a list of non-wildcard patterns.
+// Each pattern gets an icmp/fcmp/strcmp/variant-tag comparison; branches to
+// match_arm_{n}_{i} on success or the next test / missLabel on miss.
+// For sum-type conditions, @suru_variant_tag is called ONCE before the loop.
+// Mirrors C# EmitPatternComparisons().
+fn emitPatternComparisons(ctx IrCodegenContext, condVal String, condSuruType String, patterns Array<AstNode>, hasWildcard Bool, matchN String) IrCodegenContext {
+    let missLabel String: match hasWildcard {
+        true: "match_wildcard_".append(matchN)
+        _:    "match_merge_".append(matchN)
+    }
+    // Detect sum type / variant condition.
+    let isSum Bool: types.isVariant(ctx, condSuruType)
+    match isSum { true: {} _: { match types.isSumTypeName(ctx, condSuruType) { true: { isSum: true } _: {} } } }
+    // rawCond: the value used in comparisons (tag i64 for sum types, condVal otherwise).
+    let rawCond String: condVal
+    match isSum {
+        true: {
+            ctx: types.addSuruDecl(ctx, "declare i64  @suru_variant_tag(ptr)\n")
+            let args Array<String>: []
+            args.add("ptr ".append(condVal))
+            let tr IrResult: ir.emitCall(ctx.builder, "i64", "suru_variant_tag", args)
+            ctx.builder: tr.builder
+            rawCond: tr.name
+        }
+        _: {
+            // NamedType (non-variant) → unbox to i64 for comparison.
+            match box.isScalarType(condSuruType) { true: {} _: {
+                match condSuruType.equals("String") { true: {} _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, condVal)
+                    ctx: ur.ctx
+                    rawCond: ur.name
+                } }
+            } }
+        }
+    }
+
+    let i Int64: 0
+    while i.lt(patterns.len()) {
+        let pat AstNode: patterns.at(i)
+        let iStr String: i.toString()
+        let nextLabel String: match i.add(1).lt(patterns.len()) {
+            true: "match_test_".append(matchN).append("_").append(i.add(1).toString())
+            _:    missLabel
+        }
+        // Pre-allocate comparison result name before emitting operands — mirrors C# cmpTmp = NextTmp().
+        // This ensures the icmp SSA name has a lower number than the operand intermediates,
+        // matching the exact C# IR output order.
+        let preR CodegenResult: box.ctxNextTmp(ctx)
+        ctx: preR.ctx
+        let cmpTmp String: preR.name
+        let cmpVal String: ""
+        match isSum {
+            true: {
+                // Pattern is a VarRefNode naming a variant — never call emitValue.
+                match pat { VarRefNode: {
+                    let parent SumTypeDecl: types.findParentSumType(ctx, pat.name)
+                    let idx Int64: types.variantIdx(parent, pat.name)
+                    ctx.builder: ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = icmp eq i64 ").append(rawCond).append(", ").append(idx.toString()).append("\n"))
+                    cmpVal: cmpTmp
+                } _: {} }
+            }
+            _: {
+                match condSuruType.equals("String") {
+                    true: {
+                        ctx: types.addDecl(ctx, "declare i32 @strcmp(ptr, ptr)\n")
+                        let pr CodegenResult: emitValue(ctx, pat)
+                        ctx: pr.ctx
+                        let d1 CodegenResult: irStr.emitExtractStringData(ctx, rawCond)
+                        ctx: d1.ctx
+                        let d2 CodegenResult: irStr.emitExtractStringData(d1.ctx, pr.name)
+                        ctx: d2.ctx
+                        let args Array<String>: []
+                        args.add("ptr ".append(d1.name))
+                        args.add("ptr ".append(d2.name))
+                        let sr IrResult: ir.emitCall(ctx.builder, "i32", "strcmp", args)
+                        ctx.builder: sr.builder
+                        ctx.builder: ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = icmp eq i32 ").append(sr.name).append(", 0\n"))
+                        cmpVal: cmpTmp
+                    }
+                    _: {
+                        let pr CodegenResult: emitValue(ctx, pat)
+                        ctx: pr.ctx
+                        let eff String: effectiveSuruType(condSuruType)
+                        let rawT String: box.rawLlvmTypeOf(eff)
+                        let patRaw String: pr.name
+                        match box.isScalarType(pr.suruType) { true: {} _: {
+                            let ur CodegenResult: box.unboxInt64(ctx, pr.name)
+                            ctx: ur.ctx
+                            patRaw: ur.name
+                        } }
+                        match eff.equals("Float64") {
+                            true: {
+                                ctx.builder: ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = fcmp oeq double ").append(rawCond).append(", ").append(patRaw).append("\n"))
+                            }
+                            _: {
+                                ctx.builder: ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = icmp eq ").append(rawT).append(" ").append(rawCond).append(", ").append(patRaw).append("\n"))
+                            }
+                        }
+                        cmpVal: cmpTmp
+                    }
+                }
+            }
+        }
+        ctx.builder: ir.emitCondBr(ctx.builder, cmpVal, "match_arm_".append(matchN).append("_").append(iStr), nextLabel)
+        match i.add(1).lt(patterns.len()) {
+            true: { ctx.builder: ir.emitLabel(ctx.builder, "match_test_".append(matchN).append("_").append(i.add(1).toString())) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    match patterns.len().equals(0) {
+        true: { ctx.builder: ir.emitBr(ctx.builder, missLabel) }
+        _: {}
+    }
+    return ctx
+}
+
+// Emit a match-as-expression.  Result alloca MUST be emitted BEFORE the comparison
+// chain (LLVM dominance invariant).  Mirrors C# EmitMatchAsExpression().
+fn emitMatchExpr(ctx IrCodegenContext, node MatchExprNode) CodegenResult {
+    // Peek result type from first non-wildcard arm.
+    let resultSuruType String: "Int64"
+    let i Int64: 0
+    while i.lt(node.arms.len()) {
+        let arm MatchArm: node.arms.at(i)
+        match arm.isWildcard { true: {} _: {
+            let pr CodegenResult: peekTypeNode(ctx, arm.body)
+            resultSuruType: pr.suruType
+            i: node.arms.len()
+        } }
+        i: i.add(1)
+    }
+    let resultLlvm String: box.llvmTypeOf(resultSuruType)
+
+    // Alloca BEFORE test chain — dominates all arm blocks.
+    let mnR IrResult: ir.nextLabelNum(ctx.builder)
+    ctx.builder: mnR.builder
+    let matchN String: mnR.name
+    let resultAlloca String: "match_result_".append(matchN)
+    ctx.builder: ir.emitFixedAlloca(ctx.builder, resultAlloca, resultLlvm)
+
+    // Emit comparison chain.
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    let patterns Array<AstNode>: collectPatterns(node.arms)
+    let hasWild Bool: false
+    let j Int64: 0
+    while j.lt(node.arms.len()) { match node.arms.at(j).isWildcard { true: { hasWild: true } _: {} } j: j.add(1) }
+    ctx: emitPatternComparisons(ctx, condR.name, condR.suruType, patterns, hasWild, matchN)
+
+    // Emit arm bodies — store result + branch to merge.
+    let condVarName String: ""
+    let condExpr AstNode: node.condition
+    match condExpr { VarRefNode: { condVarName: condExpr.name } _: {} }
+    let patIdx Int64: 0
+    let k Int64: 0
+    while k.lt(node.arms.len()) {
+        let arm MatchArm: node.arms.at(k)
+        match arm.isWildcard {
+            true: {
+                ctx.builder: ir.emitLabel(ctx.builder, "match_wildcard_".append(matchN))
+                let armR CodegenResult: emitValue(ctx, arm.body)
+                ctx: armR.ctx
+                ctx.builder: ir.emitStore(ctx.builder, resultLlvm, armR.name, "%".append(resultAlloca))
+                ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN))
+            }
+            _: {
+                // Narrow condition var for variant arms.
+                let origEntry VarEntry: types.lookupVar(ctx, condVarName)
+                let variantName String: ""
+                let patNode AstNode: arm.pattern
+                match patNode { VarRefNode: { variantName: patNode.name } _: {} }
+                ctx: narrowCondVar(ctx, condVarName, variantName)
+                ctx.builder: ir.emitLabel(ctx.builder, "match_arm_".append(matchN).append("_").append(patIdx.toString()))
+                let armR CodegenResult: emitValue(ctx, arm.body)
+                ctx: armR.ctx
+                ctx: restoreCondVar(ctx, condVarName, origEntry)
+                ctx.builder: ir.emitStore(ctx.builder, resultLlvm, armR.name, "%".append(resultAlloca))
+                ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN))
+                patIdx: patIdx.add(1)
+            }
+        }
+        k: k.add(1)
+    }
+
+    ctx.builder: ir.emitLabel(ctx.builder, "match_merge_".append(matchN))
+    let loadR IrResult: ir.emitLoad(ctx.builder, resultLlvm, "%".append(resultAlloca))
+    ctx.builder: loadR.builder
+    return { ctx: ctx, name: loadR.name, llvmType: resultLlvm, suruType: resultSuruType }
+}
+
+// Emit a MatchExprNode used as a statement (side-effects only, no result stored).
+// Mirrors C# EmitMatchAsStatement().
+fn emitMatchExprAsStmt(ctx IrCodegenContext, node MatchExprNode) IrCodegenContext {
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    let patterns Array<AstNode>: collectPatterns(node.arms)
+    let hasWild Bool: false
+    let j Int64: 0
+    while j.lt(node.arms.len()) { match node.arms.at(j).isWildcard { true: { hasWild: true } _: {} } j: j.add(1) }
+    let mnR IrResult: ir.nextLabelNum(ctx.builder)
+    ctx.builder: mnR.builder
+    let matchN String: mnR.name
+    ctx: emitPatternComparisons(ctx, condR.name, condR.suruType, patterns, hasWild, matchN)
+    let condVarName String: ""
+    let condExpr AstNode: node.condition
+    match condExpr { VarRefNode: { condVarName: condExpr.name } _: {} }
+    let patIdx Int64: 0
+    let k Int64: 0
+    while k.lt(node.arms.len()) {
+        let arm MatchArm: node.arms.at(k)
+        match arm.isWildcard {
+            true: {
+                ctx.builder: ir.emitLabel(ctx.builder, "match_wildcard_".append(matchN))
+                let sr CodegenResult: emitValue(ctx, arm.body)
+                ctx: sr.ctx
+                ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN))
+            }
+            _: {
+                let origEntry VarEntry: types.lookupVar(ctx, condVarName)
+                let variantName String: ""
+                let patNode AstNode: arm.pattern
+                match patNode { VarRefNode: { variantName: patNode.name } _: {} }
+                ctx: narrowCondVar(ctx, condVarName, variantName)
+                ctx.builder: ir.emitLabel(ctx.builder, "match_arm_".append(matchN).append("_").append(patIdx.toString()))
+                let sr CodegenResult: emitValue(ctx, arm.body)
+                ctx: sr.ctx
+                ctx: restoreCondVar(ctx, condVarName, origEntry)
+                ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN))
+                patIdx: patIdx.add(1)
+            }
+        }
+        k: k.add(1)
+    }
+    ctx.builder: ir.emitLabel(ctx.builder, "match_merge_".append(matchN))
+    return ctx
+}
+
+// Emit a MatchStatement (block-body arms, IReadOnlyList<Statement> per arm).
+// _blockOpen is checked before each merge branch so arms ending with ret/exit
+// don't produce a double-terminator.  Mirrors C# EmitMatchStatement().
+fn emitMatchStmt(ctx IrCodegenContext, node MatchStmtNode) IrCodegenContext {
+    let condR CodegenResult: emitValue(ctx, node.condition)
+    ctx: condR.ctx
+    let patterns Array<AstNode>: collectStmtPatterns(node.arms)
+    let hasWild Bool: false
+    let j Int64: 0
+    while j.lt(node.arms.len()) { match node.arms.at(j).isWildcard { true: { hasWild: true } _: {} } j: j.add(1) }
+    let mnR IrResult: ir.nextLabelNum(ctx.builder)
+    ctx.builder: mnR.builder
+    let matchN String: mnR.name
+    ctx: emitPatternComparisons(ctx, condR.name, condR.suruType, patterns, hasWild, matchN)
+    let condVarName String: ""
+    let condExpr AstNode: node.condition
+    match condExpr { VarRefNode: { condVarName: condExpr.name } _: {} }
+    // Emit pattern arms.
+    let patIdx Int64: 0
+    let k Int64: 0
+    while k.lt(node.arms.len()) {
+        let arm MatchStmtArm: node.arms.at(k)
+        match arm.isWildcard {
+            true: {}
+            _: {
+                let origEntry VarEntry: types.lookupVar(ctx, condVarName)
+                let variantName String: ""
+                let patNode AstNode: arm.pattern
+                match patNode { VarRefNode: { variantName: patNode.name } _: {} }
+                ctx: narrowCondVar(ctx, condVarName, variantName)
+                ctx.builder: ir.emitLabel(ctx.builder, "match_arm_".append(matchN).append("_").append(patIdx.toString()))
+                ctx.blockOpen: true
+                ctx: emitStmts(ctx, arm.stmts)
+                ctx: restoreCondVar(ctx, condVarName, origEntry)
+                match ctx.blockOpen {
+                    true: { ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN)) }
+                    _: {}
+                }
+                patIdx: patIdx.add(1)
+            }
+        }
+        k: k.add(1)
+    }
+    // Wildcard arm (or synthetic empty arm when no wildcard).
+    ctx.builder: ir.emitLabel(ctx.builder, "match_wildcard_".append(matchN))
+    ctx.blockOpen: true
+    match hasWild {
+        true: {
+            let wi Int64: 0
+            while wi.lt(node.arms.len()) {
+                let wArm MatchStmtArm: node.arms.at(wi)
+                match wArm.isWildcard {
+                    true: { ctx: emitStmts(ctx, wArm.stmts) }
+                    _: {}
+                }
+                wi: wi.add(1)
+            }
+        }
+        _: {}
+    }
+    match ctx.blockOpen {
+        true: { ctx.builder: ir.emitBr(ctx.builder, "match_merge_".append(matchN)) }
+        _: {}
+    }
+    ctx.builder: ir.emitLabel(ctx.builder, "match_merge_".append(matchN))
+    ctx.blockOpen: true
+    return ctx
+}
+
+// ─── [mirrors IRFunctionCodeGenerator.cs] ──────────────────────────────────────
+
+// Emit a while loop: three labeled blocks (cond/body/after).
+// Mirrors C# WhileStatement case in EmitStmt().
+fn emitWhile(ctx IrCodegenContext, condition AstNode, body Array<AstNode>) IrCodegenContext {
+    let wnR IrResult: ir.nextWhileNum(ctx.builder)
+    ctx.builder: wnR.builder
+    let wn String: wnR.name
+    ctx.builder: ir.emitBr(ctx.builder, "while_cond_".append(wn))
+    ctx.builder: ir.emitLabel(ctx.builder, "while_cond_".append(wn))
+    let condR CodegenResult: emitValue(ctx, condition)
+    ctx: condR.ctx
+    let condI1 String: condR.name
+    match box.isScalarType(condR.suruType) { true: {} _: {
+        let ur CodegenResult: box.unboxBool(ctx, condR.name)
+        ctx: ur.ctx
+        condI1: ur.name
+    } }
+    ctx.builder: ir.emitCondBr(ctx.builder, condI1, "while_body_".append(wn), "while_after_".append(wn))
+    ctx.builder: ir.emitLabel(ctx.builder, "while_body_".append(wn))
+    ctx: emitStmts(ctx, body)
+    match ctx.blockOpen {
+        true: { ctx.builder: ir.emitBr(ctx.builder, "while_cond_".append(wn)) }
+        _: {}
+    }
+    ctx.builder: ir.emitLabel(ctx.builder, "while_after_".append(wn))
+    ctx.blockOpen: true
+    return ctx
+}
+
+// Emit a single statement.  Mirrors C# EmitStmt().
+fn emitStmt(ctx IrCodegenContext, stmt AstNode) IrCodegenContext {
+    match stmt {
+        MatchStmtNode: { return emitMatchStmt(ctx, stmt) }
+        WhileNode:     { return emitWhile(ctx, stmt.condition, stmt.body) }
+        ReturnNode: {
+            let retVal String: box.defaultReturnValue(ctx.currentReturnSuruType)
+            match stmt.hasValue {
+                true: {
+                    // Struct literal return: thread the declared return type name.
+                    let retValueNode AstNode: stmt.value
+                    match retValueNode {
+                        StructLitNode: {
+                            let sr CodegenResult: emitStructLit(ctx, retValueNode.fields, ctx.currentReturnTypeName)
+                            ctx: sr.ctx
+                            retVal: sr.name
+                        }
+                        _: {
+                            let vr CodegenResult: emitValue(ctx, retValueNode)
+                            ctx: vr.ctx
+                            let rawRet String: vr.name
+                            // Coerce dynamic ptr to scalar if function return type is scalar.
+                            match box.isScalarType(ctx.currentReturnSuruType) {
+                                true: {
+                                    match box.isScalarType(vr.suruType) { true: {} _: {
+                                        let ur CodegenResult: box.unboxScalar(ctx, vr.name, ctx.currentReturnSuruType)
+                                        ctx: ur.ctx
+                                        rawRet: ur.name
+                                    } }
+                                }
+                                _: {}
+                            }
+                            retVal: rawRet
+                        }
+                    }
+                }
+                _: {}
+            }
+            ctx.builder: ir.emitRet(ctx.builder, ctx.currentReturnLlvmType, retVal)
+            ctx.blockOpen: false
+            return ctx
+        }
+        LetNode: {
+            let annSuruType String: types.makeSuruType(stmt.typeName)
+            let annLlvm String: box.llvmTypeOf(annSuruType)
+            // Struct literal let: thread type annotation name into emitStructLit.
+            let letValueNode AstNode: stmt.value
+            match letValueNode {
+                ArrayLitNode: {
+                    // Empty array literal: use annotation element type (not default Int64).
+                    // Mirrors C# semantic propagation of ResolvedType from let annotation.
+                    match letValueNode.elems.len().equals(0) {
+                        true: {
+                            let elemSuruType String: types.elemSuruType(annSuruType)
+                            let ar CodegenResult: emitArrayLit(ctx, letValueNode.elems, elemSuruType)
+                            ctx: ar.ctx
+                            let arrPtr String: ar.name
+                            let ptrR IrResult: ir.emitNamedAlloca(ctx.builder, stmt.name, "ptr")
+                            ctx.builder: ptrR.builder
+                            ctx.builder: ir.emitStore(ctx.builder, "ptr", arrPtr, ptrR.name)
+                            ctx: types.addVar(ctx, stmt.name, ptrR.name, ar.suruType)
+                            return ctx
+                        }
+                        _: {}
+                    }
+                }
+                StructLitNode: {
+                    let sr CodegenResult: emitStructLit(ctx, letValueNode.fields, stmt.typeName)
+                    ctx: sr.ctx
+                    let structVal String: sr.name
+                    // Tag variant in-place (type_tag=7, variant_idx) when annotation names a variant.
+                    match types.isVariant(ctx, stmt.typeName) {
+                        true: {
+                            let parent SumTypeDecl: types.findParentSumType(ctx, stmt.typeName)
+                            let idx Int64: types.variantIdx(parent, stmt.typeName)
+                            // C# emits "{tagGep}  = getelementptr" (double space) for i64 0 GEP,
+                            // "{vidxGep} = getelementptr" (single space) for i64 8 GEP.
+                            let tgNameR IrResult: ir.nextTmp(ctx.builder)
+                            ctx.builder: tgNameR.builder
+                            let tgLine String: "  ".append(tgNameR.name).append("  = getelementptr i8, ptr ").append(structVal).append(", i64 0\n")
+                            ctx.builder: ir.emit(ctx.builder, tgLine)
+                            ctx.builder: ir.emitStore(ctx.builder, "i64", "7", tgNameR.name)
+                            let viR IrResult: ir.emitGEP(ctx.builder, "i8", structVal, "i64 8")
+                            ctx.builder: viR.builder
+                            ctx.builder: ir.emitStore(ctx.builder, "i64", idx.toString(), viR.name)
+                        }
+                        _: {}
+                    }
+                    let ptrR IrResult: ir.emitNamedAlloca(ctx.builder, stmt.name, "ptr")
+                    ctx.builder: ptrR.builder
+                    ctx.builder: ir.emitStore(ctx.builder, "ptr", structVal, ptrR.name)
+                    ctx: types.addVar(ctx, stmt.name, ptrR.name, stmt.typeName)
+                    return ctx
+                }
+                _: {}
+            }
+            // General let: emit value, optionally coerce, alloca, store.
+            let vr CodegenResult: emitValue(ctx, letValueNode)
+            ctx: vr.ctx
+            let letVal String: vr.name
+            let letType String: vr.suruType
+            // Annotation-guided unbox: `let x Int64: arr.at(0)` returns (ptr, NamedType).
+            match box.isScalarType(annSuruType) {
+                true: {
+                    match box.isScalarType(vr.suruType) { true: {} _: {
+                        let ur CodegenResult: box.unboxScalar(ctx, vr.name, annSuruType)
+                        ctx: ur.ctx
+                        letVal: ur.name
+                        letType: annSuruType
+                    } }
+                }
+                _: {}
+            }
+            let ptrR IrResult: ir.emitNamedAlloca(ctx.builder, stmt.name, annLlvm)
+            ctx.builder: ptrR.builder
+            ctx.builder: ir.emitStore(ctx.builder, annLlvm, letVal, ptrR.name)
+            ctx: types.addVar(ctx, stmt.name, ptrR.name, annSuruType)
+            return ctx
+        }
+        AssignNode: {
+            let v VarEntry: types.lookupVar(ctx, stmt.name)
+            let assignVal String: ""
+            let assignLlvm String: box.llvmTypeOf(v.suruType)
+            // Struct literal assignment.
+            let assignValueNode AstNode: stmt.value
+            match assignValueNode {
+                StructLitNode: {
+                    let sr CodegenResult: emitStructLit(ctx, assignValueNode.fields, v.suruType)
+                    ctx: sr.ctx
+                    assignVal: sr.name
+                }
+                _: {
+                    let vr CodegenResult: emitValue(ctx, assignValueNode)
+                    ctx: vr.ctx
+                    assignVal: vr.name
+                    match box.isScalarType(v.suruType) {
+                        true: {
+                            match box.isScalarType(vr.suruType) { true: {} _: {
+                                let ur CodegenResult: box.unboxScalar(ctx, vr.name, v.suruType)
+                                ctx: ur.ctx
+                                assignVal: ur.name
+                            } }
+                        }
+                        _: {}
+                    }
+                }
+            }
+            ctx.builder: ir.emitStore(ctx.builder, assignLlvm, assignVal, v.allocaName)
+            return ctx
+        }
+        FieldAssignNode: {
+            let recvR CodegenResult: emitValue(ctx, stmt.receiver)
+            ctx: recvR.ctx
+            let valR CodegenResult: emitValue(ctx, stmt.value)
+            ctx: valR.ctx
+            ctx: irStruct.emitFieldAssignment(ctx, recvR.name, recvR.suruType, stmt.fieldName, valR.name, valR.suruType)
+            return ctx
+        }
+        ExprStmtNode: {
+            let expr AstNode: stmt.expr
+            match expr {
+                MatchExprNode: { return emitMatchExprAsStmt(ctx, expr) }
+                CallNode: {
+                    // printLn
+                    match expr.name.equals("printLn") {
+                        true: {
+                            let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                            ctx: ar.ctx
+                            ctx: types.addSuruDecl(ctx, "declare void @suru_println(ptr)\n")
+                            let printPtr String: ar.name
+                            match box.isScalarType(ar.suruType) {
+                                true: {
+                                    let br CodegenResult: box.boxValue(ctx, ar.name, ar.suruType)
+                                    ctx: br.ctx
+                                    printPtr: br.name
+                                }
+                                _: {}
+                            }
+                            let args Array<String>: []
+                            args.add("ptr ".append(printPtr))
+                            ctx.builder: ir.emitVoidCall(ctx.builder, "suru_println", args)
+                            return ctx
+                        }
+                        _: {}
+                    }
+                    // printError
+                    match expr.name.equals("printError") {
+                        true: {
+                            let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                            ctx: ar.ctx
+                            ctx: types.addSuruDecl(ctx, "declare void @suru_printerror(ptr)\n")
+                            let errPtr String: ar.name
+                            match box.isScalarType(ar.suruType) {
+                                true: {
+                                    let br CodegenResult: box.boxValue(ctx, ar.name, ar.suruType)
+                                    ctx: br.ctx
+                                    errPtr: br.name
+                                }
+                                _: {}
+                            }
+                            let args Array<String>: []
+                            args.add("ptr ".append(errPtr))
+                            ctx.builder: ir.emitVoidCall(ctx.builder, "suru_printerror", args)
+                            return ctx
+                        }
+                        _: {}
+                    }
+                    // exit(code)
+                    match expr.name.equals("exit") {
+                        true: {
+                            ctx: types.addDecl(ctx, "declare void @exit(i32) noreturn\n")
+                            let ar CodegenResult: emitValue(ctx, expr.args.at(0))
+                            ctx: ar.ctx
+                            let codeI32 String: ar.name
+                            match ar.suruType.equals("Int32") { true: {} _: {
+                                match box.isScalarType(ar.suruType) {
+                                    true: {
+                                        let tr IrResult: ir.emitTrunc(ctx.builder, "i64", ar.name, "i32")
+                                        ctx.builder: tr.builder
+                                        codeI32: tr.name
+                                    }
+                                    _: {
+                                        let ur CodegenResult: box.unboxInt64(ctx, ar.name)
+                                        ctx: ur.ctx
+                                        let tr IrResult: ir.emitTrunc(ctx.builder, "i64", ur.name, "i32")
+                                        ctx.builder: tr.builder
+                                        codeI32: tr.name
+                                    }
+                                }
+                            } }
+                            let args Array<String>: []
+                            args.add("i32 ".append(codeI32))
+                            ctx.builder: ir.emitVoidCall(ctx.builder, "exit", args)
+                            ctx.builder: ir.emitUnreachable(ctx.builder)
+                            let tnR CodegenResult: box.ctxNextTmp(ctx)
+                            ctx: tnR.ctx
+                            // Dead block label: matches C# "dead_{_tmp}" which uses just the number.
+                            // tnR.name = "%tN"; slice(2,…) strips "%t" leaving "N".
+                            ctx.builder: ir.emitLabel(ctx.builder, "dead_".append(tnR.name.slice(2, tnR.name.len())))
+                            ctx.blockOpen: true
+                            return ctx
+                        }
+                        _: {}
+                    }
+                    // writeFile — emit path, extract path data, THEN emit content.
+                    // Mirrors C# EmitWriteFile which calls EmitExtractStringData(pathSeq)
+                    // before EmitValue(contentArg) so path GEPs have lower SSA numbers.
+                    match expr.name.equals("writeFile") {
+                        true: {
+                            let pr CodegenResult: emitValue(ctx, expr.args.at(0))
+                            ctx: pr.ctx
+                            let pathDataR CodegenResult: irFile.extractStringData(ctx, pr.name)
+                            ctx: pathDataR.ctx
+                            let cr CodegenResult: emitValue(ctx, expr.args.at(1))
+                            ctx: cr.ctx
+                            ctx: irFile.emitWriteFile(ctx, pathDataR.name, cr.name)
+                            return ctx
+                        }
+                        _: {}
+                    }
+                    // appendToFile — same path-first ordering as writeFile.
+                    match expr.name.equals("appendToFile") {
+                        true: {
+                            let pr CodegenResult: emitValue(ctx, expr.args.at(0))
+                            ctx: pr.ctx
+                            let pathDataR CodegenResult: irFile.extractStringData(ctx, pr.name)
+                            ctx: pathDataR.ctx
+                            let cr CodegenResult: emitValue(ctx, expr.args.at(1))
+                            ctx: cr.ctx
+                            ctx: irFile.emitAppendToFile(ctx, pathDataR.name, cr.name)
+                            return ctx
+                        }
+                        _: {}
+                    }
+                    // Discard result of other call expressions.
+                    let sr CodegenResult: emitValue(ctx, expr)
+                    return sr.ctx
+                }
+                _: {
+                    let sr CodegenResult: emitValue(ctx, expr)
+                    return sr.ctx
+                }
+            }
+        }
+        _: { return ctx }
+    }
+}
+
+// Emit a sequence of statements, threading context through.
+fn emitStmts(ctx IrCodegenContext, stmts Array<AstNode>) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        ctx: emitStmt(ctx, stmts.at(i))
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Emit a function definition or declare stub (for external/included functions).
+// Resets per-function state.  Mirrors C# EmitFunction().
+fn emitFunction(ctx IrCodegenContext, fnDecl FnDeclNode) IrCodegenContext {
+    // External (included) function → emit declare stub only.
+    match types.isOwnFn(ctx, fnDecl.name) {
+        true: {}
+        _: {
+            let retSuru String: types.makeSuruType(fnDecl.returnType)
+            let retLlvm String: match fnDecl.returnType.equals("void") { true: "void", _: box.llvmTypeOf(retSuru) }
+            let paramParts Array<String>: []
+            let i Int64: 0
+            while i.lt(fnDecl.params.len()) {
+                paramParts.add(box.llvmTypeOf(types.makeSuruType(fnDecl.params.at(i).typeName)))
+                i: i.add(1)
+            }
+            ctx.fns: ctx.fns.append("declare ").append(retLlvm).append(" @").append(fnDecl.name).append("(").append(ir.joinArgs(paramParts)).append(")\n")
+            return ctx
+        }
+    }
+
+    // Reset per-function state, preserving the SSA counter across functions.
+    // C# shares a single _tmp counter across all functions; ir.freshFnBuilder
+    // carries the current tmpCount into the new builder so SSA names match.
+    let freshVars Array<VarEntry>: []
+    let freshArgv Array<String>: []
+    ctx.vars: freshVars
+    ctx.argvVars: freshArgv
+    ctx.blockOpen: true
+    ctx.builder: ir.freshFnBuilder(ctx.builder)
+
+    // main → suru_main(ptr %args) i64
+    match fnDecl.name.equals("main") {
+        true: {
+            ctx.currentReturnLlvmType: "i64"
+            ctx.currentReturnSuruType: "Int64"
+            ctx.currentReturnTypeName: ""
+            ctx.builder: ir.emitFnStart(ctx.builder, "internal i64", "suru_main", "ptr %args")
+            ctx.builder: ir.emitFixedAlloca(ctx.builder, "args.addr", "ptr")
+            ctx.builder: ir.emitStore(ctx.builder, "ptr", "%args", "%args.addr")
+            ctx: types.addVar(ctx, "args", "%args.addr", "Array:String")
+            ctx.argvVars.add("args")
+        }
+        _: {
+            let retSuru String: types.makeSuruType(fnDecl.returnType)
+            let retLlvm String: match fnDecl.returnType.equals("void") { true: "ptr", _: box.llvmTypeOf(retSuru) }
+            ctx.currentReturnLlvmType: retLlvm
+            ctx.currentReturnSuruType: retSuru
+            ctx.currentReturnTypeName: fnDecl.returnType
+            let paramParts Array<String>: []
+            let i Int64: 0
+            while i.lt(fnDecl.params.len()) {
+                let p Param: fnDecl.params.at(i)
+                paramParts.add(box.llvmTypeOf(types.makeSuruType(p.typeName)).append(" %p.").append(p.name))
+                i: i.add(1)
+            }
+            ctx.builder: ir.emitFnStart(ctx.builder, retLlvm, fnDecl.name, ir.joinArgs(paramParts))
+            let j Int64: 0
+            while j.lt(fnDecl.params.len()) {
+                let p Param: fnDecl.params.at(j)
+                let pSuru String: types.makeSuruType(p.typeName)
+                let pLlvm String: box.llvmTypeOf(pSuru)
+                let allocName String: "%".append(p.name).append(".addr")
+                ctx.builder: ir.emitFixedAlloca(ctx.builder, p.name.append(".addr"), pLlvm)
+                ctx.builder: ir.emitStore(ctx.builder, pLlvm, "%p.".append(p.name), allocName)
+                ctx: types.addVar(ctx, p.name, allocName, pSuru)
+                j: j.add(1)
+            }
+        }
+    }
+
+    ctx: emitStmts(ctx, fnDecl.body)
+
+    // Implicit return / fallback unreachable.
+    match ctx.blockOpen {
+        true: {
+            match fnDecl.name.equals("main") {
+                true: { ctx.builder: ir.emitRet(ctx.builder, "i64", "0") }
+                _: {
+                    match ctx.currentReturnSuruType.equals("void") {
+                        true: { ctx.builder: ir.emitRet(ctx.builder, "ptr", "null") }
+                        _:    { ctx.builder: ir.emitRet(ctx.builder, ctx.currentReturnLlvmType, box.defaultReturnValue(ctx.currentReturnSuruType)) }
+                    }
+                }
+            }
+        }
+        _: {}
+    }
+    ctx.builder: ir.emitFnEnd(ctx.builder)
+
+    // Flush builder to ctx.fns; reset output but preserve SSA counter for next function.
+    ctx.fns: ctx.fns.append(ctx.builder.output)
+    ctx.builder: ir.freshFnBuilder(ctx.builder)
+    ctx.currentReturnTypeName: ""
+    return ctx
+}
+
+// Emit the @main C entry point that wraps @suru_main.
+// Mirrors C# EmitMainWrapper().
+fn emitMainWrapper(ctx IrCodegenContext) IrCodegenContext {
+    let out String: "define i32 @main(i32 %argc, ptr %argv) {\n"
+        .append("entry:\n")
+        .append("  %seq      = call ptr @malloc(i64 24)\n")
+        .append("  %tag_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 0\n")
+        .append("  store i64 6, ptr %tag_gep\n")
+        .append("  %len_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 1\n")
+        .append("  %argc64   = sext i32 %argc to i64\n")
+        .append("  store i64 %argc64, ptr %len_gep\n")
+        .append("  %data_gep = getelementptr %suru.String, ptr %seq, i32 0, i32 2\n")
+        .append("  store ptr %argv, ptr %data_gep\n")
+        .append("  %suru_ret = call i64 @suru_main(ptr %seq)\n")
+        .append("  %ret32    = trunc i64 %suru_ret to i32\n")
+        .append("  ret i32 %ret32\n")
+        .append("}\n")
+    ctx.fns: ctx.fns.append(out)
+    return ctx
+}
+
+// ─── [mirrors IRCodeGenerator.Emit() / Generate()] ─────────────────────────────
+
+// Full module emit: run pre-passes, emit all type clone/drop helpers, emit all
+// function bodies.  Mirrors C# IRCodeGenerator.Emit().
+fn emitModule(ctx IrCodegenContext, stmts Array<AstNode>) IrCodegenContext {
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    ctx: types.addDecl(ctx, "declare void @free(ptr)\n")
+    ctx: registerTypes(ctx, stmts)
+    ctx: registerConstants(ctx, stmts)
+    ctx: registerFunctions(ctx, stmts)
+    ctx: irCD.emitAllTypeCloneDrop(ctx)
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            FnDeclNode: { ctx: emitFunction(ctx, s) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    // Emit @main wrapper when module has a `main` function.
+    let hasMain Bool: false
+    let j Int64: 0
+    while j.lt(stmts.len()) {
+        let s AstNode: stmts.at(j)
+        match s { FnDeclNode: { match s.name.equals("main") { true: { hasMain: true } _: {} } } _: {} }
+        j: j.add(1)
+    }
+    match hasMain { true: { ctx: emitMainWrapper(ctx) } _: {} }
+    return ctx
+}
+
+// Insertion-sort an Array<String> alphabetically and return the sorted copy.
+// Mirrors C# _externalTypeCloneDrop.OrderBy(x => x) in IRCodeGenerator.Emit().
+fn sortStrings(arr Array<String>) Array<String> {
+    let result Array<String>: []
+    let i Int64: 0
+    while i.lt(arr.len()) {
+        result.add(arr.at(i))
+        i: i.add(1)
+    }
+    let n Int64: result.len()
+    let outer Int64: 1
+    while outer.lt(n) {
+        let key String: result.at(outer)
+        let j Int64: outer.take(1)
+        let go Bool: j.gte(0)
+        while go {
+            match result.at(j).compare(key).gt(0) {
+                true: {
+                    result.set(result.at(j), j.add(1))
+                    j: j.take(1)
+                    go: j.gte(0)
+                }
+                _: { go: false }
+            }
+        }
+        result.set(key, j.add(1))
+        outer: outer.add(1)
+    }
+    return result
+}
+
+// Top-level entry point: initialise context, run emit(), assemble .ll text.
+// ownFnNames: names of functions defined in THIS file (not from includes).
+// Mirrors C# IRCodeGenerator.Generate(module, sourceName).
+fn generate(stmts Array<AstNode>, sourceName String, ownFnNames Array<String>, ownTypeNames Array<String>) String {
+    let ctx IrCodegenContext: types.makeIrContext()
+    ctx.ownFnNames: ownFnNames
+    ctx.ownTypeNames: ownTypeNames
+
+    // Register external function signatures for namespace calls.
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            FnDeclNode: {
+                match types.isOwnFn(ctx, s.name) {
+                    true: {}
+                    _: {
+                        let retSuru String: types.makeSuruType(s.returnType)
+                        let retLlvm String: match s.returnType.equals("void") { true: "ptr", _: box.llvmTypeOf(retSuru) }
+                        let paramTypes Array<String>: []
+                        let j Int64: 0
+                        while j.lt(s.params.len()) {
+                            paramTypes.add(types.makeSuruType(s.params.at(j).typeName))
+                            j: j.add(1)
+                        }
+                        let fnEnt FnEntry: { name: s.name, returnLlvmType: retLlvm, returnSuruType: retSuru, paramSuruTypes: paramTypes }
+                        ctx: types.addFn(ctx, fnEnt)
+                    }
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+
+    ctx: emitModule(ctx, stmts)
+
+    // Assemble output: header | globalConstants | strGlobals | decls | suruDecls |
+    //                  extCloneDropDecls | helpers | fns
+    // Mirrors C# Emit() Pass 2 assembly.
+    let header String: "; ModuleID = '"
+        .append(sourceName).append("'\n")
+        .append("source_filename = \"").append(sourceName).append("\"\n")
+        .append("\n")
+        .append("%suru.String = type { i64, i64, ptr }\n")
+        .append("%suru.Array  = type { i64, i64, i64, i64, ptr }\n")
+        .append("%suru.Box    = type { i64, i64 }\n")
+        .append("\n")
+    let globalConsts String: emitGlobalConstants(ctx, stmts)
+    // Blank-line separators mirror C# Emit():
+    //   sep1 — after globalVars (if any)
+    //   sep2 — after user string literals (if any); NOT after mode/format globals
+    //   sep3 — after extCloneDropDecls (if any)
+    // ctx.strGlobals holds mode/format/bool strings (C# _boolStringGlobals, no blank).
+    // ctx.strLiterals holds user Suru string literal globals (C# _stringLiterals, blank if non-empty).
+    let sep1 String: ""
+    match globalConsts.len().equals(0) { true: {} _: { sep1: "\n" } }
+    let sep2 String: ""
+    match ctx.strLiterals.len().equals(0) { true: {} _: { sep2: "\n" } }
+    // Build extCloneDropDecls from sorted type names — mirrors C#'s
+    // _externalTypeCloneDrop.OrderBy(x => x) which sorts alphabetically.
+    let sortedNames Array<String>: sortStrings(ctx.extCloneDropTypeNames)
+    let extCloneDropDecls String: ""
+    let ei Int64: 0
+    while ei.lt(sortedNames.len()) {
+        let tn String: sortedNames.at(ei)
+        extCloneDropDecls: extCloneDropDecls
+            .append("declare ptr  @suru_clone_").append(tn).append("(ptr)\n")
+            .append("declare void @suru_drop_").append(tn).append("(ptr)\n")
+        ei: ei.add(1)
+    }
+    let sep3 String: ""
+    match extCloneDropDecls.len().equals(0) { true: {} _: { sep3: "\n" } }
+    return header
+        .append(globalConsts)
+        .append(sep1)
+        .append(ctx.strGlobals)
+        .append(ctx.strLiterals)
+        .append(sep2)
+        .append(ctx.decls)
+        .append(ctx.suruDecls)
+        .append(extCloneDropDecls)
+        .append(sep3)
+        .append(ctx.helpers)
+        .append(ctx.fns)
+}

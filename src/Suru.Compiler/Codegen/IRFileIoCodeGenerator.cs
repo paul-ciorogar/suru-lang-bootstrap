@@ -86,4 +86,24 @@ public sealed partial class IRCodeGenerator
         _externals.AddFclose();
         _funcs.AppendLine($"  call i32 @fclose(ptr {file})");
     }
+
+    private void EmitAppendToFile(Expression pathArg, Expression contentArg)
+    {
+        var (pathSeq, _)    = EmitValue(pathArg);
+        var pathData        = EmitExtractStringData(pathSeq);
+        var (contentSeq, _) = EmitValue(contentArg);
+        var contentLen      = EmitExtractStringLen(contentSeq);
+        var contentData     = EmitExtractStringData(contentSeq);
+
+        _externals.AddFopen();
+        _boolStringGlobals.AddModeA();
+        var file = NextTmp();
+        _funcs.AppendLine($"  {file} = call ptr @fopen(ptr {pathData}, ptr @.mode_a)");
+
+        _externals.AddFwrite();
+        _funcs.AppendLine($"  call i64 @fwrite(ptr {contentData}, i64 1, i64 {contentLen}, ptr {file})");
+
+        _externals.AddFclose();
+        _funcs.AppendLine($"  call i32 @fclose(ptr {file})");
+    }
 }

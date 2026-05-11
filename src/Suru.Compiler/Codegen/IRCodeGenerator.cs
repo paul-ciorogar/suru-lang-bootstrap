@@ -283,6 +283,8 @@ public sealed partial class IRCodeGenerator
             return EmitInt32StaticMethod(m.MethodName, m.Args);
         if (m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int64 })
             return EmitInt64StaticMethod(m.MethodName, m.Args);
+        if (m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Float64 })
+            return EmitFloat64StaticMethod(m.MethodName, m.Args);
 
         var (recvVal, recvType) = EmitValue(m.Receiver);
 
@@ -323,15 +325,18 @@ public sealed partial class IRCodeGenerator
         if (recvType is SuruType.StringType)
             return m.MethodName switch
             {
-                "len"    => EmitStringLen(recvVal),
-                "append" => EmitStringAppend(recvVal, m.Args[0]),
-                "at"     => EmitStringAt(recvVal, m.Args[0]),
-                "equals" => EmitStringEquals(recvVal, m.Args[0]),
-                "slice"  => EmitStringSlice(recvVal, m.Args[0], m.Args[1]),
-                "ord"    => EmitStringOrd(recvVal),
+                "len"     => EmitStringLen(recvVal),
+                "append"  => EmitStringAppend(recvVal, m.Args[0]),
+                "at"      => EmitStringAt(recvVal, m.Args[0]),
+                "equals"  => EmitStringEquals(recvVal, m.Args[0]),
+                "slice"   => EmitStringSlice(recvVal, m.Args[0], m.Args[1]),
+                "ord"     => EmitStringOrd(recvVal),
+                "compare" => EmitStringCompare(recvVal, m.Args[0]),
                 _ => throw new NotSupportedException($"IR codegen: unsupported String method '{m.MethodName}'"),
             };
 
+        if (m.MethodName == "llvmHex" && recvType is SuruType.Float64Type)
+            return EmitFloat64LlvmHex(recvVal);
         if (m.MethodName == "toString" && recvType is SuruType.Int64Type)
             return EmitInt64ToString(recvVal);
 

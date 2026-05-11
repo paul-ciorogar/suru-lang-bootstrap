@@ -1,0 +1,301 @@
+// ir-array-codegen.suru — Array IR emission helpers.
+//
+// Mirrors IRArrayCodeGenerator.cs (C# partial class file).
+//
+// Every Suru Array value is a `ptr` to a heap-allocated
+//   %suru.Array = { i64 type_tag=5, i64 elem_tag, i64 len, i64 cap, ptr data }  (40 bytes)
+//
+// type_tag=5 at field 0: any heap ptr can be identified as Array at runtime.
+// elem_tag holds the full SuruType TypeTag for the element type.
+// data is a flat i64[] buffer; each element is a ptr-as-i64 (scalars boxed first).
+//
+// ── Runtime module ─────────────────────────────────────────────────────────────
+//
+// Non-trivial array operations are implemented in suru_array.ll and linked separately.
+// This file only emits idempotent `declare` stubs and call instructions:
+//   suru_array_at(ptr arr, i64 idx) → ptr
+//   suru_array_add(ptr arr, ptr val) → void
+//   suru_array_set(ptr arr, i64 idx, ptr val) → void
+//   suru_array_clone_dyn(ptr arr) → ptr
+//   suru_array_drop_dyn(ptr arr) → void
+//
+// ── Design: no emitValue calls ─────────────────────────────────────────────────
+// All functions receive pre-emitted SSA names (caller has already called emitValue).
+// emitArrayMethod handles conditional i64 unboxing for index args before delegating.
+//
+// ── Array literal split ────────────────────────────────────────────────────────
+// emitArrayLiteralAlloc initialises the header (type_tag, elem_tag, len=0, cap=0,
+// data=null); emitArrayLiteralElements calls emitArrayAdd for each element.
+// Splitting allows ir-codegen.suru to pre-emit all element SSA values first, then
+// pass the collected names to both helpers — matching the pre-emission pattern used
+// by string and struct literal helpers.
+//
+// Include DAG: depends on ir-box-codegen.suru → ir-codegen-types.suru → ir-builder.suru.
+// Imported by ir-codegen.suru (the mutual-recursion hub).
+
+include "ir-codegen-types.suru" as types
+include "ir-builder.suru" as ir
+include "ir-box-codegen.suru" as box
+
+// ─── Element type conversion ──────────────────────────────────────────────────
+// Array data[] slots store i64 (ptr-as-i64): scalars are boxed then ptrtoint'd
+// before storage, and inttoptr'd then unboxed after load.
+// These conversions are the boundary points between raw Suru values and i64 slots.
+
+// Box scalar then ptrtoint — encodes any Suru value as an i64 for array storage.
+// For scalar types (Int64/Bool/Int32/Float64): box first so the heap ptr is valid.
+// For heap types (String/Array/Struct): already a ptr; ptrtoint directly.
+// Mirrors C# EmitToI64.
+fn emitToI64(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    let bx CodegenResult: box.boxValue(ctx, val, suruType)
+    ctx: bx.ctx
+    let r IrResult: ir.emitPtrToInt(ctx.builder, bx.name)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// inttoptr then unbox if scalar — decodes an i64 array slot back to a typed Suru value.
+// The inttoptr gives a heap ptr; scalar types are then unboxed to their raw LLVM types.
+// Non-scalar types (String/Array/Struct) are returned as the ptr directly.
+// Mirrors C# EmitFromI64.
+fn emitFromI64(ctx IrCodegenContext, raw String, elemSuruType String) CodegenResult {
+    let r IrResult: ir.emitIntToPtr(ctx.builder, raw)
+    ctx.builder: r.builder
+    match types.isScalarSuruType(elemSuruType) {
+        true: { return box.unboxScalar(ctx, r.name, elemSuruType) }
+        _: {}
+    }
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: elemSuruType }
+}
+
+// ─── Low-level %suru.Array field extractor ────────────────────────────────────
+// %suru.Array layout: { type_tag@0(i64), elem_tag@1(i64), len@2(i64), cap@3(i64), data@4(ptr) }
+
+// GEP to field 2 (len) and load it as a raw i64.
+// Not called directly by emitArrayMethod — emitArrayLen wraps it for public use.
+// Mirrors C# EmitExtractArrayLen.
+fn emitExtractArrayLen(ctx IrCodegenContext, arrVal String) CodegenResult {
+    let gr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", arrVal, "i32 0, i32 2")
+    ctx.builder: gr.builder
+    let lr IrResult: ir.emitLoad(ctx.builder, "i64", gr.name)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// ─── Array instance methods ───────────────────────────────────────────────────
+
+// .len() → raw i64: GEP+load the len field directly (no runtime call).
+// Mirrors C# EmitArrayLen.
+fn emitArrayLen(ctx IrCodegenContext, recv String) CodegenResult {
+    return emitExtractArrayLen(ctx, recv)
+}
+
+// .at(idx) → element value: call suru_array_at then unbox if scalar.
+// idx must already be a raw i64 SSA name (caller handles unboxing via argSuruTypes).
+// elemSuruType is the Suru type of the array's elements (e.g. "Int64", "Token").
+// Returns raw scalar for scalar element types; ptr for heap element types.
+// Mirrors C# EmitArrayAt.
+fn emitArrayAt(ctx IrCodegenContext, recv String, idx String, elemSuruType String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_array_at(ptr, i64)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("i64 ".append(idx))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_array_at", args)
+    ctx.builder: r.builder
+    // Unbox scalars at the array-element boundary.
+    match types.isScalarSuruType(elemSuruType) {
+        true: { return box.unboxScalar(ctx, r.name, elemSuruType) }
+        _: {}
+    }
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: elemSuruType }
+}
+
+// .slice(from, to) → Array: sub-array [from, to) via suru_array_slice.
+// from and to are raw i64 SSA names (caller unboxes if needed).
+// Mirrors C# EmitArraySlice.
+fn emitArraySlice(ctx IrCodegenContext, recv String, fromSsa String, toSsa String, elemSuruType String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_array_slice(ptr, i64, i64)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("i64 ".append(fromSsa))
+    args.add("i64 ".append(toSsa))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_array_slice", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Array:".append(elemSuruType) }
+}
+
+// .add(val) — append element to the array (grows if needed via suru_array_add).
+// val and valSuruType are pre-emitted; scalars are boxed at the boundary.
+// Returns ctx (void operation — no result value).
+// Mirrors C# EmitArrayAdd.
+fn emitArrayAdd(ctx IrCodegenContext, recv String, val String, valSuruType String) IrCodegenContext {
+    // Box scalar at the array-element boundary before passing to runtime.
+    let bx CodegenResult: box.boxValue(ctx, val, valSuruType)
+    ctx: bx.ctx
+    ctx: types.addSuruDecl(ctx, "declare void @suru_array_add(ptr, ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("ptr ".append(bx.name))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_array_add", args)
+    return ctx
+}
+
+// .set(val, idx) — update element at index via suru_array_set.
+// Suru source order is set(val, idx) but suru_array_set takes (arr, idx, val) — swapped.
+// val, valSuruType are pre-emitted; idx is a raw i64 SSA name (caller unboxes).
+// Returns ctx (void operation — no result value).
+// Mirrors C# EmitArraySet.
+fn emitArraySet(ctx IrCodegenContext, recv String, val String, valSuruType String, idx String) IrCodegenContext {
+    // Box scalar at the boundary before passing ptr to the runtime.
+    let bx CodegenResult: box.boxValue(ctx, val, valSuruType)
+    ctx: bx.ctx
+    ctx: types.addSuruDecl(ctx, "declare void @suru_array_set(ptr, i64, ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    args.add("i64 ".append(idx))    // idx before val — runtime arg order
+    args.add("ptr ".append(bx.name))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_array_set", args)
+    return ctx
+}
+
+// clone(arr) → Array: deep copy via suru_array_clone_dyn (dispatches per element).
+// elemSuruType used to reconstruct the correct "Array:T" suruType for the result.
+// Mirrors C# EmitCloneArrayDispatch.
+fn emitArrayClone(ctx IrCodegenContext, recv String, elemSuruType String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_array_clone_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_array_clone_dyn", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Array:".append(elemSuruType) }
+}
+
+// drop(arr): deallocate array elements and header via suru_array_drop_dyn.
+// Returns a null placeholder — drop is always used as a statement, result discarded.
+// Mirrors C# EmitDropArrayDispatch.
+fn emitArrayDrop(ctx IrCodegenContext, recv String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare void @suru_array_drop_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_array_drop_dyn", args)
+    return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+}
+
+// ─── Array literal helpers ─────────────────────────────────────────────────────
+
+// Allocate and initialise the %suru.Array header for an array literal.
+// Sets type_tag=5, elem_tag (from elemSuruType), len=0, cap=0, data=null.
+// emitArrayLiteralElements then calls emitArrayAdd for each element;
+// suru_array_add handles buffer allocation and growth from zero.
+//
+// elemCount kept in signature so callers can document the intended count, though
+// the current implementation defers allocation to suru_array_add for simplicity.
+//
+// Mirrors the malloc + header-setup portion of C# EmitArrayLiteral.
+fn emitArrayLiteralAlloc(ctx IrCodegenContext, elemSuruType String, elemCount Int64) CodegenResult {
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    let mallocArgs Array<String>: []
+    mallocArgs.add("i64 40")
+    let hdrR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", mallocArgs)
+    ctx.builder: hdrR.builder
+    let hdrPtr String: hdrR.name
+    // type_tag = 5 (Array).
+    let ttGr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", hdrPtr, "i32 0, i32 0")
+    ctx.builder: ttGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "5", ttGr.name)
+    // elem_tag encodes the element Suru type so the runtime can clone/drop correctly.
+    let etag String: types.suruTypeTag(elemSuruType)
+    let etGr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", hdrPtr, "i32 0, i32 1")
+    ctx.builder: etGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", etag, etGr.name)
+    // len=0, cap=0; suru_array_add updates both when elements are appended.
+    let lnGr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", hdrPtr, "i32 0, i32 2")
+    ctx.builder: lnGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "0", lnGr.name)
+    let cpGr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", hdrPtr, "i32 0, i32 3")
+    ctx.builder: cpGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "0", cpGr.name)
+    // data=null; suru_array_add will malloc the first chunk on the first add call.
+    let dpGr IrResult: ir.emitGEP(ctx.builder, "%suru.Array", hdrPtr, "i32 0, i32 4")
+    ctx.builder: dpGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "ptr", "null", dpGr.name)
+    return { ctx: ctx, name: hdrPtr, llvmType: "ptr", suruType: "Array:".append(elemSuruType) }
+}
+
+// Append pre-emitted element SSA values into an array via suru_array_add.
+// arrPtr is the array header ptr returned by emitArrayLiteralAlloc.
+// elemSSAs[i] / elemSuruTypes[i] are the SSA name and Suru type for element i.
+// Mirrors the element-store loop in C# EmitArrayLiteral.
+fn emitArrayLiteralElements(ctx IrCodegenContext, elemSSAs Array<String>, elemSuruTypes Array<String>, arrPtr String) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(elemSSAs.len()) {
+        ctx: emitArrayAdd(ctx, arrPtr, elemSSAs.at(i), elemSuruTypes.at(i))
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// ─── Dispatch hub ──────────────────────────────────────────────────────────────
+
+// Route an Array-receiver method call to the correct emitter.
+// recv:         SSA name of the Array ptr (pre-emitted by emitMethodCall in ir-codegen.suru).
+// args:         pre-emitted SSA names of each argument.
+// argSuruTypes: Suru type encoding of each arg (for conditional i64 unboxing on index args).
+// elemSuruType: Suru type of the array's elements — extracted from VarEntry.suruType
+//               by stripping the "Array:" prefix (e.g. "Array:Int64" → "Int64").
+//
+// Mirrors the Array arm of C# EmitMethodCall.
+fn emitArrayMethod(ctx IrCodegenContext, method String, recv String, args Array<String>, argSuruTypes Array<String>, elemSuruType String) CodegenResult {
+    match method {
+        "len": {
+            return emitArrayLen(ctx, recv)
+        }
+        "at": {
+            // .at(idx) requires a raw i64 index; unbox from heap ptr if needed.
+            // Well-typed code always passes a scalar Int64, but guard defensively
+            // to match the C# IsScalar / UnboxInt64 check.
+            let idxSsa String: args.at(0)
+            let idxType String: argSuruTypes.at(0)
+            match types.isScalarSuruType(idxType) {
+                true: {}
+                _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, idxSsa)
+                    ctx: ur.ctx
+                    idxSsa: ur.name
+                }
+            }
+            return emitArrayAt(ctx, recv, idxSsa, elemSuruType)
+        }
+        "add": {
+            ctx: emitArrayAdd(ctx, recv, args.at(0), argSuruTypes.at(0))
+            return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+        }
+        "set": {
+            // Suru: set(val, idx) — val is args[0], idx is args[1].
+            // suru_array_set(arr, idx, val) — runtime takes idx before val.
+            let valSsa String: args.at(0)
+            let valType String: argSuruTypes.at(0)
+            let idxSsa String: args.at(1)
+            let idxType String: argSuruTypes.at(1)
+            match types.isScalarSuruType(idxType) {
+                true: {}
+                _: {
+                    let ur CodegenResult: box.unboxInt64(ctx, idxSsa)
+                    ctx: ur.ctx
+                    idxSsa: ur.name
+                }
+            }
+            ctx: emitArraySet(ctx, recv, valSsa, valType, idxSsa)
+            return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+        }
+        "clone": {
+            return emitArrayClone(ctx, recv, elemSuruType)
+        }
+        "drop": {
+            return emitArrayDrop(ctx, recv)
+        }
+        _: {
+            return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+        }
+    }
+}

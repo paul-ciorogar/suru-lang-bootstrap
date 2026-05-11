@@ -112,7 +112,7 @@ public class IRSuruCodegenTests(CompiledFixturesIR fixtures)
             Assert.Contains("Hello World!", ll);
             Assert.Contains("declare i32 @printf(ptr, ...)", ll);
             Assert.Contains("define i32 @suru_main()", ll);
-            Assert.Contains("getelementptr inbounds [14 x i8]", ll);
+            Assert.Contains("getelementptr [14 x i8]", ll);
             Assert.Contains("call i32 (ptr, ...) @printf", ll);
             Assert.Contains("define i32 @main(i32 %argc, ptr %argv)", ll);
 

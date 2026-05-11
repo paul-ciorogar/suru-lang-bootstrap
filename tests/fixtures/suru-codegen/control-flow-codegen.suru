@@ -483,8 +483,8 @@ fn registerFunctions(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
     return ctx
 }
 
-fn emitModule(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
-    ctx: cg.withBuilder(ctx, emitScalarDecls(ir.emitModuleHeader(ctx.builder)))
+fn emitModule(ctx CodegenContext, stmts Array<AstNode>, sourceName String) CodegenContext {
+    ctx: cg.withBuilder(ctx, emitScalarDecls(ir.emitModuleHeader(ctx.builder, sourceName)))
     ctx: registerFunctions(ctx, stmts)
     let i Int64: 0
     while i.lt(stmts.len()) {

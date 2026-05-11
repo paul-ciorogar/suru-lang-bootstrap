@@ -18,6 +18,15 @@ include "../suru-parser/suru-parser.suru"         as parser
 include "../suru-codegen/codegen-types.suru"      as cg
 include "../suru-codegen/control-flow-codegen.suru" as codegen
 
+fn baseName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(i.add(1), path.len()) } _: {} }
+        i: i.take(1)
+    }
+    return path
+}
+
 fn main(args Array<String>) {
     let sourcePath String: args.at(1)
     let outputPath String: args.at(2)
@@ -26,7 +35,7 @@ fn main(args Array<String>) {
     let source  String:    readFile(sourcePath)
     let tokens  Array<Token>: lex.tokenize(source)
     let module  AstModule: parser.parse(tokens)
-    let ctx     CodegenContext: codegen.emitModule(cg.makeContext(), module.stmts)
+    let ctx     CodegenContext: codegen.emitModule(cg.makeContext(), module.stmts, baseName(sourcePath))
 
     writeFile(outputPath, ctx.builder.output)
 }

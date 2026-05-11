@@ -65,6 +65,22 @@ fn scanExpr(node AstNode, texts Array<String>) Array<String> {
                 i: i.add(1)
             }
         }
+        MatchExprNode: {
+            texts: scanExpr(node.condition, texts)
+            let i Int64: 0
+            while i.lt(node.arms.len()) {
+                let arm MatchArm: node.arms.at(i)
+                texts: scanExpr(arm.pattern, texts)
+                texts: scanExpr(arm.body, texts)
+                i: i.add(1)
+            }
+        }
+        FieldAccessNode: { texts: scanExpr(node.receiver, texts) }
+        UnaryNode:  { texts: scanExpr(node.operand, texts) }
+        BinaryNode: {
+            texts: scanExpr(node.left, texts)
+            texts: scanExpr(node.right, texts)
+        }
         _: {}
     }
     return texts
@@ -81,8 +97,9 @@ fn scanStmts(stmts Array<AstNode>, texts Array<String>) Array<String> {
 
 fn scanStmt(node AstNode, texts Array<String>) Array<String> {
     match node {
-        LetNode:      { return scanExpr(node.value, texts) }
-        AssignNode:   { return scanExpr(node.value, texts) }
+        LetNode:         { return scanExpr(node.value, texts) }
+        AssignNode:      { return scanExpr(node.value, texts) }
+        FieldAssignNode: { return scanExpr(node.value, texts) }
         ReturnNode: {
             match node.hasValue { true: { return scanExpr(node.value, texts) } _: {} }
         }
@@ -96,7 +113,9 @@ fn scanStmt(node AstNode, texts Array<String>) Array<String> {
             texts: scanExpr(node.condition, texts)
             let i Int64: 0
             while i.lt(node.arms.len()) {
-                let stmts Array<AstNode>: node.arms.at(i).stmts
+                let arm MatchStmtArm: node.arms.at(i)
+                texts: scanExpr(arm.pattern, texts)
+                let stmts Array<AstNode>: arm.stmts
                 texts: scanStmts(stmts, texts)
                 i: i.add(1)
             }
@@ -111,6 +130,152 @@ fn scanStmt(node AstNode, texts Array<String>) Array<String> {
 }
 
 // ─── Registration passes ──────────────────────────────────────────────────────
+
+// Evaluate a compile-time constant expression to an LLVM literal string.
+// Only handles the literal forms that can appear in module-level let statements.
+fn evalConstExpr(node AstNode) String {
+    match node {
+        IntLitNode:   { return node.text }
+        BoolLitNode:  { return match node.boolVal { true: "1", _: "0" } }
+        FloatLitNode: { return node.text }
+        _:            { return "0" }
+    }
+}
+
+// ─── File I/O mode global pre-scan ───────────────────────────────────────────
+// Recursively check whether an expression AST node calls a function by name.
+fn exprCallsNamed(node AstNode, fname String) Bool {
+    match node {
+        CallNode: {
+            match node.name.equals(fname) { true: { return true } _: {} }
+            let i Int64: 0
+            while i.lt(node.args.len()) {
+                match exprCallsNamed(node.args.at(i), fname) { true: { return true } _: {} }
+                i: i.add(1)
+            }
+        }
+        MethodCallNode: {
+            match exprCallsNamed(node.receiver, fname) { true: { return true } _: {} }
+            let i Int64: 0
+            while i.lt(node.args.len()) {
+                match exprCallsNamed(node.args.at(i), fname) { true: { return true } _: {} }
+                i: i.add(1)
+            }
+        }
+        MatchExprNode: {
+            match exprCallsNamed(node.condition, fname) { true: { return true } _: {} }
+            let i Int64: 0
+            while i.lt(node.arms.len()) {
+                let arm MatchArm: node.arms.at(i)
+                match exprCallsNamed(arm.body, fname) { true: { return true } _: {} }
+                i: i.add(1)
+            }
+        }
+        _: {}
+    }
+    return false
+}
+
+fn stmtsCallNamed(stmts Array<AstNode>, fname String) Bool {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        match stmtCallsNamed(stmts.at(i), fname) { true: { return true } _: {} }
+        i: i.add(1)
+    }
+    return false
+}
+
+fn stmtCallsNamed(stmt AstNode, fname String) Bool {
+    match stmt {
+        LetNode:         { return exprCallsNamed(stmt.value, fname) }
+        AssignNode:      { return exprCallsNamed(stmt.value, fname) }
+        ReturnNode:      {
+            match stmt.hasValue { true: { return exprCallsNamed(stmt.value, fname) } _: {} }
+        }
+        ExprStmtNode:    { return exprCallsNamed(stmt.expr, fname) }
+        WhileNode:       {
+            match exprCallsNamed(stmt.condition, fname) { true: { return true } _: {} }
+            let body Array<AstNode>: stmt.body
+            return stmtsCallNamed(body, fname)
+        }
+        MatchStmtNode:   {
+            match exprCallsNamed(stmt.condition, fname) { true: { return true } _: {} }
+            let i Int64: 0
+            while i.lt(stmt.arms.len()) {
+                let arm MatchStmtArm: stmt.arms.at(i)
+                match stmtsCallNamed(arm.stmts, fname) { true: { return true } _: {} }
+                i: i.add(1)
+            }
+        }
+        _: {}
+    }
+    return false
+}
+
+fn ownFnCallsNamed(stmts Array<AstNode>, ownFnNames Array<String>, fname String) Bool {
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                match hctx.namesContain(ownFnNames, stmt.name) {
+                    true: {
+                        let body Array<AstNode>: stmt.body
+                        match stmtsCallNamed(body, fname) { true: { return true } _: {} }
+                    }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return false
+}
+
+// Pre-scan own function bodies for readFile/writeFile/appendToFile calls.
+// Adds @.mode_r / @.mode_w / @.mode_a globals to strGlobals BEFORE string literals
+// so they appear in the same order as C#'s _boolStringGlobals output.
+fn registerModeGlobals(ctx HeapCodegenContext, stmts Array<AstNode>, ownFnNames Array<String>) HeapCodegenContext {
+    let hasR Bool: ownFnCallsNamed(stmts, ownFnNames, "readFile")
+    let hasW Bool: ownFnCallsNamed(stmts, ownFnNames, "writeFile")
+    let hasA Bool: ownFnCallsNamed(stmts, ownFnNames, "appendToFile")
+    let globals String: ctx.strGlobals
+    match hasR { true: { globals: globals.append("@.mode_r = private unnamed_addr constant [2 x i8] c\"r\\00\"\n") } _: {} }
+    match hasW { true: { globals: globals.append("@.mode_w = private unnamed_addr constant [2 x i8] c\"w\\00\"\n") } _: {} }
+    match hasA { true: { globals: globals.append("@.mode_a = private unnamed_addr constant [2 x i8] c\"a\\00\"\n") } _: {} }
+    return hctx.withHStrGlobals(ctx, globals)
+}
+
+// Emit module-level let constants as LLVM global constants and register them as
+// variables so VarRefNode loads can resolve them via a normal load instruction.
+// Constants are written to builder.output (not strGlobals) so they appear BEFORE
+// string literals in the final IR — matching C# assembly order.
+fn registerModuleConsts(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
+    let output String: ctx.builder.output
+    let hasConst Bool: false
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            LetNode: {
+                let suruTy String: hctx.makeSuruType(stmt.typeName)
+                let llvmTy String: hctx.heapLlvmTypeOf(suruTy)
+                let val String: evalConstExpr(stmt.value)
+                output: output.append("@").append(stmt.name).append(" = internal constant ").append(llvmTy).append(" ").append(val).append("\n")
+                ctx: hctx.addHVar(ctx, stmt.name, "@".append(stmt.name), llvmTy, suruTy)
+                hasConst: true
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    match hasConst {
+        true: { output: output.append("\n") }
+        _: {}
+    }
+    return hctx.withHBuilder(ctx, ir.withOutput(ctx.builder, output))
+}
 
 fn registerStringLiterals(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
     let texts Array<String>: []
@@ -172,7 +337,8 @@ fn registerHFunctions(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenC
         match stmt {
             FnDeclNode: {
                 let retTy String: match stmt.name.equals("main") { true: "i64", _: hctx.heapLlvmTypeOf(stmt.returnType) }
-                ctx: hctx.addHFn(ctx, stmt.name, retTy)
+                let retSuruTy String: match stmt.name.equals("main") { true: "Int64", _: hctx.makeSuruType(stmt.returnType) }
+                ctx: hctx.addHFn(ctx, stmt.name, retTy, retSuruTy)
             }
             _: {}
         }
@@ -184,15 +350,21 @@ fn registerHFunctions(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenC
 // ─── Statement emitters ───────────────────────────────────────────────────────
 
 fn emitHPrintLn(ctx HeapCodegenContext, argNode AstNode) HeapCodegenContext {
+    // Emit value first — it may add suru_string_* / array / etc. decls.
+    // Then add suru_println (mirrors C# where AddSuruPrintln() is called after EmitValue(arg)).
+    // Then add box decl (mirrors C# BoxValue called after AddSuruPrintln).
     let vr HeapCodegenResult: hval.emitHValue(ctx, argNode)
     ctx: vr.ctx
+    ctx: hctx.addSuruDecl(ctx, "declare void @suru_println(ptr)\n")
     match vr.llvmType.equals("ptr") {
         true: { return hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_println", ["ptr ".append(vr.name)])) }
         _: {
             let boxFn String: "suru_box_int64"
-            match vr.llvmType.equals("i1")     { true: { boxFn: "suru_box_bool"    } _: {} }
-            match vr.llvmType.equals("i32")    { true: { boxFn: "suru_box_int32"   } _: {} }
-            match vr.llvmType.equals("double") { true: { boxFn: "suru_box_float64" } _: {} }
+            let boxDecl String: "declare ptr  @suru_box_int64(i64)\n"
+            match vr.llvmType.equals("i1")     { true: { boxFn: "suru_box_bool"    boxDecl: "declare ptr  @suru_box_bool(i1)\n"       } _: {} }
+            match vr.llvmType.equals("i32")    { true: { boxFn: "suru_box_int32"   boxDecl: "declare ptr  @suru_box_int32(i32)\n"     } _: {} }
+            match vr.llvmType.equals("double") { true: { boxFn: "suru_box_float64" boxDecl: "declare ptr  @suru_box_float64(double)\n" } _: {} }
+            ctx: hctx.addSuruDecl(ctx, boxDecl)
             let br IrResult: ir.emitCall(ctx.builder, "ptr", boxFn, [vr.llvmType.append(" ").append(vr.name)])
             ctx: hctx.withHBuilder(ctx, br.builder)
             return hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_println", ["ptr ".append(br.name)]))
@@ -203,51 +375,101 @@ fn emitHPrintLn(ctx HeapCodegenContext, argNode AstNode) HeapCodegenContext {
 fn emitHLetStmt(ctx HeapCodegenContext, node LetNode) HeapCodegenContext {
     let suruTy String: hctx.makeSuruType(node.typeName)
     let llvmTy String: hctx.heapLlvmTypeOf(suruTy)
-    let ar IrResult: ir.emitAlloca(ctx.builder, llvmTy)
-    ctx: hctx.withHBuilder(ctx, ar.builder)
+    // Emit value first, then alloca — matches C# IR ordering so tmpCount aligns.
+    let savedRetName String: ctx.currentReturnName
     ctx: hctx.withHReturnName(ctx, suruTy)
     let vr HeapCodegenResult: hval.emitHValue(ctx, node.value)
     ctx: vr.ctx
     // When the annotation names a variant, overwrite type_tag=7 and variant_idx in-place.
     // Mirrors C# IRFunctionCodeGenerator.EmitStmt lines 147-157.
+    // C# format: tagGep uses 2 spaces, vidxGep uses 1 space before '='.
     match hctx.isVariant(ctx, suruTy) { true: {
         let parent SumTypeDecl: hctx.findParentForVariant(ctx, suruTy)
         let vidx Int64: hctx.variantIdx(parent, suruTy)
-        let g0 IrResult: ir.emitGEP(ctx.builder, "i8", vr.name, "i64 0")
-        ctx: hctx.withHBuilder(ctx, g0.builder)
-        ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "7", g0.name))
-        let g8 IrResult: ir.emitGEP(ctx.builder, "i8", vr.name, "i64 8")
-        ctx: hctx.withHBuilder(ctx, g8.builder)
-        ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", vidx.toString(), g8.name))
+        let tr0 IrResult: ir.nextTmp(ctx.builder)
+        let tr1 IrResult: ir.nextTmp(tr0.builder)
+        ctx: hctx.withHBuilder(ctx, tr1.builder)
+        let tagGep  String: tr0.name
+        let vidxGep String: tr1.name
+        ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  ".append(tagGep).append("  = getelementptr i8, ptr ").append(vr.name).append(", i64 0\n")))
+        ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  store i64 7, ptr ".append(tagGep).append("\n")))
+        ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  ".append(vidxGep).append(" = getelementptr i8, ptr ").append(vr.name).append(", i64 8\n")))
+        ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  store i64 ".append(vidx.toString()).append(", ptr ").append(vidxGep).append("\n")))
     } _: {} }
+    let ar IrResult: ir.emitNamedAlloca(ctx.builder, node.name, llvmTy)
+    ctx: hctx.withHBuilder(ctx, ar.builder)
     ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, llvmTy, vr.name, ar.name))
     ctx: hctx.addHVar(ctx, node.name, ar.name, llvmTy, suruTy)
-    return ctx
+    return hctx.withHReturnName(ctx, savedRetName)
 }
 
 fn emitHAssignStmt(ctx HeapCodegenContext, node AssignNode) HeapCodegenContext {
     let e HeapVarEntry: hctx.lookupHVar(ctx, node.name)
+    let savedRetName String: ctx.currentReturnName
     ctx: hctx.withHReturnName(ctx, e.suruType)
     let vr HeapCodegenResult: hval.emitHValue(ctx, node.value)
-    return hctx.withHBuilder(vr.ctx, ir.emitStore(vr.ctx.builder, e.llvmType, vr.name, e.allocaName))
+    return hctx.withHReturnName(hctx.withHBuilder(vr.ctx, ir.emitStore(vr.ctx.builder, e.llvmType, vr.name, e.allocaName)), savedRetName)
 }
 
 fn emitHFieldAssignStmt(ctx HeapCodegenContext, node FieldAssignNode) HeapCodegenContext {
+    let savedRetName String: ctx.currentReturnName
     let rr HeapCodegenResult: hval.emitHValue(ctx, node.receiver)
     ctx: rr.ctx
     let decl TypeDecl: hctx.lookupHType(ctx, rr.suruType)
     let fld TypeFieldEntry: hctx.lookupHField(decl, node.fieldName)
     let fidx Int64: hctx.fieldIndex(decl, node.fieldName)
     let fieldSuruTy String: hctx.makeSuruType(fld.typeName)
+    let off Int64: 32.add(fidx.multiply(8))
+    // {} (zero-init before drop) on an array-typed or sum/variant-typed field needs special
+    // handling — setting currentReturnName to "Array:Foo" then dispatching StructLitNode would
+    // try to emit @suru_clone_Array:Foo (invalid LLVM, colon in name).
+    // Mirrors C# EmitFieldAssignment: array→empty array literal; sum/variant→0 (null ptr).
+    let val AstNode: node.value
+    match val {
+        StructLitNode: {
+            let sl StructLitNode: val
+            match sl.fields.len().equals(0) {
+                true: {
+                    match hctx.isArraySuruType(fieldSuruTy) {
+                        true: {
+                            let elemTy String: hctx.elemSuruType(fieldSuruTy)
+                            let emptyNode ArrayLitNode: { elems: [] }
+                            let ar HeapCodegenResult: hval.emitArrayLiteral(ctx, emptyNode, elemTy)
+                            ctx: ar.ctx
+                            let encR HeapCodegenResult: prim.emitStructFieldToI64(ctx, ar.name, fieldSuruTy)
+                            ctx: encR.ctx
+                            let gR IrResult: ir.emitGEP(ctx.builder, "i8", rr.name, "i64 ".append(off.toString()))
+                            ctx: hctx.withHBuilder(ctx, gR.builder)
+                            ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", encR.name, gR.name))
+                            return hctx.withHReturnName(ctx, savedRetName)
+                        }
+                        _: {}
+                    }
+                    let isNullable Bool: hctx.isSumType(ctx, fieldSuruTy)
+                    match hctx.isVariant(ctx, fieldSuruTy) { true: { isNullable: true } _: {} }
+                    match isNullable {
+                        true: {
+                            let gR IrResult: ir.emitGEP(ctx.builder, "i8", rr.name, "i64 ".append(off.toString()))
+                            ctx: hctx.withHBuilder(ctx, gR.builder)
+                            ctx: hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", "0", gR.name))
+                            return hctx.withHReturnName(ctx, savedRetName)
+                        }
+                        _: {}
+                    }
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
     ctx: hctx.withHReturnName(ctx, fieldSuruTy)
     let valR HeapCodegenResult: hval.emitHValue(ctx, node.value)
     ctx: valR.ctx
     let encR HeapCodegenResult: prim.emitStructFieldToI64(ctx, valR.name, fieldSuruTy)
     ctx: encR.ctx
-    let off Int64: 32.add(fidx.multiply(8))
     let gR IrResult: ir.emitGEP(ctx.builder, "i8", rr.name, "i64 ".append(off.toString()))
     ctx: hctx.withHBuilder(ctx, gR.builder)
-    return hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", encR.name, gR.name))
+    return hctx.withHReturnName(hctx.withHBuilder(ctx, ir.emitStore(ctx.builder, "i64", encR.name, gR.name)), savedRetName)
 }
 
 fn emitHReturnStmt(ctx HeapCodegenContext, node ReturnNode) HeapCodegenContext {
@@ -257,7 +479,7 @@ fn emitHReturnStmt(ctx HeapCodegenContext, node ReturnNode) HeapCodegenContext {
             ctx: vr.ctx
             return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitRet(ctx.builder, ctx.currentReturnType, vr.name)), false)
         }
-        _: { return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitRetVoid(ctx.builder)), false) }
+        _: { return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitRet(ctx.builder, "ptr", "null")), false) }
     }
 }
 
@@ -270,19 +492,84 @@ fn emitHExprStmt(ctx HeapCodegenContext, node ExprStmtNode) HeapCodegenContext {
             match c.name.equals("printError") { true: {
                 let vr HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
                 ctx: vr.ctx
-                return hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_print_error", ["ptr ".append(vr.name)]))
+                ctx: hctx.addSuruDecl(ctx, "declare void @suru_printerror(ptr)\n")
+                return hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "suru_printerror", ["ptr ".append(vr.name)]))
             } _: {} }
             match c.name.equals("exit") { true: {
                 let vr HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
                 ctx: vr.ctx
-                ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "exit", ["i64 ".append(vr.name)]))
-                return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitUnreachable(ctx.builder)), false)
+                // C# declares exit(i32) noreturn and truncates the i64 arg before calling.
+                ctx: hctx.addDecl(ctx, "declare void @exit(i32) noreturn\n")
+                let code32 IrResult: ir.emitTrunc(ctx.builder, "i64", vr.name, "i32")
+                ctx: hctx.withHBuilder(ctx, code32.builder)
+                ctx: hctx.withHBuilder(ctx, ir.emitVoidCall(ctx.builder, "exit", ["i32 ".append(code32.name)]))
+                ctx: hctx.withHBuilder(ctx, ir.emitUnreachable(ctx.builder))
+                // Emit dead label to keep block open — mirrors C# dead_{_tmp}: emit.
+                let deadLabel String: "dead_".append(ctx.builder.tmpCount.toString()).append(":\n")
+                ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, deadLabel))
+                return hctx.withHBlockOpen(ctx, true)
+            } _: {} }
+            match c.name.equals("appendToFile") { true: {
+                // Order: path load → path data GEP → content load → content len → content data
+                // Mirrors C# EmitAppendToFile: EmitValue(path) → ExtractStringData → EmitValue(content) → ExtractStringLen → ExtractStringData
+                let pathR HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
+                ctx: pathR.ctx
+                let pDataGep IrResult: ir.emitGEP2(ctx.builder, "%suru.String", pathR.name, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, pDataGep.builder)
+                let pDataLoad IrResult: ir.emitLoad(ctx.builder, "ptr", pDataGep.name)
+                ctx: hctx.withHBuilder(ctx, pDataLoad.builder)
+                let contentR HeapCodegenResult: hval.emitHValue(ctx, c.args.at(1))
+                ctx: contentR.ctx
+                let lenGep IrResult: ir.emitGEP(ctx.builder, "%suru.String", contentR.name, "i32 0, i32 1")
+                ctx: hctx.withHBuilder(ctx, lenGep.builder)
+                let lenLoad IrResult: ir.emitLoad(ctx.builder, "i64", lenGep.name)
+                ctx: hctx.withHBuilder(ctx, lenLoad.builder)
+                let dataGep IrResult: ir.emitGEP2(ctx.builder, "%suru.String", contentR.name, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, dataGep.builder)
+                let dataLoad IrResult: ir.emitLoad(ctx.builder, "ptr", dataGep.name)
+                ctx: hctx.withHBuilder(ctx, dataLoad.builder)
+                ctx: hctx.addDecl(ctx, "declare ptr @fopen(ptr, ptr)\n")
+                ctx: hctx.addDecl(ctx, "declare i64 @fwrite(ptr, i64, i64, ptr)\n")
+                ctx: hctx.addDecl(ctx, "declare i32 @fclose(ptr)\n")
+                let fopenR IrResult: ir.emitCall(ctx.builder, "ptr", "fopen", ["ptr ".append(pDataLoad.name), "ptr @.mode_a"])
+                ctx: hctx.withHBuilder(ctx, fopenR.builder)
+                ctx: hctx.withHBuilder(ctx, ir.emitCallDiscard(ctx.builder, "i64", "fwrite", ["ptr ".append(dataLoad.name), "i64 1", "i64 ".append(lenLoad.name), "ptr ".append(fopenR.name)]))
+                return hctx.withHBuilder(ctx, ir.emitCallDiscard(ctx.builder, "i32", "fclose", ["ptr ".append(fopenR.name)]))
+            } _: {} }
+            match c.name.equals("writeFile") { true: {
+                // Order: path load → path data GEP → content load → content len → content data
+                // Mirrors C# EmitWriteFile: EmitValue(path) → ExtractStringData → EmitValue(content) → ExtractStringLen → ExtractStringData
+                let pathR HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
+                ctx: pathR.ctx
+                let pDataGep IrResult: ir.emitGEP2(ctx.builder, "%suru.String", pathR.name, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, pDataGep.builder)
+                let pDataLoad IrResult: ir.emitLoad(ctx.builder, "ptr", pDataGep.name)
+                ctx: hctx.withHBuilder(ctx, pDataLoad.builder)
+                let contentR HeapCodegenResult: hval.emitHValue(ctx, c.args.at(1))
+                ctx: contentR.ctx
+                let lenGep IrResult: ir.emitGEP(ctx.builder, "%suru.String", contentR.name, "i32 0, i32 1")
+                ctx: hctx.withHBuilder(ctx, lenGep.builder)
+                let lenLoad IrResult: ir.emitLoad(ctx.builder, "i64", lenGep.name)
+                ctx: hctx.withHBuilder(ctx, lenLoad.builder)
+                let dataGep IrResult: ir.emitGEP2(ctx.builder, "%suru.String", contentR.name, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, dataGep.builder)
+                let dataLoad IrResult: ir.emitLoad(ctx.builder, "ptr", dataGep.name)
+                ctx: hctx.withHBuilder(ctx, dataLoad.builder)
+                ctx: hctx.addDecl(ctx, "declare ptr @fopen(ptr, ptr)\n")
+                ctx: hctx.addDecl(ctx, "declare i64 @fwrite(ptr, i64, i64, ptr)\n")
+                ctx: hctx.addDecl(ctx, "declare i32 @fclose(ptr)\n")
+                let fopenR IrResult: ir.emitCall(ctx.builder, "ptr", "fopen", ["ptr ".append(pDataLoad.name), "ptr @.mode_w"])
+                ctx: hctx.withHBuilder(ctx, fopenR.builder)
+                ctx: hctx.withHBuilder(ctx, ir.emitCallDiscard(ctx.builder, "i64", "fwrite", ["ptr ".append(dataLoad.name), "i64 1", "i64 ".append(lenLoad.name), "ptr ".append(fopenR.name)]))
+                return hctx.withHBuilder(ctx, ir.emitCallDiscard(ctx.builder, "i32", "fclose", ["ptr ".append(fopenR.name)]))
             } _: {} }
             let isCloneDrop Bool: c.name.equals("clone")
             match c.name.equals("drop") { true: { isCloneDrop: true } _: {} }
             match isCloneDrop {
                 true: {
                     let dynFn String: match c.name.equals("clone") { true: "suru_clone_dyn", _: "suru_drop_dyn" }
+                    let dynDecl String: match c.name.equals("clone") { true: "declare ptr  @suru_clone_dyn(ptr)\n", _: "declare void @suru_drop_dyn(ptr)\n" }
+                    ctx: hctx.addSuruDecl(ctx, dynDecl)
                     let vr HeapCodegenResult: hval.emitHValue(ctx, c.args.at(0))
                     return hctx.withHBuilder(vr.ctx, ir.emitVoidCall(vr.ctx.builder, dynFn, ["ptr ".append(vr.name)]))
                 }
@@ -296,34 +583,45 @@ fn emitHExprStmt(ctx HeapCodegenContext, node ExprStmtNode) HeapCodegenContext {
 }
 
 fn emitHWhile(ctx HeapCodegenContext, node WhileNode) HeapCodegenContext {
-    let nr IrResult: ir.nextLabel(ctx.builder, "wh")
+    let nr IrResult: ir.nextWhileNum(ctx.builder)
     let n String: nr.name
     ctx: hctx.withHBuilder(ctx, nr.builder)
-    ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_c")))
-    ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_c")))
+    ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "while_cond_".append(n)))
+    ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "while_cond_".append(n)))
     let condR HeapCodegenResult: hval.emitHValue(ctx, node.condition)
     ctx: condR.ctx
-    ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, condR.name, n.append("_b"), n.append("_a")))
-    ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_b"))), true)
+    ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, condR.name, "while_body_".append(n), "while_after_".append(n)))
+    ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "while_body_".append(n))), true)
     let body Array<AstNode>: node.body
     ctx: emitHStmts(ctx, body)
-    match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_c"))) } _: {} }
-    return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a"))), true)
+    match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "while_cond_".append(n))) } _: {} }
+    return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "while_after_".append(n))), true)
+}
+
+// Return the name of the match condition variable when it is a plain VarRefNode,
+// or "" for complex expressions.  Used to narrow the condition variable's suruType
+// inside each variant arm body (mirrors C# NarrowCondVar/RestoreCondVar).
+fn getMatchCondVarName(condNode AstNode) String {
+    match condNode {
+        VarRefNode: { return condNode.name }
+        _: { return "" }
+    }
 }
 
 // Shared tail: labeled arm bodies → wildcard label+body → merge label.
+// n is a raw label counter string; full label names are built here.
 // Used by both emitHMatchStmt and emitHMatchStmtVariant.
 fn emitHMatchArmBodies(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Array<Int64>, n String) HeapCodegenContext {
     let ai Int64: 0
     while ai.lt(pis.len()) {
         let arm MatchStmtArm: arms.at(pis.at(ai))
-        ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_a").append(ai.toString()))), true)
+        ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_arm_".append(n).append("_").append(ai.toString()))), true)
         let stmts Array<AstNode>: arm.stmts
         ctx: emitHStmts(ctx, stmts)
-        match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m"))) } _: {} }
+        match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "match_merge_".append(n))) } _: {} }
         ai: ai.add(1)
     }
-    ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_w"))), true)
+    ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_wildcard_".append(n))), true)
     let wi Int64: 0
     while wi.lt(arms.len()) {
         let arm MatchStmtArm: arms.at(wi)
@@ -337,17 +635,23 @@ fn emitHMatchArmBodies(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Arr
         }
         wi: wi.add(1)
     }
-    match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_m"))) } _: {} }
-    return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_m"))), true)
+    match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "match_merge_".append(n))) } _: {} }
+    return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_merge_".append(n))), true)
 }
 
 // Variant match: emit @suru_variant_tag once then compare variant_idx per arm.
 // Patterns are VarRefNode whose name is the variant name (not an in-scope variable).
-fn emitHMatchStmtVariant(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Array<Int64>, n String, condVal String) HeapCodegenContext {
+// condVarName: if non-empty, the condition variable is temporarily narrowed to the
+// concrete variant type in each arm body (mirrors C# NarrowCondVar/RestoreCondVar).
+fn emitHMatchStmtVariant(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis Array<Int64>, n String, condVal String, condVarName String) HeapCodegenContext {
+    ctx: hctx.addSuruDecl(ctx, "declare i64  @suru_variant_tag(ptr)\n")
     let tagR IrResult: ir.emitCall(ctx.builder, "i64", "suru_variant_tag", ["ptr ".append(condVal)])
     ctx: hctx.withHBuilder(ctx, tagR.builder)
     let tagVal String: tagR.name
-    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) } _: {} }
+    // If there is no wildcard arm, the last test's false branch goes to match_merge (C# missLabel logic).
+    let hasWildcard Bool: pis.len().lt(arms.len())
+    let missLabel String: match hasWildcard { true: "match_wildcard_".append(n), _: "match_merge_".append(n) }
+    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, missLabel)) } _: {} }
     let ci Int64: 0
     while ci.lt(pis.len()) {
         let arm MatchStmtArm: arms.at(pis.at(ci))
@@ -357,15 +661,61 @@ fn emitHMatchStmtVariant(ctx HeapCodegenContext, arms Array<MatchStmtArm>, pis A
                 let vidx Int64: hctx.variantIdx(hctx.findParentForVariant(ctx, patAst.name), patAst.name)
                 let cr IrResult: ir.emitICmp(ctx.builder, "eq", "i64", tagVal, vidx.toString())
                 ctx: hctx.withHBuilder(ctx, cr.builder)
-                let nx String: match ci.add(1).lt(pis.len()) { true: n.append("_t").append(ci.add(1).toString()), _: n.append("_w") }
-                ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, n.append("_a").append(ci.toString()), nx))
-                match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_t").append(ci.add(1).toString()))) } _: {} }
+                let nx String: match ci.add(1).lt(pis.len()) { true: "match_test_".append(n).append("_").append(ci.add(1).toString()), _: missLabel }
+                ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, "match_arm_".append(n).append("_").append(ci.toString()), nx))
+                match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_test_".append(n).append("_").append(ci.add(1).toString()))) } _: {} }
             }
             _: {}
         }
         ci: ci.add(1)
     }
-    return emitHMatchArmBodies(ctx, arms, pis, n)
+    // Emit arm bodies with type narrowing for the condition variable.
+    let ai Int64: 0
+    while ai.lt(pis.len()) {
+        let arm MatchStmtArm: arms.at(pis.at(ai))
+        ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_arm_".append(n).append("_").append(ai.toString()))), true)
+        // Narrow: temporarily set condVarName's suruType to the concrete variant type.
+        let origEntry HeapVarEntry: hctx.lookupHVar(ctx, condVarName)
+        let patAst2 AstNode: arm.pattern
+        match condVarName.equals("") {
+            false: {
+                match patAst2 {
+                    VarRefNode: {
+                        let narrowed HeapVarEntry: { name: origEntry.name, allocaName: origEntry.allocaName, llvmType: origEntry.llvmType, suruType: patAst2.name }
+                        ctx: hctx.updateHVar(ctx, condVarName, narrowed)
+                    }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        let stmts Array<AstNode>: arm.stmts
+        ctx: emitHStmts(ctx, stmts)
+        // Restore original suruType after arm.
+        match condVarName.equals("") {
+            false: { ctx: hctx.updateHVar(ctx, condVarName, origEntry) }
+            _: {}
+        }
+        match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "match_merge_".append(n))) } _: {} }
+        ai: ai.add(1)
+    }
+    // Wildcard arm (no narrowing needed).
+    ctx: hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_wildcard_".append(n))), true)
+    let wi Int64: 0
+    while wi.lt(arms.len()) {
+        let arm MatchStmtArm: arms.at(wi)
+        match arm.isWildcard {
+            true: {
+                let stmts Array<AstNode>: arm.stmts
+                ctx: emitHStmts(ctx, stmts)
+                wi: arms.len()
+            }
+            _: {}
+        }
+        wi: wi.add(1)
+    }
+    match ctx.blockOpen { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, "match_merge_".append(n))) } _: {} }
+    return hctx.withHBlockOpen(hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_merge_".append(n))), true)
 }
 
 fn emitHMatchStmt(ctx HeapCodegenContext, node MatchStmtNode) HeapCodegenContext {
@@ -374,31 +724,83 @@ fn emitHMatchStmt(ctx HeapCodegenContext, node MatchStmtNode) HeapCodegenContext
     ctx: condR.ctx
     let condVal String: condR.name
     let condTy String: condR.llvmType
-    let nr IrResult: ir.nextLabel(ctx.builder, "ms")
+    let nr IrResult: ir.nextLabelNum(ctx.builder)
     let n String: nr.name
     ctx: hctx.withHBuilder(ctx, nr.builder)
     let pis Array<Int64>: hval.collectHStmtPatIdxs(arms)
-    match hctx.isVariant(ctx, condR.suruType) {
-        true: { return emitHMatchStmtVariant(ctx, arms, pis, n, condVal) }
+    // Dispatch to variant emitter when condition is a variant OR a top-level sum type
+    // (e.g. match node { CallNode: … } where node: AstNode).
+    let isVariantDispatch Bool: hctx.isVariant(ctx, condR.suruType)
+    match hctx.isSumType(ctx, condR.suruType) { true: { isVariantDispatch: true } _: {} }
+    let condVarName String: getMatchCondVarName(node.condition)
+    match isVariantDispatch {
+        true: { return emitHMatchStmtVariant(ctx, arms, pis, n, condVal, condVarName) }
         _: {}
     }
-    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, n.append("_w"))) } _: {} }
+    // If there is no wildcard arm, the last test's false branch goes to match_merge (C# missLabel logic).
+    let hasWildcard2 Bool: pis.len().lt(arms.len())
+    let missLabel2 String: match hasWildcard2 { true: "match_wildcard_".append(n), _: "match_merge_".append(n) }
+    match pis.len().equals(0) { true: { ctx: hctx.withHBuilder(ctx, ir.emitBr(ctx.builder, missLabel2)) } _: {} }
     let ci Int64: 0
     while ci.lt(pis.len()) {
         let arm MatchStmtArm: arms.at(pis.at(ci))
-        let pr HeapCodegenResult: hval.emitHValue(ctx, arm.pattern)
-        ctx: pr.ctx
-        let cr IrResult: ir.emitICmp(ctx.builder, "eq", condTy, condVal, pr.name)
-        ctx: hctx.withHBuilder(ctx, cr.builder)
-        let nx String: match ci.add(1).lt(pis.len()) { true: n.append("_t").append(ci.add(1).toString()), _: n.append("_w") }
-        ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, cr.name, n.append("_a").append(ci.toString()), nx))
-        match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, n.append("_t").append(ci.add(1).toString()))) } _: {} }
+        let crName String: ""
+        // Pre-allocate cmpTmp BEFORE emitting the pattern value — mirrors C#
+        // EmitPatternComparisons which calls NextTmp() before EmitValue(), giving
+        // cmpTmp a lower SSA number than any temporaries the pattern emission produces.
+        let cmpR IrResult: ir.nextTmp(ctx.builder)
+        ctx: hctx.withHBuilder(ctx, cmpR.builder)
+        let cmpTmp String: cmpR.name
+        match condR.suruType.equals("String") {
+            true: {
+                // String match: use @strcmp on data ptrs (mirrors C# EmitPatternComparisons string branch).
+                ctx: hctx.addDecl(ctx, "declare i32 @strcmp(ptr, ptr)\n")
+                let pr HeapCodegenResult: hval.emitHValue(ctx, arm.pattern)
+                ctx: pr.ctx
+                let cg1 IrResult: ir.emitGEP2(ctx.builder, "%suru.String", condVal, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, cg1.builder)
+                let cl1 IrResult: ir.emitLoad(ctx.builder, "ptr", cg1.name)
+                ctx: hctx.withHBuilder(ctx, cl1.builder)
+                let cg2 IrResult: ir.emitGEP2(ctx.builder, "%suru.String", pr.name, "i32 0, i32 2")
+                ctx: hctx.withHBuilder(ctx, cg2.builder)
+                let cl2 IrResult: ir.emitLoad(ctx.builder, "ptr", cg2.name)
+                ctx: hctx.withHBuilder(ctx, cl2.builder)
+                let strcmpR IrResult: ir.emitCall(ctx.builder, "i32", "strcmp", ["ptr ".append(cl1.name), "ptr ".append(cl2.name)])
+                ctx: hctx.withHBuilder(ctx, strcmpR.builder)
+                ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = icmp eq i32 ").append(strcmpR.name).append(", 0\n")))
+                crName: cmpTmp
+            }
+            _: {
+                // Non-string: emit pattern value then write icmp manually using pre-allocated cmpTmp.
+                let pr HeapCodegenResult: hval.emitHValue(ctx, arm.pattern)
+                ctx: pr.ctx
+                ctx: hctx.withHBuilder(ctx, ir.emit(ctx.builder, "  ".append(cmpTmp).append(" = icmp eq ").append(condTy).append(" ").append(condVal).append(", ").append(pr.name).append("\n")))
+                crName: cmpTmp
+            }
+        }
+        let nx String: match ci.add(1).lt(pis.len()) { true: "match_test_".append(n).append("_").append(ci.add(1).toString()), _: missLabel2 }
+        ctx: hctx.withHBuilder(ctx, ir.emitCondBr(ctx.builder, crName, "match_arm_".append(n).append("_").append(ci.toString()), nx))
+        match ci.add(1).lt(pis.len()) { true: { ctx: hctx.withHBuilder(ctx, ir.emitLabel(ctx.builder, "match_test_".append(n).append("_").append(ci.add(1).toString()))) } _: {} }
         ci: ci.add(1)
     }
     return emitHMatchArmBodies(ctx, arms, pis, n)
 }
 
+fn emitHStmtKindLabel(stmt AstNode) String {
+    match stmt {
+        LetNode:         { return "Let" }
+        AssignNode:      { return "Assign" }
+        FieldAssignNode: { return "FieldAssign" }
+        ReturnNode:      { return "Return" }
+        ExprStmtNode:    { return "ExprStmt" }
+        WhileNode:       { return "While" }
+        MatchStmtNode:   { return "MatchStmt" }
+        _:               { return "Unknown" }
+    }
+}
+
 fn emitHStmt(ctx HeapCodegenContext, stmt AstNode) HeapCodegenContext {
+    appendToFile("/tmp/suru-compiler.log", "  emitHStmt: ".append(emitHStmtKindLabel(stmt)).append("\n"))
     match stmt {
         LetNode:         { return emitHLetStmt(ctx, stmt)         }
         AssignNode:      { return emitHAssignStmt(ctx, stmt)      }
@@ -423,49 +825,78 @@ fn emitHStmts(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
 
 // ─── Function and module emit ─────────────────────────────────────────────────
 
+// Build a comma-separated string of LLVM types ONLY (no parameter names) for
+// declare stubs.  Mirrors C# EmitFunction's pTypes computation for external fns.
+fn buildHParamTypesStr(params Array<Param>) String {
+    let result String: ""
+    let i Int64: 0
+    while i.lt(params.len()) {
+        match i.gt(0) { true: { result: result.append(", ") } _: {} }
+        let p Param: params.at(i)
+        result: result.append(hctx.heapLlvmTypeOf(p.typeName))
+        i: i.add(1)
+    }
+    return result
+}
+
 fn buildHParamsStr(params Array<Param>) String {
     let result String: ""
     let i Int64: 0
     while i.lt(params.len()) {
         match i.gt(0) { true: { result: result.append(", ") } _: {} }
         let p Param: params.at(i)
-        result: result.append(hctx.heapLlvmTypeOf(p.typeName)).append(" %").append(p.name)
+        result: result.append(hctx.heapLlvmTypeOf(p.typeName)).append(" %p.").append(p.name)
         i: i.add(1)
     }
     return result
 }
 
 fn emitHFnDecl(ctx HeapCodegenContext, node FnDeclNode) HeapCodegenContext {
+    appendToFile("/tmp/suru-compiler.log", "emitHFnDecl: ".append(node.name).append("\n"))
     let isMain Bool: node.name.equals("main")
     let llvmName String: match isMain { true: "suru_main", _: node.name }
     let retTy String: match isMain { true: "i64", _: hctx.heapLlvmTypeOf(node.returnType) }
-    let pStr String: match isMain { true: "ptr %argv", _: buildHParamsStr(node.params) }
-    let emptyVars Array<HeapVarEntry>: []
+    let defPrefix String: match isMain { true: "define internal ", _: "define " }
+    let pStr String: match isMain { true: "ptr %args", _: buildHParamsStr(node.params) }
     let retName String: hctx.makeSuruType(node.returnType)
-    let inner HeapCodegenContext: { builder: ir.emitFnStart(ir.makeBuilder(), retTy, llvmName, pStr), fns: "", strGlobals: "", helpers: "", vars: emptyVars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retTy, currentReturnName: retName, blockOpen: true }
+    // Start function builder with global tmpCount/labelCount so SSA names continue
+    // from where the previous function left off — matching the C# single global _tmp counter.
+    let fnStart IrBuilder: { output: "", tmpCount: ctx.builder.tmpCount, labelCount: ctx.builder.labelCount, whileCount: ctx.builder.whileCount }
+    let fnStart2 IrBuilder: ir.emit(fnStart, defPrefix.append(retTy).append(" @").append(llvmName).append("(").append(pStr).append(") {\nentry:\n"))
+    // Copy module-level constants into a fresh array so addHVar calls for params
+    // don't mutate the shared ctx.vars (Suru arrays are heap ptrs — shared reference).
+    let innerVars Array<HeapVarEntry>: []
+    let vi Int64: 0
+    while vi.lt(ctx.vars.len()) {
+        innerVars.add(ctx.vars.at(vi))
+        vi: vi.add(1)
+    }
+    let inner HeapCodegenContext: { builder: fnStart2, fns: "", strGlobals: "", decls: ctx.decls, suruDecls: ctx.suruDecls, extCloneDropDecls: ctx.extCloneDropDecls, helpers: "", vars: innerVars, fnSigs: ctx.fnSigs, types: ctx.types, sumTypes: ctx.sumTypes, strIndex: ctx.strIndex, strCount: ctx.strCount, currentReturnType: retTy, currentReturnName: retName, blockOpen: true, declares: ctx.declares, ownTypeNames: ctx.ownTypeNames }
     let i Int64: 0
     while i.lt(node.params.len()) {
         let p Param: node.params.at(i)
         let ty String: hctx.heapLlvmTypeOf(p.typeName)
-        let ar IrResult: ir.emitAlloca(inner.builder, ty)
-        inner: hctx.withHBuilder(inner, ar.builder)
-        let paramSrc String: match isMain { true: "%argv", _: "%".append(p.name) }
-        inner: hctx.withHBuilder(inner, ir.emitStore(inner.builder, ty, paramSrc, ar.name))
-        inner: hctx.addHVar(inner, p.name, ar.name, ty, hctx.makeSuruType(p.typeName))
+        let allocaName String: match isMain { true: "args.addr", _: p.name.append(".addr") }
+        inner: hctx.withHBuilder(inner, ir.emitFixedAlloca(inner.builder, allocaName, ty))
+        let paramSrc String: match isMain { true: "%args", _: "%p.".append(p.name) }
+        inner: hctx.withHBuilder(inner, ir.emitStore(inner.builder, ty, paramSrc, "%".append(allocaName)))
+        inner: hctx.addHVar(inner, p.name, "%".append(allocaName), ty, hctx.makeSuruType(p.typeName))
         i: i.add(1)
     }
     inner: emitHStmts(inner, node.body)
     match inner.blockOpen {
         true: {
-            // For main: ret i64 0.  For void-returning Suru functions: ret void.
-            // For non-void non-main (e.g. blockOpen=true from dead code after exhaustive match):
-            // emit unreachable — the open block is dead code that LLVM must not validate.
+            // For main: ret i64 0.  For all other functions: ret {type} {defaultVal}.
+            // C# uses DefaultReturnValue: scalars→0/0.0, ptr→null; Suru mirrors this.
+            let retTy2 String: hctx.heapLlvmTypeOf(node.returnType)
+            let defVal String: "null"
+            match retTy2.equals("i64")    { true: { defVal: "0"   } _: {} }
+            match retTy2.equals("i1")     { true: { defVal: "0"   } _: {} }
+            match retTy2.equals("i32")    { true: { defVal: "0"   } _: {} }
+            match retTy2.equals("double") { true: { defVal: "0.0" } _: {} }
             let b2 IrBuilder: match isMain {
                 true: ir.emitRet(inner.builder, "i64", "0"),
-                _: match retTy.equals("void") {
-                    true: ir.emitRetVoid(inner.builder),
-                    _: ir.emitUnreachable(inner.builder)
-                }
+                _: ir.emitRet(inner.builder, retTy2, defVal)
             }
             inner: hctx.withHBuilder(inner, b2)
         }
@@ -474,30 +905,150 @@ fn emitHFnDecl(ctx HeapCodegenContext, node FnDeclNode) HeapCodegenContext {
     inner: hctx.withHBuilder(inner, ir.emitFnEnd(inner.builder))
     ctx: hctx.withHFns(ctx, ctx.fns.append(inner.builder.output))
     ctx: hctx.withHStrCount(ctx, inner.strCount)
+    ctx: hctx.withHDecls(ctx, inner.decls)
+    ctx: hctx.withHSuruDecls(ctx, inner.suruDecls)
+    ctx: hctx.withHExtCloneDropDecls(ctx, inner.extCloneDropDecls)
+    // Propagate updated counters back to module context so next function continues counting.
+    let updatedBuilder IrBuilder: { output: ctx.builder.output, tmpCount: inner.builder.tmpCount, labelCount: inner.builder.labelCount, whileCount: inner.builder.whileCount }
+    ctx: hctx.withHBuilder(ctx, updatedBuilder)
+    return ctx
+}
+
+// Emit a declare stub for an external function (one whose body lives in another .ll).
+// Mirrors C# EmitFunction when fn.SourcePath != null.
+fn emitHFnDeclare(ctx HeapCodegenContext, node FnDeclNode) HeapCodegenContext {
+    let isMain Bool: node.name.equals("main")
+    let llvmName String: match isMain { true: "suru_main", _: node.name }
+    // Declare stubs use LLVM "void" for void-return functions; own definitions use "ptr"
+    // (C# convention: void Suru functions emit ret ptr null in define context).
+    let retTy String: match isMain { true: "i64", _: match node.returnType.equals("void") { true: "void", _: hctx.heapLlvmTypeOf(node.returnType) } }
+    let pStr String: match isMain { true: "ptr", _: buildHParamTypesStr(node.params) }
+    let line String: "declare ".append(retTy).append(" @").append(llvmName).append("(").append(pStr).append(")\n")
+    return hctx.withHFns(ctx, ctx.fns.append(line))
+}
+
+// Scan string literals only from the bodies of functions whose name is in ownFnNames.
+// Mirrors C# string-literal collection: strings are collected lazily during own fn emit.
+fn registerStringLiteralsOwn(ctx HeapCodegenContext, stmts Array<AstNode>, ownFnNames Array<String>) HeapCodegenContext {
+    let texts Array<String>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                match hctx.namesContain(ownFnNames, stmt.name) {
+                    true: {
+                        let body Array<AstNode>: stmt.body
+                        texts: scanStmts(body, texts)
+                    }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    let j Int64: 0
+    while j.lt(texts.len()) {
+        let text String: texts.at(j)
+        let r HeapCodegenResult: prim.emitStringLiteralGlobal(ctx, llvmEscapeStr(text), text.len().add(1))
+        ctx: hctx.addStrIndex(r.ctx, text, r.name)
+        j: j.add(1)
+    }
+    return ctx
+}
+
+// Per-module emit: generates only own function bodies + declare stubs for externals.
+// ownFnNames: names of functions declared in this source file (not from includes).
+// ownTypeNames: names of types declared in this source file.
+// This produces IR identical to the C# compiler for a single-file compilation unit.
+fn emitHModuleOwn(ctx HeapCodegenContext, stmts Array<AstNode>, sourceName String, ownFnNames Array<String>, ownTypeNames Array<String>) HeapCodegenContext {
+    ctx: hctx.withHOwnTypeNames(ctx, ownTypeNames)
+    ctx: hctx.withHBuilder(ctx, ir.emitModuleHeader(ctx.builder, sourceName))
+    ctx: registerModeGlobals(ctx, stmts, ownFnNames)
+    ctx: registerStringLiteralsOwn(ctx, stmts, ownFnNames)
+    ctx: registerHTypes(ctx, stmts)
+    ctx: registerHSumTypes(ctx, stmts)
+    ctx: registerHFunctions(ctx, stmts)
+    ctx: hctx.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    ctx: hctx.addDecl(ctx, "declare void @free(ptr)\n")
+    match ctx.strIndex.len().gt(0) { true: { ctx: hctx.addDecl(ctx, "declare ptr @memcpy(ptr, ptr, i64)\n") } _: {} }
+    ctx: registerModuleConsts(ctx, stmts)
+    ctx: htypes.emitAllTypeCloneDropOwn(ctx, ownTypeNames)
+    // Pass 1: own function bodies (mirrors C# _funcs ordering: own defines before external declares).
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(i)
+        match stmt {
+            FnDeclNode: {
+                match hctx.namesContain(ownFnNames, stmt.name) {
+                    true: { ctx: emitHFnDecl(ctx, stmt) }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    // Pass 2: external declare stubs (after own bodies, matching C# module statement order).
+    let j Int64: 0
+    while j.lt(stmts.len()) {
+        let stmt AstNode: stmts.at(j)
+        match stmt {
+            FnDeclNode: {
+                match hctx.namesContain(ownFnNames, stmt.name) {
+                    true: {}
+                    _:    { ctx: emitHFnDeclare(ctx, stmt) }
+                }
+            }
+            _: {}
+        }
+        j: j.add(1)
+    }
+    // @main wrapper last — after all external declares, matching C# emit order.
+    match hctx.namesContain(ownFnNames, "main") {
+        true: { ctx: emitHMainWrapper(ctx) }
+        _: {}
+    }
     return ctx
 }
 
 fn emitHMainWrapper(ctx HeapCodegenContext) HeapCodegenContext {
     let b IrBuilder: ir.emitFnStart(ir.makeBuilder(), "i32", "main", "i32 %argc, ptr %argv")
-    let mr IrResult: ir.emitCall(b, "ptr", "malloc", ["i64 24"])
-    let g0 IrResult: ir.emitGEP(mr.builder, "%suru.String", mr.name, "i32 0, i32 0")
-    let g1 IrResult: ir.emitGEP(ir.emitStore(g0.builder, "i64", "6", g0.name), "%suru.String", mr.name, "i32 0, i32 1")
-    let sr IrResult: ir.emitSext(g1.builder, "i32", "%argc", "i64")
-    let g2 IrResult: ir.emitGEP(ir.emitStore(sr.builder, "i64", sr.name, g1.name), "%suru.String", mr.name, "i32 0, i32 2")
-    let b4 IrBuilder: ir.emitStore(g2.builder, "ptr", "%argv", g2.name)
-    let rr IrResult: ir.emitCall(b4, "i64", "suru_main", ["ptr ".append(mr.name)])
-    let tr IrResult: ir.emitTrunc(rr.builder, "i64", rr.name, "i32")
-    ctx: hctx.withHFns(ctx, ctx.fns.append(ir.emitFnEnd(ir.emitRet(tr.builder, "i32", tr.name)).output))
+    let b2 IrBuilder: ir.emit(b, "  %seq      = call ptr @malloc(i64 24)\n")
+    let b3 IrBuilder: ir.emit(b2, "  %tag_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 0\n")
+    let b4 IrBuilder: ir.emit(b3, "  store i64 6, ptr %tag_gep\n")
+    let b5 IrBuilder: ir.emit(b4, "  %len_gep  = getelementptr %suru.String, ptr %seq, i32 0, i32 1\n")
+    let b6 IrBuilder: ir.emit(b5, "  %argc64   = sext i32 %argc to i64\n")
+    let b7 IrBuilder: ir.emit(b6, "  store i64 %argc64, ptr %len_gep\n")
+    let b8 IrBuilder: ir.emit(b7, "  %data_gep = getelementptr %suru.String, ptr %seq, i32 0, i32 2\n")
+    let b9 IrBuilder: ir.emit(b8, "  store ptr %argv, ptr %data_gep\n")
+    let b10 IrBuilder: ir.emit(b9, "  %suru_ret = call i64 @suru_main(ptr %seq)\n")
+    let b11 IrBuilder: ir.emit(b10, "  %ret32    = trunc i64 %suru_ret to i32\n")
+    let b12 IrBuilder: ir.emit(b11, "  ret i32 %ret32\n")
+    let b13 IrBuilder: ir.emit(b12, "}\n")
+    ctx: hctx.withHFns(ctx, ctx.fns.append(b13.output))
     return ctx
 }
 
-fn emitHModule(ctx HeapCodegenContext, stmts Array<AstNode>) HeapCodegenContext {
-    ctx: hctx.withHBuilder(ctx, ir.emitModuleHeader(ctx.builder))
+fn emitHModule(ctx HeapCodegenContext, stmts Array<AstNode>, sourceName String) HeapCodegenContext {
+    ctx: hctx.withHBuilder(ctx, ir.emitModuleHeader(ctx.builder, sourceName))
     ctx: registerStringLiterals(ctx, stmts)
     ctx: registerHTypes(ctx, stmts)
     ctx: registerHSumTypes(ctx, stmts)
     ctx: registerHFunctions(ctx, stmts)
-    ctx: hctx.withHBuilder(ctx, prim.emitAllHeapDecls(ctx.builder))
+    // In whole-module mode all registered types are own — mark them all so emitStructHeader
+    // does not emit external declare stubs (which would duplicate the define bodies).
+    let allTypeNames Array<String>: []
+    let ti Int64: 0
+    while ti.lt(ctx.types.len()) { allTypeNames.add(ctx.types.at(ti).name) ti: ti.add(1) }
+    ctx: hctx.withHOwnTypeNames(ctx, allTypeNames)
+    // Add C runtime declarations unconditionally — malloc and free are always needed.
+    // memcpy is needed whenever the module has string literals.
+    ctx: hctx.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    ctx: hctx.addDecl(ctx, "declare void @free(ptr)\n")
+    match ctx.strIndex.len().gt(0) { true: { ctx: hctx.addDecl(ctx, "declare ptr @memcpy(ptr, ptr, i64)\n") } _: {} }
+    ctx: registerModuleConsts(ctx, stmts)
     ctx: htypes.emitAllTypeCloneDrop(ctx)
     let i Int64: 0
     while i.lt(stmts.len()) {

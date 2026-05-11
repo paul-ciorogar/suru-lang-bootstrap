@@ -132,6 +132,22 @@ partial class IRCodeGenerator
         return (rawBool, SuruType.Bool);
     }
 
+    // .compare(rhs) → i64: signed ordering via strcmp; negative/0/positive.
+    // Extracts the data ptr from both strings and calls @strcmp (i32), then sext to i64.
+    // Mirrors the C# EmitCompare logic for numeric types but routes through strcmp.
+    private (string val, SuruType type) EmitStringCompare(string lhsSeqVal, Expression rhsExpr)
+    {
+        var (rhsSeqVal, _) = EmitValue(rhsExpr);
+        _externals.AddStrcmp();
+        var ldata = EmitExtractStringData(lhsSeqVal);
+        var rdata = EmitExtractStringData(rhsSeqVal);
+        var cmpRaw = NextTmp();
+        var result  = NextTmp();
+        _funcs.AppendLine($"  {cmpRaw} = call i32 @strcmp(ptr {ldata}, ptr {rdata})");
+        _funcs.AppendLine($"  {result} = sext i32 {cmpRaw} to i64");
+        return (result, SuruType.Int64);
+    }
+
     // .slice(from, to) → String: from/to are raw i64 (or Struct ptr if dynamic).
     private (string val, SuruType type) EmitStringSlice(
         string seqVal, Expression fromExpr, Expression toExpr)
@@ -214,5 +230,32 @@ partial class IRCodeGenerator
     {
         "from" => EmitInt64FromString(args[0]),
         _ => throw new NotSupportedException($"IR codegen: unknown Int64 static method '{methodName}'"),
+    };
+
+    // Float64.from(str) → raw double: parse a decimal string via strtod.
+    private (string val, SuruType type) EmitFloat64FromString(Expression arg)
+    {
+        var (seqVal, _) = EmitValue(arg);
+        _runtimeDecls.AddFloat64FromString();
+        var raw = NextTmp();
+        _funcs.AppendLine($"  {raw} = call double @suru_float64_from_string(ptr {seqVal})");
+        return (raw, SuruType.Float64);
+    }
+
+    // f.llvmHex() → String: format IEEE-754 hex like "0xC004000000000000".
+    internal (string val, SuruType type) EmitFloat64LlvmHex(string floatVal)
+    {
+        _runtimeDecls.AddFloat64ToLlvmHex();
+        var tmp = NextTmp();
+        _funcs.AppendLine($"  {tmp} = call ptr @suru_float64_to_llvm_hex(double {floatVal})");
+        return (tmp, SuruType.String);
+    }
+
+    // Float64 static method dispatch.
+    internal (string val, SuruType type) EmitFloat64StaticMethod(
+        string methodName, IReadOnlyList<Expression> args) => methodName switch
+    {
+        "from" => EmitFloat64FromString(args[0]),
+        _ => throw new NotSupportedException($"IR codegen: unknown Float64 static method '{methodName}'"),
     };
 }

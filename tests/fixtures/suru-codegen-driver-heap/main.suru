@@ -2,12 +2,23 @@ include "../suru-lexer/suru-lexer.suru"         as lex
 include "../suru-parser/suru-parser.suru"        as parser
 include "../suru-codegen/heap-stmt-codegen.suru" as codegen
 
+fn baseName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(i.add(1), path.len()) } _: {} }
+        i: i.take(1)
+    }
+    return path
+}
+
 fn main(args Array<String>) {
-    let source String:          readFile(args.at(1))
-    let tokens Array<Token>:    lex.tokenize(source)
-    let mod AstModule:          parser.parse(tokens)
-    let ctx HeapCodegenContext: hctx.makeHeapContext()
-    ctx: codegen.emitHModule(ctx, mod.stmts)
-    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
+    let sourcePath String:       args.at(1)
+    let source String:           readFile(sourcePath)
+    let tokens Array<Token>:     lex.tokenize(source)
+    let mod AstModule:           parser.parse(tokens)
+    let ctx HeapCodegenContext:  hctx.makeHeapContext()
+    ctx: codegen.emitHModule(ctx, mod.stmts, baseName(sourcePath))
+    let strGlobSep String: match ctx.strGlobals.len().gt(0) { true: "\n" _: "" }
+    let out String: ctx.builder.output.append(ctx.strGlobals).append(strGlobSep).append(ctx.decls).append(ctx.suruDecls).append(ctx.helpers).append(ctx.fns)
     writeFile(args.at(2), out)
 }

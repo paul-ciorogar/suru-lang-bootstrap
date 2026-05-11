@@ -54,7 +54,7 @@ fn main(args Array<String>) {
     let b IrBuilder: ir.makeBuilder()
 
     // ── Module header ─────────────────────────────────────────────────────────
-    b: ir.emitModuleHeader(b)
+    b: ir.emitModuleHeader(b, "main.suru")
 
     // ── Global string constant ────────────────────────────────────────────────
     // "Hello World!\n\0" = 12 chars + '\n'(0x0A) + '\0'(0x00) = 14 bytes

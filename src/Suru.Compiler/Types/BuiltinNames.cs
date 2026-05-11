@@ -22,5 +22,6 @@ internal static class BuiltinNames
     public const string Clone      = "clone";
     public const string Drop       = "drop";
     public const string ReadFile   = "readFile";
-    public const string WriteFile  = "writeFile";
+    public const string WriteFile     = "writeFile";
+    public const string AppendToFile  = "appendToFile";
 }

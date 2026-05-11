@@ -487,6 +487,22 @@ public sealed class SemanticAnalyzer
                 }
                 break;
 
+            case CallExpression { Name: BuiltinNames.AppendToFile } appendFileCall:
+                if (appendFileCall.Args.Count != 2)
+                    _errors.Add($"{_module.SourcePath}: 'appendToFile' expects exactly 2 arguments");
+                else
+                {
+                    AnalyzeExpression(appendFileCall.Args[0]);
+                    AnalyzeExpression(appendFileCall.Args[1]);
+                    var afArg0Type = InferType(appendFileCall.Args[0]);
+                    var afArg1Type = InferType(appendFileCall.Args[1]);
+                    if (afArg0Type is not null and not SuruType.StringType)
+                        _errors.Add($"{_module.SourcePath}: 'appendToFile' argument 1 expects String, got {afArg0Type}");
+                    if (afArg1Type is not null and not SuruType.StringType)
+                        _errors.Add($"{_module.SourcePath}: 'appendToFile' argument 2 expects String, got {afArg1Type}");
+                }
+                break;
+
             case CallExpression call:
                 var callSig = _scopes.LookupFunction(call.Name);
                 if (callSig is not null)
@@ -624,6 +640,8 @@ public sealed class SemanticAnalyzer
             when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Int64 }    => SuruType.Int64,
         MethodCallExpression { MethodName: "from" } m
             when m.Receiver is VariableReferenceExpression { Name: BuiltinNames.Float64 }  => SuruType.Float64,
+        MethodCallExpression { MethodName: "llvmHex" } m
+            when InferType(m.Receiver) is SuruType.Float64Type                             => SuruType.String,
         MethodCallExpression nsCall
             when nsCall.Receiver is VariableReferenceExpression nsRef2
               && _module.Aliases.Resolve(nsRef2.Name) is { } nsPath2
@@ -637,7 +655,8 @@ public sealed class SemanticAnalyzer
         CallExpression { Name: BuiltinNames.Drop }      => null,
         CallExpression { Name: BuiltinNames.Exit }      => null,
         CallExpression { Name: BuiltinNames.ReadFile }  => SuruType.String,
-        CallExpression { Name: BuiltinNames.WriteFile } => null,
+        CallExpression { Name: BuiltinNames.WriteFile }     => null,
+        CallExpression { Name: BuiltinNames.AppendToFile }  => null,
         CallExpression call when _scopes.LookupFunction(call.Name) is { } fnSig => fnSig.ReturnType,
         _                                    => null,
     };

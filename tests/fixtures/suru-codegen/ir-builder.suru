@@ -19,6 +19,7 @@ type IrBuilder: {
     output     String
     tmpCount   Int64
     labelCount Int64
+    whileCount Int64
 }
 
 // Returned by instruction emitters that produce an SSA value.
@@ -30,32 +31,72 @@ type IrResult: {
 // ─── Core helpers ────────────────────────────────────────────────────────────
 
 fn makeBuilder() IrBuilder {
-    return { output: "", tmpCount: 0, labelCount: 0 }
+    return { output: "", tmpCount: 0, labelCount: 0, whileCount: 0 }
+}
+
+// Create a builder for a new function scope, preserving counters from the previous
+// builder.  The C# codegen shares _tmp and _matchCounter across all functions —
+// this mirrors that behaviour so generated SSA names and match labels match.
+// whileCount is also preserved to avoid potential conflicts across functions.
+fn freshFnBuilder(prev IrBuilder) IrBuilder {
+    return { output: "", tmpCount: prev.tmpCount, labelCount: prev.labelCount, whileCount: prev.whileCount }
 }
 
 // Append raw text to the builder output.
 fn emit(b IrBuilder, text String) IrBuilder {
-    return { output: b.output.append(text), tmpCount: b.tmpCount, labelCount: b.labelCount }
+    return { output: b.output.append(text), tmpCount: b.tmpCount, labelCount: b.labelCount, whileCount: b.whileCount }
 }
 
 // Return a new IrBuilder with a replaced output but unchanged counters.
 // Used internally to avoid repeating the counter fields on every emit.
 fn withOutput(b IrBuilder, out String) IrBuilder {
-    return { output: out, tmpCount: b.tmpCount, labelCount: b.labelCount }
+    return { output: out, tmpCount: b.tmpCount, labelCount: b.labelCount, whileCount: b.whileCount }
 }
 
 // Allocate the next SSA temporary name (%t0, %t1, …) and advance tmpCount.
 fn nextTmp(b IrBuilder) IrResult {
     let name String: "%t".append(b.tmpCount.toString())
-    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount.add(1), labelCount: b.labelCount }
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount.add(1), labelCount: b.labelCount, whileCount: b.whileCount }
     return { builder: nb, name: name }
 }
 
 // Allocate a unique label name (prefix_0, prefix_1, …) and advance labelCount.
 fn nextLabel(b IrBuilder, prefix String) IrResult {
     let name String: prefix.append("_").append(b.labelCount.toString())
-    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount, labelCount: b.labelCount.add(1) }
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount, labelCount: b.labelCount.add(1), whileCount: b.whileCount }
     return { builder: nb, name: name }
+}
+
+// Return just the current label counter as a string and advance labelCount.
+// Callers use this to build full label names like "match_arm_N_0".
+fn nextLabelNum(b IrBuilder) IrResult {
+    let name String: b.labelCount.toString()
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount, labelCount: b.labelCount.add(1), whileCount: b.whileCount }
+    return { builder: nb, name: name }
+}
+
+// Return just the current while counter as a string and advance whileCount.
+// Mirrors C#'s separate _whileCounter — while loops and match use independent counters.
+fn nextWhileNum(b IrBuilder) IrResult {
+    let name String: b.whileCount.toString()
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount, labelCount: b.labelCount, whileCount: b.whileCount.add(1) }
+    return { builder: nb, name: name }
+}
+
+// Emit a named alloca using the variable name + current tmpCount: %name.N = alloca ty.
+// Used for let-bound variables so the IR matches C#'s %name.N naming convention.
+fn emitNamedAlloca(b IrBuilder, name String, ty String) IrResult {
+    let sname String: "%".append(name).append(".").append(b.tmpCount.toString())
+    let nb IrBuilder: { output: b.output, tmpCount: b.tmpCount.add(1), labelCount: b.labelCount, whileCount: b.whileCount }
+    let line String: "  ".append(sname).append(" = alloca ").append(ty).append("\n")
+    return { builder: withOutput(nb, nb.output.append(line)), name: sname }
+}
+
+// Emit a fixed-name alloca: %name = alloca ty.  Used for params (%args.addr, %n.addr)
+// and match result allocas (%match_result_N) where the name is fully known.
+fn emitFixedAlloca(b IrBuilder, name String, ty String) IrBuilder {
+    let line String: "  %".append(name).append(" = alloca ").append(ty).append("\n")
+    return withOutput(b, b.output.append(line))
 }
 
 // Comma-join pre-formatted LLVM argument strings, e.g. ["i64 %t0", "ptr %t1"].
@@ -78,9 +119,10 @@ fn joinArgs(args Array<String>) String {
 // Emit the standard Suru module header: ModuleID comment, source_filename, and
 // forward declarations of the three Suru heap-struct types.  Callers append
 // global constants and declare/define stubs after this.
-fn emitModuleHeader(b IrBuilder) IrBuilder {
-    let hdr String: "; ModuleID = 'suru_module'\n"
-        .append("source_filename = \"suru_module\"\n")
+fn emitModuleHeader(b IrBuilder, sourceName String) IrBuilder {
+    let hdr String: "; ModuleID = '"
+        .append(sourceName).append("'\n")
+        .append("source_filename = \"").append(sourceName).append("\"\n")
         .append("\n")
         .append("%suru.String = type { i64, i64, ptr }\n")
         .append("%suru.Array  = type { i64, i64, i64, i64, ptr }\n")
@@ -158,12 +200,23 @@ fn emitStore(b IrBuilder, ty String, val String, ptrVal String) IrBuilder {
     return withOutput(b, b.output.append(line))
 }
 
-// %tN = getelementptr inbounds elemType, ptr ptrVal, indices
+// %tN = getelementptr elemType, ptr ptrVal, indices
 //   indices — pre-formatted LLVM index list, e.g. "i32 0, i32 0"
 fn emitGEP(b IrBuilder, elemType String, ptrVal String, indices String) IrResult {
     let r IrResult: nextTmp(b)
     let line String: "  ".append(r.name)
-        .append(" = getelementptr inbounds ").append(elemType)
+        .append(" = getelementptr ").append(elemType)
+        .append(", ptr ").append(ptrVal)
+        .append(", ").append(indices).append("\n")
+    return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
+}
+
+// Like emitGEP but emits two spaces before '=' — mirrors C# EmitExtractStringData / EmitArrayData
+// which use aligned formatting for the data-field GEP: "  %tN  = getelementptr ...".
+fn emitGEP2(b IrBuilder, elemType String, ptrVal String, indices String) IrResult {
+    let r IrResult: nextTmp(b)
+    let line String: "  ".append(r.name)
+        .append("  = getelementptr ").append(elemType)
         .append(", ptr ").append(ptrVal)
         .append(", ").append(indices).append("\n")
     return { builder: withOutput(r.builder, r.builder.output.append(line)), name: r.name }
@@ -211,6 +264,13 @@ fn emitCall(b IrBuilder, callType String, fnName String, args Array<String>) IrR
 // call void @fnName(args...)  — for side-effect calls with no result
 fn emitVoidCall(b IrBuilder, fnName String, args Array<String>) IrBuilder {
     let line String: "  call void @".append(fnName).append("(").append(joinArgs(args)).append(")\n")
+    return withOutput(b, b.output.append(line))
+}
+
+// call retType @fnName(args...)  — emit call discarding result (result assigned to void, no %tN =)
+// Used for memcpy whose ptr return is ignored, matching C# codegen behavior.
+fn emitCallDiscard(b IrBuilder, retType String, fnName String, args Array<String>) IrBuilder {
+    let line String: "  call ".append(retType).append(" @").append(fnName).append("(").append(joinArgs(args)).append(")\n")
     return withOutput(b, b.output.append(line))
 }
 

@@ -1,75 +1,201 @@
 // Stage 14e — Per-type clone/drop helper emitters.
 //
-// Extracted from heap-stmt-codegen.suru to keep that file under 500 lines.
 // Generates @suru_clone_T / @suru_drop_T function bodies for every declared
 // named type so the vtable-based clone/drop dispatch in suru_struct.ll can
 // call into them.
+//
+// Counter scheme: a separate cgTmp counter (starting at 0, threaded across
+// all types) mirrors C#'s _cgTmp field.  This produces identical SSA names
+// (%malloc_0, %cgep_1, %cv_2, ...) to the bootstrap compiler output.
 
 include "heap-codegen-context.suru" as hctx
 
-// Build the IR text for cloning one heap field at byte offset `off` (field index `fi`).
-fn cloneHeapFieldText(off Int64, fi Int64) String {
-    let o String: off.toString()
-    let idx String: fi.toString()
-    let r String: "  %fsg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
-    r: r.append("  %frw").append(idx).append(" = load i64, ptr %fsg").append(idx).append("\n")
-    r: r.append("  %fpt").append(idx).append(" = inttoptr i64 %frw").append(idx).append(" to ptr\n")
-    r: r.append("  %fcl").append(idx).append(" = call ptr @suru_clone_dyn(ptr %fpt").append(idx).append(")\n")
-    r: r.append("  %fpi").append(idx).append(" = ptrtoint ptr %fcl").append(idx).append(" to i64\n")
-    r: r.append("  %fdg").append(idx).append(" = getelementptr i8, ptr %new, i64 ").append(o).append("\n")
-    r: r.append("  store i64 %fpi").append(idx).append(", ptr %fdg").append(idx).append("\n")
-    return r
+// Result of a field-copy helper: built IR text plus updated cg counter.
+type CgTextResult: { text String, cgTmp Int64 }
+
+// Result of one full type's clone+drop emit: updated context plus cg counter.
+type CloneDropPair: { ctx HeapCodegenContext, cgTmp Int64 }
+
+// Build a counter-indexed SSA name: %prefix_N.
+fn cgName(prefix String, n Int64) String {
+    return "%".append(prefix).append("_").append(n.toString())
 }
 
-// Build the IR text for dropping one heap field at byte offset `off` (field index `fi`).
-fn dropHeapFieldText(off Int64, fi Int64) String {
-    let o String: off.toString()
-    let idx String: fi.toString()
-    let r String: "  %dg".append(idx).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
-    r: r.append("  %dr").append(idx).append(" = load i64, ptr %dg").append(idx).append("\n")
-    r: r.append("  %dp").append(idx).append(" = inttoptr i64 %dr").append(idx).append(" to ptr\n")
-    r: r.append("  call void @suru_drop_dyn(ptr %dp").append(idx).append(")\n")
-    return r
+// Emit field-by-field i64 copy from %s to dst at byte offset.
+// Allocates 3 counter slots: cgep, cv, dgep.
+fn copyI64Field(dst String, offset Int64, cgTmp Int64) CgTextResult {
+    let sgep String: cgName("cgep", cgTmp)
+    let cv   String: cgName("cv",   cgTmp.add(1))
+    let dgep String: cgName("dgep", cgTmp.add(2))
+    let o    String: offset.toString()
+    let r String: "  ".append(sgep).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  ").append(cv).append("    = load i64, ptr ").append(sgep).append("\n")
+    r: r.append("  ").append(dgep).append(" = getelementptr i8, ptr ").append(dst).append(", i64 ").append(o).append("\n")
+    r: r.append("  store i64 ").append(cv).append(", ptr ").append(dgep).append("\n")
+    return { text: r, cgTmp: cgTmp.add(3) }
 }
 
-// Emit @suru_clone_T and @suru_drop_T for one TypeDecl into ctx.helpers.
-fn emitTypeCloneDrop(ctx HeapCodegenContext, decl TypeDecl) HeapCodegenContext {
+// Emit field-by-field ptr copy from %s to dst at byte offset.
+// Allocates 3 counter slots: pgep, pv, dpgep.
+fn copyPtrField(dst String, offset Int64, cgTmp Int64) CgTextResult {
+    let sgep String: cgName("pgep",  cgTmp)
+    let pv   String: cgName("pv",    cgTmp.add(1))
+    let dgep String: cgName("dpgep", cgTmp.add(2))
+    let o    String: offset.toString()
+    let r String: "  ".append(sgep).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  ").append(pv).append("    = load ptr, ptr ").append(sgep).append("\n")
+    r: r.append("  ").append(dgep).append(" = getelementptr i8, ptr ").append(dst).append(", i64 ").append(o).append("\n")
+    r: r.append("  store ptr ").append(pv).append(", ptr ").append(dgep).append("\n")
+    return { text: r, cgTmp: cgTmp.add(3) }
+}
+
+// Emit recursive clone of one heap field at byte offset from %s into dst.
+// Allocates 6 counter slots: fraw, fptr, fcloned, fi64, fsgep, fdgep.
+// Counter allocation order matches C# (names pre-allocated, emitted with fsgep first).
+fn cloneHeapField(dst String, offset Int64, cgTmp Int64) CgTextResult {
+    let fraw    String: cgName("fraw",    cgTmp)
+    let fptr    String: cgName("fptr",    cgTmp.add(1))
+    let fcloned String: cgName("fcloned", cgTmp.add(2))
+    let fi64    String: cgName("fi64",    cgTmp.add(3))
+    let fsgep   String: cgName("fsgep",   cgTmp.add(4))
+    let fdgep   String: cgName("fdgep",   cgTmp.add(5))
+    let o       String: offset.toString()
+    let r String: "  ".append(fsgep).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  ").append(fraw).append("  = load i64, ptr ").append(fsgep).append("\n")
+    r: r.append("  ").append(fptr).append("   = inttoptr i64 ").append(fraw).append(" to ptr\n")
+    r: r.append("  ").append(fcloned).append("   = call ptr @suru_clone_dyn(ptr ").append(fptr).append(")\n")
+    r: r.append("  ").append(fi64).append("   = ptrtoint ptr ").append(fcloned).append(" to i64\n")
+    r: r.append("  ").append(fdgep).append(" = getelementptr i8, ptr ").append(dst).append(", i64 ").append(o).append("\n")
+    r: r.append("  store i64 ").append(fi64).append(", ptr ").append(fdgep).append("\n")
+    return { text: r, cgTmp: cgTmp.add(6) }
+}
+
+// Emit recursive drop of one heap field at byte offset from %s.
+// Allocates 3 counter slots: fraw, fptr, fgep.
+// Counter allocation order matches C# (fraw first, fgep emitted first in IR).
+fn dropHeapField(offset Int64, cgTmp Int64) CgTextResult {
+    let fraw String: cgName("fraw", cgTmp)
+    let fptr String: cgName("fptr", cgTmp.add(1))
+    let fgep String: cgName("fgep", cgTmp.add(2))
+    let o    String: offset.toString()
+    let r String: "  ".append(fgep).append(" = getelementptr i8, ptr %s, i64 ").append(o).append("\n")
+    r: r.append("  ").append(fraw).append("  = load i64, ptr ").append(fgep).append("\n")
+    r: r.append("  ").append(fptr).append("   = inttoptr i64 ").append(fraw).append(" to ptr\n")
+    r: r.append("  call void @suru_drop_dyn(ptr ").append(fptr).append(")\n")
+    return { text: r, cgTmp: cgTmp.add(3) }
+}
+
+// Emit @suru_clone_T and @suru_drop_T for one TypeDecl.
+// cgTmp is the clone/drop-specific counter (separate from user-function tmpCount).
+fn emitTypeCloneDrop(ctx HeapCodegenContext, decl TypeDecl, cgTmp Int64) CloneDropPair {
     let name String: decl.name
-    let fc Int64: decl.fields.len()
+    let fc   Int64:  decl.fields.len()
     let size String: 32.add(fc.multiply(8)).toString()
+    // Check for heap fields (need clone_dyn / drop_dyn declarations).
+    let hasHeapField Bool: false
+    let chi Int64: 0
+    while chi.lt(fc) {
+        match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(chi).typeName)) {
+            true: {}
+            _: { hasHeapField: true }
+        }
+        chi: chi.add(1)
+    }
+    match hasHeapField {
+        true: {
+            ctx: hctx.addSuruDecl(ctx, "declare ptr  @suru_clone_dyn(ptr)\n")
+            ctx: hctx.addSuruDecl(ctx, "declare void @suru_drop_dyn(ptr)\n")
+        }
+        _: {}
+    }
+    // ── Clone function ────────────────────────────────────────────────────────
+    let mallocName String: cgName("malloc", cgTmp)
+    cgTmp: cgTmp.add(1)
     let h String: "define ptr @suru_clone_".append(name).append("(ptr %s) {\nentry:\n")
-    h: h.append("  %new = call ptr @malloc(i64 ").append(size).append(")\n")
-    h: h.append("  call ptr @memcpy(ptr %new, ptr %s, i64 ").append(size).append(")\n")
+    h: h.append("  ").append(mallocName).append(" = call ptr @malloc(i64 ").append(size).append(")\n")
+    // Copy header: type_tag(0) and variant_idx(8) as i64, clone_fn(16) and drop_fn(24) as ptr.
+    let r0 CgTextResult: copyI64Field(mallocName, 0, cgTmp)
+    h: h.append(r0.text)
+    cgTmp: r0.cgTmp
+    let r1 CgTextResult: copyI64Field(mallocName, 8, cgTmp)
+    h: h.append(r1.text)
+    cgTmp: r1.cgTmp
+    let r2 CgTextResult: copyPtrField(mallocName, 16, cgTmp)
+    h: h.append(r2.text)
+    cgTmp: r2.cgTmp
+    let r3 CgTextResult: copyPtrField(mallocName, 24, cgTmp)
+    h: h.append(r3.text)
+    cgTmp: r3.cgTmp
+    // Copy data fields: scalar fields are copied directly, heap fields via clone_dyn.
     let fi Int64: 0
     while fi.lt(fc) {
         let off Int64: 32.add(fi.multiply(8))
         match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
-            true: {}
-            _: { h: h.append(cloneHeapFieldText(off, fi)) }
+            true: {
+                let rx CgTextResult: copyI64Field(mallocName, off, cgTmp)
+                h: h.append(rx.text)
+                cgTmp: rx.cgTmp
+            }
+            _: {
+                let rx CgTextResult: cloneHeapField(mallocName, off, cgTmp)
+                h: h.append(rx.text)
+                cgTmp: rx.cgTmp
+            }
         }
         fi: fi.add(1)
     }
-    h: h.append("  ret ptr %new\n}\n\n")
+    h: h.append("  ret ptr ").append(mallocName).append("\n}\n\n")
+    // ── Drop function ─────────────────────────────────────────────────────────
     h: h.append("define void @suru_drop_".append(name).append("(ptr %s) {\nentry:\n"))
     fi: 0
     while fi.lt(fc) {
         let off Int64: 32.add(fi.multiply(8))
         match hctx.isScalarSuruType(hctx.makeSuruType(decl.fields.at(fi).typeName)) {
             true: {}
-            _: { h: h.append(dropHeapFieldText(off, fi)) }
+            _: {
+                let rx CgTextResult: dropHeapField(off, cgTmp)
+                h: h.append(rx.text)
+                cgTmp: rx.cgTmp
+            }
         }
         fi: fi.add(1)
     }
     h: h.append("  call void @free(ptr %s)\n  ret void\n}\n\n")
     ctx: hctx.withHHelpers(ctx, ctx.helpers.append(h))
-    return ctx
+    return { ctx: ctx, cgTmp: cgTmp }
 }
 
 // Emit clone/drop helpers for every TypeDecl registered in ctx.types.
+// cgTmp starts at 0 and threads through each type so counter values are
+// globally unique — matching C#'s per-IRCodeGenerator _cgTmp field.
 fn emitAllTypeCloneDrop(ctx HeapCodegenContext) HeapCodegenContext {
+    let cgTmp Int64: 0
     let i Int64: 0
     while i.lt(ctx.types.len()) {
-        ctx: emitTypeCloneDrop(ctx, ctx.types.at(i))
+        let r CloneDropPair: emitTypeCloneDrop(ctx, ctx.types.at(i), cgTmp)
+        ctx: r.ctx
+        cgTmp: r.cgTmp
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// Emit clone/drop helpers ONLY for own types (those whose name is in ownTypeNames).
+// External types (from includes) are skipped — they get helpers in their own .ll file.
+// cgTmp threads through own types only, matching C# IRTypeCloneDropCodeGenerator behaviour.
+fn emitAllTypeCloneDropOwn(ctx HeapCodegenContext, ownTypeNames Array<String>) HeapCodegenContext {
+    let cgTmp Int64: 0
+    let i Int64: 0
+    while i.lt(ctx.types.len()) {
+        let decl TypeDecl: ctx.types.at(i)
+        match hctx.namesContain(ownTypeNames, decl.name) {
+            true: {
+                let r CloneDropPair: emitTypeCloneDrop(ctx, decl, cgTmp)
+                ctx: r.ctx
+                cgTmp: r.cgTmp
+            }
+            _: {}
+        }
         i: i.add(1)
     }
     return ctx

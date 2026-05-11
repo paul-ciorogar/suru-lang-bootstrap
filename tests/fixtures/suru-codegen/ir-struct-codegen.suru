@@ -1,0 +1,335 @@
+// ir-struct-codegen.suru — Struct IR emission helpers.
+//
+// Mirrors IRStructCodeGenerator.cs (C# partial class file).
+//
+// Every Suru Struct / variant value is a `ptr` to a flat fixed-layout heap allocation:
+//
+//   Header (32 bytes):
+//     offset  0: i64 type_tag    (4=struct, 7=variant)
+//     offset  8: i64 variant_idx (0 for non-variants)
+//     offset 16: ptr clone_fn    (@suru_clone_T, sig: ptr(ptr))
+//     offset 24: ptr drop_fn     (@suru_drop_T, sig: void(ptr))
+//
+//   Fields (8 bytes each, starting at offset 32):
+//     offset 32 + i*8: i64 field[i]  (TypeDecl.fields order)
+//
+//   Field slot encoding:
+//     Bool    → zext i1  to i64; restore with trunc i64 to i1
+//     Int32   → sext i32 to i64; restore with trunc i64 to i32
+//     Int64   → stored as-is (i64)
+//     Float64 → bitcast double to i64; restore with bitcast i64 to double
+//     heap    → ptrtoint ptr to i64; restore with inttoptr i64 to ptr
+//
+//   Total size: (4 + field_count) * 8 bytes.  One malloc per struct literal.
+//
+// ── Clone / Drop vtable ────────────────────────────────────────────────────────
+// Per-type @suru_clone_T / @suru_drop_T are emitted into ctx.helpers by
+// ir-type-clone-drop-codegen.suru BEFORE any user function bodies (for own types).
+// For types from included modules, declare stubs are emitted into ctx.extCloneDropDecls
+// by emitStructLiteralAlloc when it detects the type is not in ctx.typeDecls.
+// Explicit clone(x)/drop(x) calls route through @suru_clone_dyn / @suru_drop_dyn,
+// which read the vtable at offsets 16/24 for tag=4 and tag=7.
+//
+// ── Design: no emitValue calls ─────────────────────────────────────────────────
+// All functions receive pre-emitted SSA names (caller has already called emitValue).
+// emitStructLiteralFields takes pre-emitted field SSA names and their Suru types;
+// emitFieldAccess and emitFieldAssignment receive a pre-emitted receiver SSA name.
+//
+// Include DAG: depends on ir-box-codegen.suru → ir-codegen-types.suru → ir-builder.suru.
+// Imported by ir-codegen.suru (the mutual-recursion hub).
+
+include "ir-codegen-types.suru" as types
+include "ir-builder.suru" as ir
+include "ir-box-codegen.suru" as box
+
+// ─── Geometry helpers ─────────────────────────────────────────────────────────
+
+// Total byte size of a flat struct with the given field count.
+// 32-byte header + 8 bytes per field.
+// Mirrors C# StructSize(int).
+fn structSize(fieldCount Int64) Int64 {
+    return 32.add(fieldCount.multiply(8))
+}
+
+// Byte offset of field i in the flat struct layout (0-based).
+// Mirrors C# FieldOffset(int).
+fn fieldOffset(fieldIdx Int64) Int64 {
+    return 32.add(fieldIdx.multiply(8))
+}
+
+// ─── Scalar ↔ i64 for struct field slots ─────────────────────────────────────
+// Scalars are widened/bitcast directly — no Box allocation.
+// Heap values (String, Array, NamedType) are stored as ptrtoint.
+
+// Convert a Suru value to the i64 stored in a field slot.
+// Mirrors C# StructFieldToI64.
+fn structFieldToI64(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    match suruType {
+        "Bool": {
+            // Zero-extend i1 → i64 (preserves 0/1 without sign-extension).
+            let tR IrResult: ir.emitZext(ctx.builder, "i1", val, "i64")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i64", suruType: "Int64" }
+        }
+        "Int32": {
+            // Sign-extend i32 → i64 to preserve negative values.
+            let tR IrResult: ir.emitSext(ctx.builder, "i32", val, "i64")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i64", suruType: "Int64" }
+        }
+        "Int64": {
+            // Already i64 — pass through unchanged.
+            return { ctx: ctx, name: val, llvmType: "i64", suruType: "Int64" }
+        }
+        "Float64": {
+            // Bitcast double bit-pattern to i64 — no numeric conversion.
+            let tR IrResult: ir.emitBitcast(ctx.builder, "double", val, "i64")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i64", suruType: "Int64" }
+        }
+        _: {
+            // Heap type (String, Array, NamedType): ptrtoint ptr → i64.
+            let tR IrResult: ir.emitPtrToInt(ctx.builder, val)
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i64", suruType: "Int64" }
+        }
+    }
+}
+
+// Convert an i64 field slot value back to its native Suru type.
+// Inverse of structFieldToI64.
+// Mirrors C# StructFieldFromI64.
+fn structFieldFromI64(ctx IrCodegenContext, raw String, suruType String) CodegenResult {
+    match suruType {
+        "Bool": {
+            // Truncate i64 → i1; recover the 0/1 boolean.
+            let tR IrResult: ir.emitTrunc(ctx.builder, "i64", raw, "i1")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i1", suruType: "Bool" }
+        }
+        "Int32": {
+            // Truncate i64 → i32 (low 32 bits; sign preserved because sext stored the full value).
+            let tR IrResult: ir.emitTrunc(ctx.builder, "i64", raw, "i32")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "i32", suruType: "Int32" }
+        }
+        "Int64": {
+            // Already i64 — pass through unchanged.
+            return { ctx: ctx, name: raw, llvmType: "i64", suruType: "Int64" }
+        }
+        "Float64": {
+            // Bitcast i64 bit-pattern back to double.
+            let tR IrResult: ir.emitBitcast(ctx.builder, "i64", raw, "double")
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "double", suruType: "Float64" }
+        }
+        _: {
+            // Heap type (String, Array, NamedType): inttoptr i64 → ptr.
+            let tR IrResult: ir.emitIntToPtr(ctx.builder, raw)
+            ctx.builder: tR.builder
+            return { ctx: ctx, name: tR.name, llvmType: "ptr", suruType: suruType }
+        }
+    }
+}
+
+// ─── Struct literal allocation ────────────────────────────────────────────────
+
+// Allocate the flat struct header for typeName: malloc(structSize) + write
+// type_tag=4, variant_idx=0, vtable pointers @suru_clone_T/@suru_drop_T.
+//
+// typeName must be a declared struct type — callers are responsible for validation.
+// Called by ir-codegen.suru BEFORE emitStructLiteralFields writes the field slots.
+//
+// Variant creation (type_tag=7, variant_idx=N) is patched in by ir-codegen.suru
+// AFTER this call, by overwriting bytes 0 and 8 with GEP stores — mirrors
+// the C# IRFunctionCodeGenerator.EmitStmt variant-annotation path.
+//
+// External type detection: if typeName is NOT in ctx.typeDecls (i.e. it comes from
+// an included module), declare stubs for @suru_clone_T/@suru_drop_T are added to
+// ctx.extCloneDropDecls.  Own types already have define bodies in ctx.helpers
+// emitted by ir-type-clone-drop-codegen.suru before user function bodies.
+//
+// Mirrors the malloc + header-setup portion of C# EmitStructLiteral.
+fn emitStructLiteralAlloc(ctx IrCodegenContext, typeName String) CodegenResult {
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    // Determine field count from the registered TypeDecl.
+    let decl TypeDecl: types.lookupType(ctx, typeName)
+    let fcount Int64: decl.fields.len()
+    let size Int64: structSize(fcount)
+    let mallocArgs Array<String>: []
+    mallocArgs.add("i64 ".append(size.toString()))
+    let hdrR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", mallocArgs)
+    ctx.builder: hdrR.builder
+    let mem String: hdrR.name
+
+    // type_tag = 4 (Struct).  Overwritten to 7 for variants by the caller.
+    let ttGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 0")
+    ctx.builder: ttGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "4", ttGr.name)
+
+    // variant_idx = 0.  Overwritten for variants by the caller.
+    let viGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 8")
+    ctx.builder: viGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", "0", viGr.name)
+
+    // clone_fn at offset 16: @suru_clone_T (ptr → ptr).
+    let cfGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 16")
+    ctx.builder: cfGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "ptr", "@suru_clone_".append(typeName), cfGr.name)
+
+    // drop_fn at offset 24: @suru_drop_T (ptr → void).
+    let dfGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 24")
+    ctx.builder: dfGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "ptr", "@suru_drop_".append(typeName), dfGr.name)
+
+    // External type detection: if typeName is not an own type, add declare stubs
+    // so the LLVM assembler can resolve @suru_clone_T / @suru_drop_T forward references.
+    // Mirrors C# IRStructCodeGenerator.EmitStructLiteral adding to _externalTypeCloneDrop.
+    match types.isOwnType(ctx, typeName) {
+        true: {}
+        _: { ctx: types.addExtCloneDropDecl(ctx, typeName) }
+    }
+
+    return { ctx: ctx, name: mem, llvmType: "ptr", suruType: typeName }
+}
+
+// Write field values into the flat struct at ptr mem.
+// Iterates TypeDecl fields in canonical order (TypeDeclaration.Fields), matching
+// the field slot offsets computed by fieldOffset(i).  For each declared field:
+//   - if its name appears in fieldNames: encode the corresponding SSA + store.
+//   - otherwise: zero-initialize (store i64 0) — critical for heap-typed absent fields
+//     so suru_drop_T doesn't dereference garbage when the struct is later dropped.
+// fieldNames/fieldSSAs/fieldSuruTypes are parallel arrays for the literal's provided fields.
+//
+// Mirrors the field-store loop of C# EmitStructLiteral.
+fn emitStructLiteralFields(ctx IrCodegenContext, mem String, typeName String, fieldNames Array<String>, fieldSSAs Array<String>, fieldSuruTypes Array<String>) IrCodegenContext {
+    let decl TypeDecl: types.lookupType(ctx, typeName)
+    let i Int64: 0
+    while i.lt(decl.fields.len()) {
+        let tdFieldName String: decl.fields.at(i).name
+        let offset Int64: fieldOffset(i)
+        let fGr IrResult: ir.emitGEP(ctx.builder, "i8", mem, "i64 ".append(offset.toString()))
+        ctx.builder: fGr.builder
+        // Linear scan: find this TypeDecl field in the literal's provided fields.
+        let foundIdx Int64: -1
+        let k Int64: 0
+        while k.lt(fieldNames.len()) {
+            match fieldNames.at(k).equals(tdFieldName) { true: { foundIdx: k } _: {} }
+            k: k.add(1)
+        }
+        match foundIdx.equals(-1) {
+            true: {
+                // Absent field — zero-initialize so heap-typed slots hold null (not garbage).
+                ctx.builder: ir.emitStore(ctx.builder, "i64", "0", fGr.name)
+            }
+            _: {
+                // Present field — encode value as i64 and store into the slot.
+                let fieldSsa String: fieldSSAs.at(foundIdx)
+                let fieldSuruType String: fieldSuruTypes.at(foundIdx)
+                let asI64 CodegenResult: structFieldToI64(ctx, fieldSsa, fieldSuruType)
+                ctx: asI64.ctx
+                ctx.builder: ir.emitStore(ctx.builder, "i64", asI64.name, fGr.name)
+            }
+        }
+        i: i.add(1)
+    }
+    return ctx
+}
+
+// ─── Field access ─────────────────────────────────────────────────────────────
+
+// Emit a read of a single struct field by name.
+// recv is the pre-emitted SSA ptr to the struct (or variant — same flat layout).
+// recvSuruType is the Suru type name of the receiver (e.g. "Token", "Circle").
+// fieldName is the Suru field identifier.
+// Returns the decoded field value in its native Suru type.
+//
+// Variant receivers are handled transparently: variant names ARE TypeDecl names
+// (e.g. "Circle" has its own TypeDecl), so fieldIndex resolves without extra steps.
+// The C# codegen calls @suru_variant_inner first for variants; since that function
+// is identity (flat layout), we skip it here and GEP directly.
+//
+// Mirrors C# EmitFieldAccess.
+fn emitFieldAccess(ctx IrCodegenContext, recv String, recvSuruType String, fieldName String) CodegenResult {
+    let decl TypeDecl: types.lookupType(ctx, recvSuruType)
+    let fIdx Int64: types.fieldIndex(decl, fieldName)
+    let offset Int64: fieldOffset(fIdx)
+    let fGr IrResult: ir.emitGEP(ctx.builder, "i8", recv, "i64 ".append(offset.toString()))
+    ctx.builder: fGr.builder
+    // C# emits "  {raw}  = load i64, ptr {fGep}" — two spaces after the SSA name.
+    // ir.emitLoad uses one space, so we manually emit the double-space variant.
+    let rawR IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: rawR.builder
+    let loadLine String: "  ".append(rawR.name).append("  = load i64, ptr ").append(fGr.name).append("\n")
+    ctx.builder: ir.emit(ctx.builder, loadLine)
+    // Resolve the field's declared Suru type for the slot-decode step.
+    // makeSuruType converts annotation strings (e.g. "Array<Token>") to encoding
+    // (e.g. "Array:Token") matching VarEntry.suruType conventions.
+    let annotation String: decl.fields.at(fIdx).typeName
+    let fieldSuruType String: types.makeSuruType(annotation)
+    return structFieldFromI64(ctx, rawR.name, fieldSuruType)
+}
+
+// ─── Field assignment ─────────────────────────────────────────────────────────
+
+// Emit a write to a single struct field.
+// recv is the pre-emitted SSA ptr; val / valSuruType are the pre-emitted new value.
+// Mirrors C# EmitFieldAssignment.
+fn emitFieldAssignment(ctx IrCodegenContext, recv String, recvSuruType String, fieldName String, val String, valSuruType String) IrCodegenContext {
+    let decl TypeDecl: types.lookupType(ctx, recvSuruType)
+    let fIdx Int64: types.fieldIndex(decl, fieldName)
+    let offset Int64: fieldOffset(fIdx)
+    // Encode the new value as i64 before writing into the field slot.
+    let asI64 CodegenResult: structFieldToI64(ctx, val, valSuruType)
+    ctx: asI64.ctx
+    let fGr IrResult: ir.emitGEP(ctx.builder, "i8", recv, "i64 ".append(offset.toString()))
+    ctx.builder: fGr.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i64", asI64.name, fGr.name)
+    return ctx
+}
+
+// ─── Clone / Drop ─────────────────────────────────────────────────────────────
+// Explicit clone(x)/drop(x) route through suru_clone_dyn/suru_drop_dyn, which
+// read the vtable at offsets 16/24.  Per-type @suru_clone_T/@suru_drop_T bodies
+// are emitted into ctx.helpers by ir-type-clone-drop-codegen.suru.
+
+// clone(x) → deep copy via suru_clone_dyn (vtable dispatch for tag=4/7).
+// Mirrors C# EmitCloneStructDispatch.
+fn emitStructClone(ctx IrCodegenContext, recv String, recvSuruType String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_clone_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_clone_dyn", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: recvSuruType }
+}
+
+// drop(x): deallocate via suru_drop_dyn (vtable dispatch for tag=4/7).
+// Returns a null placeholder — drop is always used as a statement, result discarded.
+// Mirrors C# EmitDropStructDispatch.
+fn emitStructDrop(ctx IrCodegenContext, recv String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare void @suru_drop_dyn(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(recv))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "suru_drop_dyn", args)
+    return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" }
+}
+
+// ─── Dispatch hub ──────────────────────────────────────────────────────────────
+
+// Route a NamedType/variant receiver method call to the correct emitter.
+// recv:         SSA name of the struct ptr (pre-emitted by emitMethodCall in ir-codegen.suru).
+// recvSuruType: Suru type name of the receiver (e.g. "Token", "Circle").
+// args:         pre-emitted SSA names of each argument.
+//
+// Only clone/drop are valid instance method calls on struct values; field access
+// is handled via emitFieldAccess (called for FieldAccessNode in emitValue).
+//
+// Mirrors the NamedType arm of C# EmitMethodCall.
+fn emitStructMethod(ctx IrCodegenContext, method String, recv String, recvSuruType String, args Array<String>) CodegenResult {
+    match method {
+        "clone": { return emitStructClone(ctx, recv, recvSuruType) }
+        "drop":  { return emitStructDrop(ctx, recv) }
+        _:       { return { ctx: ctx, name: "null", llvmType: "ptr", suruType: "void" } }
+    }
+}

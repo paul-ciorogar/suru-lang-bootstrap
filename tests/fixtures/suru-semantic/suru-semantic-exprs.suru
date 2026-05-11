@@ -276,12 +276,13 @@ fn analyzeExpr(state AnalyzerState, expr AstNode) AnalyzerState {
                 true: semantic.addError(state, "'".append(name).append("' expects exactly 1 argument"))
                 _: {}
             }
-            match name.equals("writeFile") and not argCount.equals(2) {
-                true: semantic.addError(state, "'writeFile' expects exactly 2 arguments")
+            let is2ArgBuiltin Bool: name.equals("writeFile") or name.equals("appendToFile")
+            match is2ArgBuiltin and not argCount.equals(2) {
+                true: semantic.addError(state, "'".append(name).append("' expects exactly 2 arguments"))
                 _: {}
             }
             let paramCount Int64: lookupFnParamCount(state, name)
-            match not is1ArgBuiltin and not name.equals("writeFile") and paramCount.gte(0) and not argCount.equals(paramCount) {
+            match not is1ArgBuiltin and not is2ArgBuiltin and paramCount.gte(0) and not argCount.equals(paramCount) {
                 true: semantic.addError(state, "function '".append(name).append("' called with ").append(argCount.toString()).append(" argument(s), expected ").append(paramCount.toString()))
                 _: {}
             }

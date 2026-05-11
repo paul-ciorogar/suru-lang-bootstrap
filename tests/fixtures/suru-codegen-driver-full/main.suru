@@ -44,6 +44,75 @@ fn dirName(path String) String {
     return "./"
 }
 
+fn baseName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(i.add(1), path.len()) } _: {} }
+        i: i.take(1)
+    }
+    return path
+}
+
+// Normalize an absolute path by resolving all "/../" segments.
+// Splits on "/" into a segment stack: pushes normal segments, pops on "..".
+// Avoids the out-of-bounds risk of scanning character-by-character with fixed offsets.
+fn normalizePath(path String) String {
+    let parts Array<String>: []
+    let i Int64: 0
+    let segStart Int64: 0
+    while i.lte(path.len()) {
+        let done Bool: i.equals(path.len())
+        match done {
+            true: {
+                parts.add(path.slice(segStart, i))
+                i: i.add(1)
+            }
+            _: {
+                match path.at(i).equals("/") {
+                    true: {
+                        parts.add(path.slice(segStart, i))
+                        segStart: i.add(1)
+                        i: i.add(1)
+                    }
+                    _: { i: i.add(1) }
+                }
+            }
+        }
+    }
+    let stack Array<String>: []
+    let stackLen Int64: 0
+    let j Int64: 0
+    while j.lt(parts.len()) {
+        let seg String: parts.at(j)
+        match seg.equals("..") {
+            true: {
+                match stackLen.gt(0) {
+                    true: { stackLen: stackLen.take(1) }
+                    _: {}
+                }
+            }
+            _: {
+                match stackLen.lt(stack.len()) {
+                    true: { stack.set(seg, stackLen) }
+                    _: { stack.add(seg) }
+                }
+                stackLen: stackLen.add(1)
+            }
+        }
+        j: j.add(1)
+    }
+    let result String: ""
+    let k Int64: 0
+    while k.lt(stackLen) {
+        match k.equals(0) {
+            true: { result: stack.at(k) }
+            _: { result: result.append("/").append(stack.at(k)) }
+        }
+        k: k.add(1)
+    }
+    return result
+}
+
 // Carries accumulated declarations and the set of already-resolved absolute
 // paths so transitive and diamond includes are handled in a single recursive
 // pass without re-processing any file.
@@ -75,7 +144,7 @@ fn resolveIncludesRec(stmts Array<AstNode>, dir String, state ResolveState) Reso
         let s AstNode: stmts.at(i)
         match s {
             IncludeNode: {
-                let fullPath String: dir.append(s.path)
+                let fullPath String: normalizePath(dir.append(s.path))
                 match pathResolved(state.resolved, fullPath) {
                     false: {
                         state.resolved.add(fullPath)
@@ -107,7 +176,7 @@ fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
         let s AstNode: mainStmts.at(i)
         match s {
             IncludeNode: {
-                let fullPath String: dir.append(s.path)
+                let fullPath String: normalizePath(dir.append(s.path))
                 match pathResolved(state.resolved, fullPath) {
                     false: {
                         state.resolved.add(fullPath)
@@ -223,7 +292,9 @@ fn main(args Array<String>) {
 
     // Code generation proceeds only when semantic analysis passes.
     let ctx HeapCodegenContext: hctx.makeHeapContext()
-    ctx: codegen.emitHModule(ctx, stmts)
-    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
+    ctx: codegen.emitHModule(ctx, stmts, baseName(sourcePath))
+    let strGlobSep String: match ctx.strIndex.len().gt(0) { true: "\n" _: "" }
+    let extSep String: match ctx.extCloneDropDecls.len().gt(0) { true: "\n" _: "" }
+    let out String: ctx.builder.output.append(ctx.strGlobals).append(strGlobSep).append(ctx.decls).append(ctx.suruDecls).append(ctx.extCloneDropDecls).append(extSep).append(ctx.helpers).append(ctx.fns)
     writeFile(outputPath, out)
 }

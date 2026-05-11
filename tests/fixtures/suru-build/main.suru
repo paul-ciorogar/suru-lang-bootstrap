@@ -18,7 +18,7 @@
 
 include "../suru-lexer/suru-lexer.suru"                   as lex
 include "../suru-parser/suru-parser.suru"                  as parser
-include "../suru-codegen/heap-stmt-codegen.suru"           as codegen
+include "../suru-codegen/ir-codegen.suru"                  as irCodegen
 include "../suru-semantic/suru-semantic.suru"              as semantic
 include "../suru-semantic/suru-semantic-passes.suru"       as passes
 include "../suru-semantic/suru-semantic-stmts.suru"        as semstmts
@@ -37,10 +37,84 @@ fn dirName(path String) String {
     return "./"
 }
 
+// Return the filename component of a path (everything after the last '/').
+fn baseName(path String) String {
+    let i Int64: path.len().take(1)
+    while i.gte(0) {
+        match path.at(i).equals("/") { true: { return path.slice(i.add(1), path.len()) } _: {} }
+        i: i.take(1)
+    }
+    return path
+}
+
+// Normalize an absolute path by resolving all "/../" segments.
+// Splits on "/" into a segment stack: pushes normal segments, pops on "..".
+// Avoids the out-of-bounds risk of scanning character-by-character with fixed offsets.
+fn normalizePath(path String) String {
+    let parts Array<String>: []
+    let i Int64: 0
+    let segStart Int64: 0
+    while i.lte(path.len()) {
+        let done Bool: i.equals(path.len())
+        match done {
+            true: {
+                parts.add(path.slice(segStart, i))
+                i: i.add(1)
+            }
+            _: {
+                match path.at(i).equals("/") {
+                    true: {
+                        parts.add(path.slice(segStart, i))
+                        segStart: i.add(1)
+                        i: i.add(1)
+                    }
+                    _: { i: i.add(1) }
+                }
+            }
+        }
+    }
+    let stack Array<String>: []
+    let stackLen Int64: 0
+    let j Int64: 0
+    while j.lt(parts.len()) {
+        let seg String: parts.at(j)
+        match seg.equals("..") {
+            true: {
+                match stackLen.gt(0) {
+                    true: { stackLen: stackLen.take(1) }
+                    _: {}
+                }
+            }
+            _: {
+                match stackLen.lt(stack.len()) {
+                    true: { stack.set(seg, stackLen) }
+                    _: { stack.add(seg) }
+                }
+                stackLen: stackLen.add(1)
+            }
+        }
+        j: j.add(1)
+    }
+    let result String: ""
+    let k Int64: 0
+    while k.lt(stackLen) {
+        match k.equals(0) {
+            true: { result: stack.at(k) }
+            _: { result: result.append("/").append(stack.at(k)) }
+        }
+        k: k.add(1)
+    }
+    return result
+}
+
 // Carries accumulated declarations and the set of already-resolved absolute
 // paths so transitive and diamond includes are handled in a single recursive
 // pass without re-processing any file.
 type ResolveState: { decls Array<AstNode>, resolved Array<String> }
+
+// Return value of resolveIncludes: merged statement list + ordered deduplicated
+// list of included absolute source paths (in depth-first resolution order).
+type ResolveResult: { stmts Array<AstNode>, includedPaths Array<String> }
 
 // Linear scan: true if path already appears in the resolved list.
 fn pathResolved(resolved Array<String>, path String) Bool {
@@ -58,17 +132,44 @@ fn pathResolved(resolved Array<String>, path String) Bool {
 // Depth-first recursive resolver.  For each IncludeNode in stmts:
 //   - skip if the absolute path is already in state.resolved (diamond dedup)
 //   - otherwise mark as resolved, recurse into that file's own includes first,
-//     then add its FnDeclNode / TypeDeclNode / SumTypeDeclNode to state.decls.
+//     then add its FnDeclNode / TypeDeclNode / SumTypeDeclNode / scalar LetNode
+//     to state.decls.  Scalar LetNode items (Int64/Bool/Float64 literals) are
+//     merged so that included-file module constants appear in the output — this
+//     mirrors C# IncludeResolver which merges scalar LetStatement constants.
 // Non-include declaration nodes in stmts are added directly to state.decls.
-// All other node kinds (LetNode, ExprStmt, …) are skipped — they belong only
+// All other node kinds (ExprStmt, …) are skipped — they belong only
 // to the file that defines them and must not leak into other compilation units.
 fn resolveIncludesRec(stmts Array<AstNode>, dir String, state ResolveState) ResolveState {
+    // Pass 1: add this file's own declarations first, before any sub-includes.
+    // Mirrors C#'s "own stmts first" ordering in IncludeResolver.Resolve so that
+    // the merged declaration list is in pre-order DFS — parent file's FnDecls
+    // appear before those of the files it includes.
     let i Int64: 0
     while i.lt(stmts.len()) {
         let s AstNode: stmts.at(i)
         match s {
+            FnDeclNode:      { state.decls.add(s) }
+            TypeDeclNode:    { state.decls.add(s) }
+            SumTypeDeclNode: { state.decls.add(s) }
+            LetNode: {
+                match s.value {
+                    IntLitNode:   { state.decls.add(s) }
+                    BoolLitNode:  { state.decls.add(s) }
+                    FloatLitNode: { state.decls.add(s) }
+                    _: {}
+                }
+            }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    // Pass 2: recurse into sub-includes (their decls append after this file's own).
+    let j Int64: 0
+    while j.lt(stmts.len()) {
+        let s AstNode: stmts.at(j)
+        match s {
             IncludeNode: {
-                let fullPath String: dir.append(s.path)
+                let fullPath String: normalizePath(dir.append(s.path))
                 match pathResolved(state.resolved, fullPath) {
                     false: {
                         state.resolved.add(fullPath)
@@ -80,26 +181,26 @@ fn resolveIncludesRec(stmts Array<AstNode>, dir String, state ResolveState) Reso
                     _: {}
                 }
             }
-            FnDeclNode:      { state.decls.add(s) }
-            TypeDeclNode:    { state.decls.add(s) }
-            SumTypeDeclNode: { state.decls.add(s) }
             _: {}
         }
-        i: i.add(1)
+        j: j.add(1)
     }
     return state
 }
 
-// Resolve all transitive includes from mainStmts, then append the main file's
-// own non-include nodes.
-fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
+// Resolve all transitive includes from mainStmts.  Returns the merged statement
+// list (main file's own nodes FIRST, then transitive declarations — mirrors C#
+// IncludeResolver.Resolve which seeds mergedStatements from the main module's
+// own non-include statements before appending external declarations) and the
+// ordered deduplicated list of included absolute source paths (depth-first).
+fn resolveIncludes(mainStmts Array<AstNode>, dir String) ResolveResult {
     let state ResolveState: { decls: [], resolved: [] }
     let i Int64: 0
     while i.lt(mainStmts.len()) {
         let s AstNode: mainStmts.at(i)
         match s {
             IncludeNode: {
-                let fullPath String: dir.append(s.path)
+                let fullPath String: normalizePath(dir.append(s.path))
                 match pathResolved(state.resolved, fullPath) {
                     false: {
                         state.resolved.add(fullPath)
@@ -115,9 +216,8 @@ fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
         }
         i: i.add(1)
     }
-    // Transitive declarations are already in state.decls; append main file's
-    // own nodes (everything except include directives) after them.
-    let all Array<AstNode>: state.decls
+    // Main file's own nodes FIRST (mirrors C# order), then transitive declarations.
+    let all Array<AstNode>: []
     let j Int64: 0
     while j.lt(mainStmts.len()) {
         let s AstNode: mainStmts.at(j)
@@ -127,7 +227,12 @@ fn resolveIncludes(mainStmts Array<AstNode>, dir String) Array<AstNode> {
         }
         j: j.add(1)
     }
-    return all
+    let k Int64: 0
+    while k.lt(state.decls.len()) {
+        all.add(state.decls.at(k))
+        k: k.add(1)
+    }
+    return { stmts: all, includedPaths: state.resolved }
 }
 
 // ─── Semantic analysis helpers ─────────────────────────────────────────────────
@@ -187,6 +292,71 @@ fn printErrorsFrom(state AnalyzerState, path String, i Int64) {
     }
 }
 
+// ─── Own-declaration collectors ────────────────────────────────────────────────
+
+// Collect the names of all FnDeclNode items in the raw parsed module statements.
+// Called BEFORE resolveIncludes so only the main file's own functions are captured.
+fn collectFnNames(stmts Array<AstNode>) Array<String> {
+    let names Array<String>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            FnDeclNode: { names.add(s.name) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return names
+}
+
+// Collect the names of all TypeDeclNode and SumTypeDeclNode items in the raw parsed
+// module statements (own types only, before include resolution).
+fn collectTypeNames(stmts Array<AstNode>) Array<String> {
+    let names Array<String>: []
+    let i Int64: 0
+    while i.lt(stmts.len()) {
+        let s AstNode: stmts.at(i)
+        match s {
+            TypeDeclNode:    { names.add(s.name) }
+            SumTypeDeclNode: { names.add(s.name) }
+            _: {}
+        }
+        i: i.add(1)
+    }
+    return names
+}
+
+// ─── Per-file compilation helpers ─────────────────────────────────────────────
+
+// Strip the extension from a filename component (e.g. "suru-lexer.suru" → "suru-lexer").
+// Scans backwards for the last '.'; if none found, returns the name unchanged.
+fn fileNameStem(path String) String {
+    let name String: baseName(path)
+    let i Int64: name.len().take(1)
+    while i.gte(0) {
+        match name.at(i).equals(".") { true: { return name.slice(0, i) } _: {} }
+        i: i.take(1)
+    }
+    return name
+}
+
+// Compile a single source file and write its .ll to outDir/<stem>.ll.
+// Mirrors C# new Compiler(path).GenerateIr(): own functions get full definitions,
+// functions from that file's includes get declare stubs.
+// Semantic analysis is intentionally skipped — library files are already validated
+// when the root file is compiled; skipping avoids duplicate error output.
+fn compileOneFile(sourcePath String, outDir String) {
+    let src String: readFile(sourcePath)
+    let tokens Array<Token>: lex.tokenize(src)
+    let mod AstModule: parser.parse(tokens)
+    let ownFnNames Array<String>: collectFnNames(mod.stmts)
+    let ownTypeNames Array<String>: collectTypeNames(mod.stmts)
+    let resolved ResolveResult: resolveIncludes(mod.stmts, dirName(sourcePath))
+    let irText String: irCodegen.generate(resolved.stmts, baseName(sourcePath), ownFnNames, ownTypeNames)
+    writeFile(outDir.append(fileNameStem(sourcePath)).append(".ll"), irText)
+}
+
 // ─── Entry point ───────────────────────────────────────────────────────────────
 
 fn main(args Array<String>) {
@@ -195,7 +365,12 @@ fn main(args Array<String>) {
     let source String: readFile(sourcePath)
     let tokens Array<Token>: lex.tokenize(source)
     let mod AstModule: parser.parse(tokens)
-    let stmts Array<AstNode>: resolveIncludes(mod.stmts, dirName(sourcePath))
+    // Collect own function and type names BEFORE include resolution so only
+    // declarations from this source file are captured (not from includes).
+    let ownFnNames Array<String>: collectFnNames(mod.stmts)
+    let ownTypeNames Array<String>: collectTypeNames(mod.stmts)
+    let resolved ResolveResult: resolveIncludes(mod.stmts, dirName(sourcePath))
+    let stmts Array<AstNode>: resolved.stmts
 
     // Semantic analysis:
     //   Pre-passes over ALL stmts — registers types/functions from included libraries
@@ -214,8 +389,17 @@ fn main(args Array<String>) {
     }
 
     // Code generation proceeds only when semantic analysis passes.
-    let ctx HeapCodegenContext: hctx.makeHeapContext()
-    ctx: codegen.emitHModule(ctx, stmts)
-    let out String: ctx.builder.output.append(ctx.strGlobals).append(ctx.helpers).append(ctx.fns)
-    writeFile(outputPath, out)
+    // Per-module mode: emit only own function bodies + declare stubs for externals,
+    // matching the C# compiler's per-source-file IR output.
+    let irText String: irCodegen.generate(stmts, baseName(sourcePath), ownFnNames, ownTypeNames)
+    writeFile(outputPath, irText)
+
+    // Compile each included file into its own .ll, matching C# CompileIR behaviour
+    // (each included source path gets a standalone IR file in the same output dir).
+    let outDir String: dirName(outputPath)
+    let pi Int64: 0
+    while pi.lt(resolved.includedPaths.len()) {
+        compileOneFile(resolved.includedPaths.at(pi), outDir)
+        pi: pi.add(1)
+    }
 }

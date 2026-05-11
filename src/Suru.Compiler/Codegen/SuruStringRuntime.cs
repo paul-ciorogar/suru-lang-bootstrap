@@ -23,11 +23,13 @@ declare ptr  @malloc(i64)
 declare ptr  @memcpy(ptr, ptr, i64)
 declare void @free(ptr)
 declare i32  @strcmp(ptr, ptr)
-declare i64  @strtol(ptr, ptr, i32)
-declare i32  @snprintf(ptr, i64, ptr, ...)
+declare i64    @strtol(ptr, ptr, i32)
+declare double @strtod(ptr, ptr)
+declare i32    @snprintf(ptr, i64, ptr, ...)
 
-; Private format string used only by suru_int64_to_string.
-@.srt_fmt_lld = private unnamed_addr constant [5 x i8] c"%lld\00"
+; Private format strings.
+@.srt_fmt_lld    = private unnamed_addr constant [5 x i8]  c"%lld\00"
+@.srt_fmt_hex_f64 = private unnamed_addr constant [10 x i8] c"0x%016llX\00"
 
 ; ─── suru_string_create ────────────────────────────────────────────────────────
 ;
@@ -191,6 +193,34 @@ entry:
   %sl  = getelementptr %suru.String, ptr %seq, i32 0, i32 1
   store i64 %c64, ptr %sl
   %sd  = getelementptr %suru.String, ptr %seq, i32 0, i32 2
+  store ptr %buf, ptr %sd
+  ret ptr %seq
+}
+
+; ─── suru_float64_from_string ──────────────────────────────────────────────────
+; Parse a decimal string (e.g. "-2.5") into a raw double via strtod.
+define double @suru_float64_from_string(ptr %s) {
+entry:
+  %dgep = getelementptr %suru.String, ptr %s, i32 0, i32 2
+  %data = load ptr, ptr %dgep
+  %v    = call double @strtod(ptr %data, ptr null)
+  ret double %v
+}
+
+; ─── suru_float64_to_llvm_hex ──────────────────────────────────────────────────
+; Convert a double to its LLVM IR hex literal string, e.g. "0xC004000000000000".
+; The output is always 18 chars: "0x" + 16 uppercase hex digits.
+define ptr @suru_float64_to_llvm_hex(double %f) {
+entry:
+  %bits = bitcast double %f to i64
+  %buf  = call ptr @malloc(i64 19)
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 19, ptr @.srt_fmt_hex_f64, i64 %bits)
+  %seq  = call ptr @malloc(i64 24)
+  %tg   = getelementptr %suru.String, ptr %seq, i32 0, i32 0
+  store i64 6, ptr %tg
+  %sl   = getelementptr %suru.String, ptr %seq, i32 0, i32 1
+  store i64 18, ptr %sl
+  %sd   = getelementptr %suru.String, ptr %seq, i32 0, i32 2
   store ptr %buf, ptr %sd
   ret ptr %seq
 }

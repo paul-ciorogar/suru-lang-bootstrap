@@ -1,0 +1,337 @@
+// ir-fileio-codegen.suru — File I/O and argv IR emission helpers.
+//
+// Mirrors IRFileIoCodeGenerator.cs (C# partial class file).
+//
+// Three built-in operations are handled here:
+//
+//   args.at(i)       — argv element extraction (ir-codegen.suru routes here when the
+//                       receiver is in ctx.argvVars).  args is a fake %suru.String
+//                       header whose `data` field holds the raw char** argv pointer;
+//                       the `len` field holds argc.  emitArgAt GEPs into char**, calls
+//                       strlen, and wraps the C string in a fresh suru.String header.
+//
+//   readFile(path)   — fopen/fseek(SEEK_END)/ftell/rewind/malloc/fread/null-terminate/
+//                       fclose, then @suru_string_create to wrap the buffer.
+//
+//   writeFile(path, content) — fopen("w")/fwrite/fclose.
+//   appendToFile(path, content) — fopen("a")/fwrite/fclose.
+//
+// ── Mode string globals ────────────────────────────────────────────────────────
+// fopen requires a C-string mode argument ("r\00", "w\00", "a\00").  These are
+// emitted as private unnamed_addr constants @.mode_r / @.mode_w / @.mode_a into
+// ctx.strGlobals (same output section as string literal globals).  Emission is
+// idempotent — the shared ctx.declares dedup set prevents duplicate globals.
+//
+// ── Design: no emitValue calls ────────────────────────────────────────────────
+// All functions receive pre-emitted SSA names (caller has already called emitValue).
+// String data/len extraction is done inline via extractStringData / extractStringLen
+// (local helpers; duplicating two lines avoids a circular include dependency with
+// ir-string-codegen.suru, which sits at the same DAG level as this file).
+//
+// Include DAG: depends on ir-box-codegen.suru → ir-codegen-types.suru → ir-builder.suru.
+// Imported by ir-codegen.suru (the mutual-recursion hub).
+
+include "ir-codegen-types.suru" as types
+include "ir-builder.suru" as ir
+
+// ─── Mode string global helpers ───────────────────────────────────────────────
+// fopen("r\00"), fopen("w\00"), fopen("a\00") — each is a private constant global.
+// Mirrors BoolStringGlobals.AddModeR/W/A in C#.
+
+// Generic helper: append `line` to ctx.strGlobals only if not already declared.
+// Uses ctx.declares (shared dedup set) for idempotency, like addDecl/addSuruDecl.
+fn addModeGlobal(ctx IrCodegenContext, line String) IrCodegenContext {
+    let i Int64: 0
+    while i.lt(ctx.declares.len()) {
+        match ctx.declares.at(i).equals(line) { true: { return ctx } _: {} }
+        i: i.add(1)
+    }
+    ctx.declares.add(line)
+    ctx.strGlobals: ctx.strGlobals.append(line)
+    return ctx
+}
+
+// @.mode_r = private unnamed_addr constant [2 x i8] c"r\00"
+fn addModeR(ctx IrCodegenContext) IrCodegenContext {
+    return addModeGlobal(ctx, "@.mode_r = private unnamed_addr constant [2 x i8] c\"r\\00\"\n")
+}
+
+// @.mode_w = private unnamed_addr constant [2 x i8] c"w\00"
+fn addModeW(ctx IrCodegenContext) IrCodegenContext {
+    return addModeGlobal(ctx, "@.mode_w = private unnamed_addr constant [2 x i8] c\"w\\00\"\n")
+}
+
+// @.mode_a = private unnamed_addr constant [2 x i8] c"a\00"
+fn addModeA(ctx IrCodegenContext) IrCodegenContext {
+    return addModeGlobal(ctx, "@.mode_a = private unnamed_addr constant [2 x i8] c\"a\\00\"\n")
+}
+
+// ─── Local %suru.String field extractors ──────────────────────────────────────
+// %suru.String layout: { type_tag@field0(i64), len@field1(i64), data@field2(ptr) }
+// Duplicated from ir-string-codegen.suru to avoid a circular include at this DAG level.
+
+// GEP to field 2 (data ptr) and load it — yields the raw char* / char** payload.
+// Mirrors C# EmitExtractStringData.
+fn extractStringData(ctx IrCodegenContext, seqVal String) CodegenResult {
+    let gr IrResult: ir.emitGEP2(ctx.builder, "%suru.String", seqVal, "i32 0, i32 2")
+    ctx.builder: gr.builder
+    let lr IrResult: ir.emitLoad(ctx.builder, "ptr", gr.name)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: "ptr", suruType: "String" }
+}
+
+// GEP to field 1 (len) and load it as a raw i64.
+// Mirrors C# EmitExtractStringLen.
+fn extractStringLen(ctx IrCodegenContext, seqVal String) CodegenResult {
+    let gr IrResult: ir.emitGEP(ctx.builder, "%suru.String", seqVal, "i32 0, i32 1")
+    ctx.builder: gr.builder
+    let lr IrResult: ir.emitLoad(ctx.builder, "i64", gr.name)
+    ctx.builder: lr.builder
+    return { ctx: ctx, name: lr.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// ─── argv element extraction ──────────────────────────────────────────────────
+
+// Emit args.at(idx) — extract the idx-th element from the char** argv pointer
+// wrapped inside a fake %suru.String header (built by @main / emitMainWrapper).
+//
+// argvPtr: SSA name of the args variable (ptr to the fake %suru.String).
+// idx:     pre-emitted raw i64 SSA name for the index.
+//
+// Steps:
+//   1. GEP to field 2 (data) of the %suru.String → char** (raw argv pointer).
+//   2. GEP into char** at position idx → ptr to the i-th char* slot.
+//   3. Load the char* from the slot.
+//   4. strlen to measure the C string length.
+//   5. @suru_string_create to wrap it in a Suru String header.
+//
+// Mirrors C# EmitArgAt.
+fn emitArgAt(ctx IrCodegenContext, argvPtr String, idx String) CodegenResult {
+    // Step 1: extract char** from the fake %suru.String data field.
+    let dataR CodegenResult: extractStringData(ctx, argvPtr)
+    ctx: dataR.ctx
+    let charStarStar String: dataR.name
+
+    // Step 2: GEP into char** at position idx → pointer to the slot.
+    let slotR IrResult: ir.emitGEP(ctx.builder, "ptr", charStarStar, "i64 ".append(idx))
+    ctx.builder: slotR.builder
+
+    // Step 3: load the char* (C string pointer) from the slot.
+    let cstrR IrResult: ir.emitLoad(ctx.builder, "ptr", slotR.name)
+    ctx.builder: cstrR.builder
+
+    // Step 4: measure the C string length (excluding null terminator).
+    ctx: types.addDecl(ctx, "declare i64 @strlen(ptr)\n")
+    let strlenArgs Array<String>: []
+    strlenArgs.add("ptr ".append(cstrR.name))
+    let lenR IrResult: ir.emitCall(ctx.builder, "i64", "strlen", strlenArgs)
+    ctx.builder: lenR.builder
+
+    // Step 5: wrap the C string in a Suru String header via the runtime constructor.
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_create(ptr, i64)\n")
+    let createArgs Array<String>: []
+    createArgs.add("ptr ".append(cstrR.name))
+    createArgs.add("i64 ".append(lenR.name))
+    let createR IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_create", createArgs)
+    ctx.builder: createR.builder
+
+    return { ctx: ctx, name: createR.name, llvmType: "ptr", suruType: "String" }
+}
+
+// ─── File I/O built-ins ───────────────────────────────────────────────────────
+
+// Emit readFile(path) — read an entire file into a fresh Suru String.
+//
+// pathPtr: pre-emitted SSA ptr to the path suru.String.
+//
+// Algorithm:
+//   fopen(pathData, "r") → file ptr
+//   fseek(file, 0, 2)    → seek to end (SEEK_END = 2)
+//   ftell(file)          → file size in bytes
+//   rewind(file)         → reset to start
+//   malloc(size + 1)     → allocate buffer (+ 1 for null terminator)
+//   fread(buf, 1, size, file) → fill buffer
+//   GEP buf[size]; store 0   → null-terminate the buffer
+//   fclose(file)
+//   @suru_string_create(buf, size) → wrap in Suru String header
+//
+// Mirrors C# EmitReadFile.
+fn emitReadFile(ctx IrCodegenContext, pathPtr String) CodegenResult {
+    // Extract the raw char* path from the suru.String data field.
+    let pathDataR CodegenResult: extractStringData(ctx, pathPtr)
+    ctx: pathDataR.ctx
+    let pathData String: pathDataR.name
+
+    // Open the file for reading.
+    ctx: types.addDecl(ctx, "declare ptr @fopen(ptr, ptr)\n")
+    ctx: addModeR(ctx)
+    let fopenArgs Array<String>: []
+    fopenArgs.add("ptr ".append(pathData))
+    fopenArgs.add("ptr @.mode_r")
+    let fileR IrResult: ir.emitCall(ctx.builder, "ptr", "fopen", fopenArgs)
+    ctx.builder: fileR.builder
+    let filePtr String: fileR.name
+
+    // Seek to end (SEEK_END = 2) to measure file size.
+    ctx: types.addDecl(ctx, "declare i32 @fseek(ptr, i64, i32)\n")
+    let fseekArgs Array<String>: []
+    fseekArgs.add("ptr ".append(filePtr))
+    fseekArgs.add("i64 0")
+    fseekArgs.add("i32 2")
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i32", "fseek", fseekArgs)
+
+    // ftell → byte offset from start = file size.
+    ctx: types.addDecl(ctx, "declare i64 @ftell(ptr)\n")
+    let ftellArgs Array<String>: []
+    ftellArgs.add("ptr ".append(filePtr))
+    let sizeR IrResult: ir.emitCall(ctx.builder, "i64", "ftell", ftellArgs)
+    ctx.builder: sizeR.builder
+    let fileSize String: sizeR.name
+
+    // Rewind to start before reading.
+    ctx: types.addDecl(ctx, "declare void @rewind(ptr)\n")
+    let rewindArgs Array<String>: []
+    rewindArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitVoidCall(ctx.builder, "rewind", rewindArgs)
+
+    // Allocate buffer: fileSize + 1 (for null terminator).
+    ctx: types.addDecl(ctx, "declare ptr @malloc(i64)\n")
+    let bufSizeR IrResult: ir.emitBinop(ctx.builder, "add", "i64", fileSize, "1")
+    ctx.builder: bufSizeR.builder
+    let mallocArgs Array<String>: []
+    mallocArgs.add("i64 ".append(bufSizeR.name))
+    let bufR IrResult: ir.emitCall(ctx.builder, "ptr", "malloc", mallocArgs)
+    ctx.builder: bufR.builder
+    let buf String: bufR.name
+
+    // Read file contents into buffer — fread(buf, 1, size, file).
+    ctx: types.addDecl(ctx, "declare i64 @fread(ptr, i64, i64, ptr)\n")
+    let freadArgs Array<String>: []
+    freadArgs.add("ptr ".append(buf))
+    freadArgs.add("i64 1")
+    freadArgs.add("i64 ".append(fileSize))
+    freadArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i64", "fread", freadArgs)
+
+    // Null-terminate: GEP buf[fileSize] and store i8 0.
+    // This makes the buffer a valid C string for any downstream usage.
+    let nullSlotR IrResult: ir.emitGEP(ctx.builder, "i8", buf, "i64 ".append(fileSize))
+    ctx.builder: nullSlotR.builder
+    ctx.builder: ir.emitStore(ctx.builder, "i8", "0", nullSlotR.name)
+
+    // Close the file handle.
+    ctx: types.addDecl(ctx, "declare i32 @fclose(ptr)\n")
+    let fcloseArgs Array<String>: []
+    fcloseArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i32", "fclose", fcloseArgs)
+
+    // Wrap the heap buffer in a Suru String header.
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_string_create(ptr, i64)\n")
+    let createArgs Array<String>: []
+    createArgs.add("ptr ".append(buf))
+    createArgs.add("i64 ".append(fileSize))
+    let createR IrResult: ir.emitCall(ctx.builder, "ptr", "suru_string_create", createArgs)
+    ctx.builder: createR.builder
+
+    return { ctx: ctx, name: createR.name, llvmType: "ptr", suruType: "String" }
+}
+
+// Emit writeFile(path, content) — write (truncating) content to a file.
+//
+// pathData:   pre-extracted raw char* for the path (caller did extractStringData first).
+// contentPtr: pre-emitted SSA ptr to the content suru.String.
+//
+// The caller must extract pathData before emitting contentPtr so that path GEPs
+// have lower SSA numbers than content loads — mirroring C# EmitWriteFile which calls
+// EmitExtractStringData(pathSeq) before EmitValue(contentArg).
+//
+// Algorithm: fopen(pathData, "w") → fwrite(data, 1, len, file) → fclose(file).
+// Returns ctx (void — result is always discarded by the caller).
+//
+// Mirrors C# EmitWriteFile.
+fn emitWriteFile(ctx IrCodegenContext, pathData String, contentPtr String) IrCodegenContext {
+    // Extract content len and data ptr from the content suru.String.
+    // Extract content len and data ptr from the content suru.String.
+    let contentLenR CodegenResult: extractStringLen(ctx, contentPtr)
+    ctx: contentLenR.ctx
+    let contentLen String: contentLenR.name
+    let contentDataR CodegenResult: extractStringData(ctx, contentPtr)
+    ctx: contentDataR.ctx
+    let contentData String: contentDataR.name
+
+    // Open file for writing (truncates existing content).
+    ctx: types.addDecl(ctx, "declare ptr @fopen(ptr, ptr)\n")
+    ctx: addModeW(ctx)
+    let fopenArgs Array<String>: []
+    fopenArgs.add("ptr ".append(pathData))
+    fopenArgs.add("ptr @.mode_w")
+    let fileR IrResult: ir.emitCall(ctx.builder, "ptr", "fopen", fopenArgs)
+    ctx.builder: fileR.builder
+    let filePtr String: fileR.name
+
+    // Write content — fwrite(data, 1, len, file).
+    ctx: types.addDecl(ctx, "declare i64 @fwrite(ptr, i64, i64, ptr)\n")
+    let fwriteArgs Array<String>: []
+    fwriteArgs.add("ptr ".append(contentData))
+    fwriteArgs.add("i64 1")
+    fwriteArgs.add("i64 ".append(contentLen))
+    fwriteArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i64", "fwrite", fwriteArgs)
+
+    // Close the file handle.
+    ctx: types.addDecl(ctx, "declare i32 @fclose(ptr)\n")
+    let fcloseArgs Array<String>: []
+    fcloseArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i32", "fclose", fcloseArgs)
+
+    return ctx
+}
+
+// Emit appendToFile(path, content) — append content to a file (no truncation).
+//
+// pathData:   pre-extracted raw char* for the path (caller did extractStringData first).
+// contentPtr: pre-emitted SSA ptr to the content suru.String.
+//
+// Same ordering invariant as emitWriteFile: pathData is extracted by the caller
+// before emitting contentPtr so path GEPs have lower SSA numbers than content loads.
+//
+// Algorithm: fopen(pathData, "a") → fwrite(data, 1, len, file) → fclose(file).
+// Returns ctx (void — result is always discarded by the caller).
+//
+// Mirrors C# EmitAppendToFile.
+fn emitAppendToFile(ctx IrCodegenContext, pathData String, contentPtr String) IrCodegenContext {
+    // Extract content len and data ptr from the content suru.String.
+    let contentLenR CodegenResult: extractStringLen(ctx, contentPtr)
+    ctx: contentLenR.ctx
+    let contentLen String: contentLenR.name
+    let contentDataR CodegenResult: extractStringData(ctx, contentPtr)
+    ctx: contentDataR.ctx
+    let contentData String: contentDataR.name
+
+    // Open file for appending (preserves existing content).
+    ctx: types.addDecl(ctx, "declare ptr @fopen(ptr, ptr)\n")
+    ctx: addModeA(ctx)
+    let fopenArgs Array<String>: []
+    fopenArgs.add("ptr ".append(pathData))
+    fopenArgs.add("ptr @.mode_a")
+    let fileR IrResult: ir.emitCall(ctx.builder, "ptr", "fopen", fopenArgs)
+    ctx.builder: fileR.builder
+    let filePtr String: fileR.name
+
+    // Write content — fwrite(data, 1, len, file).
+    ctx: types.addDecl(ctx, "declare i64 @fwrite(ptr, i64, i64, ptr)\n")
+    let fwriteArgs Array<String>: []
+    fwriteArgs.add("ptr ".append(contentData))
+    fwriteArgs.add("i64 1")
+    fwriteArgs.add("i64 ".append(contentLen))
+    fwriteArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i64", "fwrite", fwriteArgs)
+
+    // Close the file handle.
+    ctx: types.addDecl(ctx, "declare i32 @fclose(ptr)\n")
+    let fcloseArgs Array<String>: []
+    fcloseArgs.add("ptr ".append(filePtr))
+    ctx.builder: ir.emitCallDiscard(ctx.builder, "i32", "fclose", fcloseArgs)
+
+    return ctx
+}

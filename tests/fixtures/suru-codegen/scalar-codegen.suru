@@ -348,8 +348,8 @@ fn registerFunctions(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
 //   2. Register all function signatures.
 //   3. Emit each function body (two-pass so forward calls resolve).
 //   4. Emit the @main(i32, ptr) C entry-point wrapper.
-fn emitModule(ctx CodegenContext, stmts Array<AstNode>) CodegenContext {
-    let b IrBuilder: ir.emitModuleHeader(ctx.builder)
+fn emitModule(ctx CodegenContext, stmts Array<AstNode>, sourceName String) CodegenContext {
+    let b IrBuilder: ir.emitModuleHeader(ctx.builder, sourceName)
     b: emitScalarDecls(b)
     ctx: cg.withBuilder(ctx, b)
 

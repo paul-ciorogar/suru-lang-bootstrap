@@ -45,10 +45,12 @@ public sealed partial class IRCodeGenerator
             _currentFnReturnSuruType = retSuruType;
             _currentFnReturnTypeName = fn.ReturnType.Name;
 
+            // Use %p.name for parameter SSA values so they never collide with block
+            // labels (e.g. a param named "entry" would clash with the "entry:" label).
             var paramStr = string.Join(", ", fn.Parameters.Select(p =>
             {
                 var pType = SuruTypeFromAnnotation(p.TypeAnnotation);
-                return $"{LlvmType(pType)} %{p.Name}";
+                return $"{LlvmType(pType)} %p.{p.Name}";
             }));
             _funcs.AppendLine($"define {retLlvmType} @{fn.Name}({paramStr}) {{");
             _funcs.AppendLine("entry:");
@@ -59,7 +61,7 @@ public sealed partial class IRCodeGenerator
                 var llvmT    = LlvmType(pType);
                 var allocPtr = $"%{p.Name}.addr";
                 _funcs.AppendLine($"  {allocPtr} = alloca {llvmT}");
-                _funcs.AppendLine($"  store {llvmT} %{p.Name}, ptr {allocPtr}");
+                _funcs.AppendLine($"  store {llvmT} %p.{p.Name}, ptr {allocPtr}");
                 _vars[p.Name] = (allocPtr, pType);
             }
         }
@@ -137,6 +139,10 @@ public sealed partial class IRCodeGenerator
 
             case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.WriteFile, Args: [var wfPath, var wfContent] } }:
                 EmitWriteFile(wfPath, wfContent);
+                break;
+
+            case ExpressionStatement { Expression: CallExpression { Name: BuiltinNames.AppendToFile, Args: [var afPath, var afContent] } }:
+                EmitAppendToFile(afPath, afContent);
                 break;
 
             // let name NamedType: { fields } — thread type name into EmitStructLiteral.

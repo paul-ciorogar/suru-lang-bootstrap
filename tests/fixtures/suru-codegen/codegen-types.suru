@@ -22,8 +22,9 @@ include "ir-builder.suru" as ir
 // One entry in the function-local variable table.
 type VarEntry: { name String, allocaName String, llvmType String }
 
-// Registered function signature (return type only — enough for Stage 14b).
-type FnSig: { name String, returnLlvmType String }
+// Registered function signature.  returnSuruType is the Suru-level type name
+// (e.g. "Token", "Int64") so callers can propagate it after a call expression.
+type FnSig: { name String, returnLlvmType String, returnSuruType String }
 
 // All state threaded through codegen functions.
 // blockOpen: true when the current basic block needs a terminator (br/ret).
@@ -105,7 +106,7 @@ fn addVar(ctx CodegenContext, name String, allocaName String, llvmType String) C
 
 // Append a function signature to ctx.fns.
 fn addFn(ctx CodegenContext, name String, retLlvmType String) CodegenContext {
-    let sig FnSig: { name: name, returnLlvmType: retLlvmType }
+    let sig FnSig: { name: name, returnLlvmType: retLlvmType, returnSuruType: "" }
     ctx.fns.add(sig)
     return ctx
 }
@@ -122,5 +123,5 @@ fn lookupFn(ctx CodegenContext, name String) FnSig {
         }
         i: i.add(1)
     }
-    return { name: "", returnLlvmType: "" }
+    return { name: "", returnLlvmType: "", returnSuruType: "" }
 }

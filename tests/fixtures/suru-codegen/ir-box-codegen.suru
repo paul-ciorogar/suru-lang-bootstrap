@@ -1,0 +1,194 @@
+// ir-box-codegen.suru — Type utilities and Box/Unbox helpers.
+//
+// Mirrors IRBoxCodeGenerator.cs (C#) — the partial class file that provides:
+//   • LLVM type resolution (LlvmType, IsScalar, RawLlvmType, DefaultReturnValue)
+//   • SSA counter access (NextTmp)
+//   • String-literal escaping (EscapeStringForIR)
+//   • Boundary-point box/unbox calls (BoxBool/Int32/Int64/Float64, BoxValue,
+//     UnboxBool/Int32/Int64/Float64, UnboxScalar)
+//
+// Box/unbox functions are called only at the three boundary points where raw
+// scalar values must cross the heap boundary:
+//   1. printLn / printError — runtime dispatches by type_tag
+//   2. Array element store/load — suru_array_add/set/at carry ptr elements
+//   3. Struct field store/load — field slots are i64-encoded
+//
+// All functions thread IrCodegenContext through so the builder (SSA counter +
+// accumulated IR text) and the suruDecls accumulator stay consistent.
+//
+// Include DAG: depends on ir-codegen-types.suru (which includes ir-builder.suru).
+// Imported by ir-string-codegen, ir-array-codegen, ir-struct-codegen,
+// ir-fileio-codegen, ir-type-clone-drop-codegen, and ir-codegen.
+
+include "ir-codegen-types.suru" as types
+include "ir-builder.suru" as ir
+
+// ─── Type utility functions ───────────────────────────────────────────────────
+// These mirror the static helpers at the top of IRBoxCodeGenerator.cs.
+// Thin wrappers over the equivalents in ir-codegen-types.suru, provided here so
+// higher-level files only need to include ir-box-codegen to get everything.
+
+// LLVM type string for a Suru type name.
+// Scalars → raw LLVM types; all heap types and void → "ptr".
+// Mirrors C# LlvmType(SuruType).
+fn llvmTypeOf(suruType String) String {
+    return types.irLlvmTypeOf(suruType)
+}
+
+// True for the four scalar types that use raw LLVM values (not heap ptr).
+// Mirrors C# IsScalar(SuruType).
+fn isScalarType(suruType String) Bool {
+    return types.isScalarSuruType(suruType)
+}
+
+// LLVM type for arithmetic/comparison operands.
+// NamedType (unknown struct field) falls back to "i64" — assumed Box<Int64>
+// at runtime, consistent with UnboxScalar's NamedType arm.
+// Mirrors C# RawLlvmType(SuruType).
+fn rawLlvmTypeOf(suruType String) String {
+    return match suruType {
+        "Bool":    "i1"
+        "Int32":   "i32"
+        "Int64":   "i64"
+        "Float64": "double"
+        _:         "ptr"
+    }
+}
+
+// Zero-value constant for implicit/fallback returns.
+// Mirrors C# DefaultReturnValue(SuruType).
+fn defaultReturnValue(suruType String) String {
+    return match suruType {
+        "Bool":    "0"
+        "Int32":   "0"
+        "Int64":   "0"
+        "Float64": "0.0"
+        _:         "null"
+    }
+}
+
+// ─── SSA counter access ───────────────────────────────────────────────────────
+
+// Allocate the next SSA temporary name (%tN) from ctx.builder, advancing tmpCount.
+// Used when callers need a fresh name without going through ir.emitCall —
+// e.g. when manually constructing a GEP or alloca line via ir.emit.
+// Mirrors C# NextTmp().
+fn ctxNextTmp(ctx IrCodegenContext) CodegenResult {
+    let r IrResult: ir.nextTmp(ctx.builder)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "", suruType: "" }
+}
+
+// ─── Box helpers ──────────────────────────────────────────────────────────────
+// Each helper adds the declare stub (idempotent) and emits the call instruction.
+
+// Box a raw i1 bool into a heap ptr.  Mirrors C# BoxBool.
+fn boxBool(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_box_bool(i1)\n")
+    let args Array<String>: []
+    args.add("i1 ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_box_bool", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Bool" }
+}
+
+// Box a raw i32 into a heap ptr.  Mirrors C# BoxInt32.
+fn boxInt32(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_box_int32(i32)\n")
+    let args Array<String>: []
+    args.add("i32 ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_box_int32", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Int32" }
+}
+
+// Box a raw i64 into a heap ptr.  Mirrors C# BoxInt64.
+fn boxInt64(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_box_int64(i64)\n")
+    let args Array<String>: []
+    args.add("i64 ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_box_int64", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Int64" }
+}
+
+// Box a raw double into a heap ptr.  Mirrors C# BoxFloat64.
+fn boxFloat64(ctx IrCodegenContext, val String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare ptr  @suru_box_float64(double)\n")
+    let args Array<String>: []
+    args.add("double ".append(val))
+    let r IrResult: ir.emitCall(ctx.builder, "ptr", "suru_box_float64", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "ptr", suruType: "Float64" }
+}
+
+// Dispatch to the appropriate box helper based on suruType.
+// Non-scalar types (String/Array/NamedType) carry their own type_tag and need
+// no boxing — val is returned as-is.  Mirrors C# BoxValue(string, SuruType).
+fn boxValue(ctx IrCodegenContext, val String, suruType String) CodegenResult {
+    match suruType {
+        "Bool":    { return boxBool(ctx, val) }
+        "Int32":   { return boxInt32(ctx, val) }
+        "Int64":   { return boxInt64(ctx, val) }
+        "Float64": { return boxFloat64(ctx, val) }
+        _: {}
+    }
+    return { ctx: ctx, name: val, llvmType: "ptr", suruType: suruType }
+}
+
+// ─── Unbox helpers ────────────────────────────────────────────────────────────
+
+// Unbox a heap ptr into a raw i1 bool.  Mirrors C# UnboxBool.
+fn unboxBool(ctx IrCodegenContext, ptr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i1   @suru_unbox_bool(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(ptr))
+    let r IrResult: ir.emitCall(ctx.builder, "i1", "suru_unbox_bool", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i1", suruType: "Bool" }
+}
+
+// Unbox a heap ptr into a raw i32.  Mirrors C# UnboxInt32.
+fn unboxInt32(ctx IrCodegenContext, ptr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i32  @suru_unbox_int32(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(ptr))
+    let r IrResult: ir.emitCall(ctx.builder, "i32", "suru_unbox_int32", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i32", suruType: "Int32" }
+}
+
+// Unbox a heap ptr into a raw i64.  Mirrors C# UnboxInt64.
+fn unboxInt64(ctx IrCodegenContext, ptr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare i64  @suru_unbox_int64(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(ptr))
+    let r IrResult: ir.emitCall(ctx.builder, "i64", "suru_unbox_int64", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "i64", suruType: "Int64" }
+}
+
+// Unbox a heap ptr into a raw double.  Mirrors C# UnboxFloat64.
+fn unboxFloat64(ctx IrCodegenContext, ptr String) CodegenResult {
+    ctx: types.addSuruDecl(ctx, "declare double @suru_unbox_float64(ptr)\n")
+    let args Array<String>: []
+    args.add("ptr ".append(ptr))
+    let r IrResult: ir.emitCall(ctx.builder, "double", "suru_unbox_float64", args)
+    ctx.builder: r.builder
+    return { ctx: ctx, name: r.name, llvmType: "double", suruType: "Float64" }
+}
+
+// Dispatch to the appropriate unbox helper based on suruType.
+// NamedType (unknown struct field returned dynamically) is assumed to be a
+// Box<Int64> at runtime — mirrors C# UnboxScalar's NamedType arm.
+// Called only for scalar types — caller must not pass String/Array/void.
+// Mirrors C# UnboxScalar(string, SuruType).
+fn unboxScalar(ctx IrCodegenContext, ptr String, suruType String) CodegenResult {
+    return match suruType {
+        "Bool":    unboxBool(ctx, ptr)
+        "Int32":   unboxInt32(ctx, ptr)
+        "Int64":   unboxInt64(ctx, ptr)
+        "Float64": unboxFloat64(ctx, ptr)
+        _:         unboxInt64(ctx, ptr)
+    }
+}
