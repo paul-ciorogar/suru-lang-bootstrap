@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixtures `unknown-function`, `wrong-arity`, `unprintable-argument`, `non-call-statement`
 
 ### Changed
+- `Parser.Parse` takes a `Lexer` instead of a `Tokens` cursor and owns the cursor itself, so tokens are pulled on demand while parsing; `Tokens` is now internal and `Lexer` carries the source path
+- `Tokens` lookahead rewritten as a queue of pending tokens; previously `Peek` re-buffered the current token, which made the following `Next` a no-op
+
 - Codegen emits from an expression's resolved type rather than its AST node class, and now interns global string constants
 - Codegen throws `CodegenException` instead of silently skipping constructs it does not recognize; the driver reports it as an internal compiler error
 - `CodeGenerator` follows the static-entry/private-instance convention used by the other stages

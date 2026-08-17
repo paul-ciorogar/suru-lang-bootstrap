@@ -1,68 +1,37 @@
 namespace Suru.Compiler.Lex;
 
-public sealed class Tokens(Lexer lexer, string sourcePath)
+
+internal sealed class Tokens(Lexer lexer)
 {
     private Token _current = lexer.NextToken();
-    private readonly List<Token> _buffer = new List<Token>();
-    private int _idx;
+    private readonly Queue<Token> _lookahead = new();
 
-    public string SourcePath { get; internal set; } = sourcePath;
+    internal string SourcePath => lexer.SourcePath;
 
     internal Token Current()
     {
         return _current;
     }
 
-    private bool BufferHasTokens()
-    {
-        return _buffer.Count > 0 && _idx < _buffer.Count;
-    }
-
-    private Token? NextTokenFromBuffer()
-    {
-        if (BufferHasTokens())
-        {
-            var current = _buffer[_idx];
-            _idx++;
-
-            if (_idx >= _buffer.Count)
-            {
-                _idx = 0;
-                _buffer.Clear();
-            }
-
-            return current;
-        }
-
-        return null;
-    }
-
     internal void Next()
     {
-        _current = NextTokenFromBuffer() ?? lexer.NextToken();
+        _current = _lookahead.Count > 0 ? _lookahead.Dequeue() : lexer.NextToken();
     }
 
     internal Token Peek()
     {
-        _buffer.Add(_current);
-        var peek = lexer.NextToken();
-        _buffer.Add(peek);
-        return peek;
+        return PeekN(1);
     }
 
+    /// <summary>Token <paramref name="n"/> positions past <see cref="Current"/>; n = 0 is the current token.</summary>
     internal Token PeekN(int n)
     {
-        _buffer.Add(_current);
+        if (n <= 0)
+            return _current;
 
-        Token peek = _current;
+        while (_lookahead.Count < n)
+            _lookahead.Enqueue(lexer.NextToken());
 
-        while (n > 0)
-        {
-            peek = lexer.NextToken();
-            _buffer.Add(peek);
-            n--;
-        }
-
-        return peek;
+        return _lookahead.ElementAt(n - 1);
     }
 }

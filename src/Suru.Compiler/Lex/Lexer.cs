@@ -1,11 +1,13 @@
 
 namespace Suru.Compiler.Lex;
 
-public sealed class Lexer(string source)
+public sealed class Lexer(string source, string sourcePath)
 {
     private int _pos;
     private int _line = 1;
     private int _column = 1;
+
+    public string SourcePath => sourcePath;
 
     internal Token NextToken()
     {

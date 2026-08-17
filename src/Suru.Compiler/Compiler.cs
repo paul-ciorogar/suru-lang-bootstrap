@@ -33,14 +33,13 @@ public class Compiler
         var source = File.ReadAllText(_sourcePath);
         var baseName = Path.GetFileNameWithoutExtension(_sourcePath);
 
-        var lexer = new Lexer(source);
-        var tokens = new Tokens(lexer, _sourcePath);
+        var lexer = new Lexer(source, _sourcePath);
 
         // 2. Parse
         Module module;
         try
         {
-            module = Parser.Parse(tokens);
+            module = Parser.Parse(lexer);
         }
         catch (ParseException ex)
         {
