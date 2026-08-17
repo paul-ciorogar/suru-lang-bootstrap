@@ -5,71 +5,119 @@ namespace Suru.Compiler.Codegen;
 
 public sealed class CodeGenerator
 {
-    public static LLVMModuleRef Generate(Module module)
+    private readonly Module _module;
+    private readonly LLVMModuleRef _llvmModule;
+    private readonly LLVMBuilderRef _builder;
+    private readonly LLVMTypeRef _printfType;
+    private readonly LLVMValueRef _printfFn;
+    private readonly Dictionary<string, LLVMValueRef> _strings = [];
+
+    private CodeGenerator(Module module)
     {
-        var llvmModule = LLVMModuleRef.CreateWithName("suru");
-        var context = llvmModule.Context;
+        _module = module;
+        _llvmModule = LLVMModuleRef.CreateWithName("suru");
+        _builder = LLVMBuilderRef.Create(_llvmModule.Context);
 
         // Declare printf: i32 (ptr, ...)
         var ptrType = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-        var printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType], true);
-        var printfFn = llvmModule.AddFunction("printf", printfType);
+        _printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType], true);
+        _printfFn = _llvmModule.AddFunction("printf", _printfType);
+    }
 
-        // Define main
+    public static LLVMModuleRef Generate(Module module)
+    {
+        var generator = new CodeGenerator(module);
+        return generator._Generate();
+    }
+
+    private LLVMModuleRef _Generate()
+    {
         var mainType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, []);
-        var mainFn = llvmModule.AddFunction("main", mainType);
+        var mainFn = _llvmModule.AddFunction("main", mainType);
         mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
-        var builder = LLVMBuilderRef.Create(context);
-        var entry = mainFn.AppendBasicBlock("entry");
-        builder.PositionAtEnd(entry);
+        _builder.PositionAtEnd(mainFn.AppendBasicBlock("entry"));
 
-        foreach (var stmt in module.Statements)
-            EmitStmt(builder, printfFn, printfType, stmt);
+        foreach (var statement in _module.Statements)
+            EmitStatement(statement);
 
-        builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
-        builder.Dispose();
+        _builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
+        _builder.Dispose();
 
-        return llvmModule;
+        return _llvmModule;
     }
 
-    private static void EmitStmt(LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, Statement statement)
+    private void EmitStatement(Statement statement)
     {
-        if (statement is ExpressionStatement exprStmt)
-            EmitExpr(builder, printfFn, printfType, exprStmt.Expression);
+        switch (statement)
+        {
+            case ExpressionStatement exprStmt:
+                EmitExpr(exprStmt.Expression);
+                break;
+            default:
+                throw new CodegenException($"cannot emit statement '{statement.GetType().Name}'");
+        }
     }
 
-    private static void EmitExpr(LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, Expression expression)
+    /// <summary>
+    /// Emits an expression and returns its value, or a null value reference for
+    /// expressions of type <see cref="SuruType.Void"/>.
+    /// </summary>
+    private LLVMValueRef EmitExpr(Expression expression)
     {
-        if (expression is CallExpression { Name: "printLn", Args.Count: 1 } call)
-            EmitPrintLn(builder, printfFn, printfType, call.Args[0]);
-    }
-
-    private static void EmitPrintLn(LLVMBuilderRef builder, LLVMValueRef printfFn, LLVMTypeRef printfType, Expression arg)
-    {
-        switch (arg)
+        switch (expression)
         {
             case BoolLiteral b:
-            {
-                var fmt = builder.BuildGlobalStringPtr("%s\n", "");
-                var str = builder.BuildGlobalStringPtr(b.Value ? "true" : "false", "");
-                builder.BuildCall2(printfType, printfFn, new LLVMValueRef[] { fmt, str }, "");
-                break;
-            }
+                return LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, b.Value ? 1ul : 0ul, false);
             case IntLiteral i:
-            {
-                var fmt = builder.BuildGlobalStringPtr("%lld\n", "");
-                var val = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i.Value, true);
-                builder.BuildCall2(printfType, printfFn, new LLVMValueRef[] { fmt, val }, "");
-                break;
-            }
+                return LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i.Value, true);
             case FloatLiteral f:
-            {
-                var fmt = builder.BuildGlobalStringPtr("%g\n", "");
-                var val = LLVMValueRef.CreateConstReal(LLVMTypeRef.Double, f.Value);
-                builder.BuildCall2(printfType, printfFn, new LLVMValueRef[] { fmt, val }, "");
-                break;
-            }
+                return LLVMValueRef.CreateConstReal(LLVMTypeRef.Double, f.Value);
+            case CallExpression { Name: "printLn", Args.Count: 1 } call:
+                EmitPrintLn(call.Args[0]);
+                return default;
+            default:
+                throw new CodegenException($"cannot emit expression '{expression.GetType().Name}'");
         }
+    }
+
+    private void EmitPrintLn(Expression arg)
+    {
+        var value = EmitExpr(arg);
+        var type = arg.Type
+            ?? throw new CodegenException($"argument at {arg.Position} was never typed");
+
+        if (type == SuruType.Bool)
+        {
+            // printf has no bool conversion, so pick the literal text at runtime.
+            var text = _builder.BuildSelect(value, String("true"), String("false"));
+            Printf("%s\n", text);
+        }
+        else if (type == SuruType.I64)
+        {
+            Printf("%lld\n", value);
+        }
+        else if (type == SuruType.F64)
+        {
+            Printf("%g\n", value);
+        }
+        else
+        {
+            throw new CodegenException($"cannot print a value of type '{type}'");
+        }
+    }
+
+    private void Printf(string format, LLVMValueRef value) =>
+        _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { String(format), value }, "");
+
+    /// <summary>Interns a global string constant so repeated literals share one global.</summary>
+    private LLVMValueRef String(string value)
+    {
+        if (_strings.TryGetValue(value, out var existing))
+            return existing;
+
+        var global = _builder.BuildGlobalStringPtr(value, "");
+        _strings[value] = global;
+        return global;
     }
 }

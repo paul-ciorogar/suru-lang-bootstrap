@@ -12,9 +12,14 @@ public sealed class CompiledFixtures : IDisposable
         Path.Combine(Path.GetTempPath(), "suru-tests", Guid.NewGuid().ToString("N"));
 
     private readonly ConcurrentDictionary<string, string> _executables = new();
+    private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _errors = new();
 
     public string GetExecutable(string name)
         => _executables.GetOrAdd(name, Compile);
+
+    /// <summary>Compiles a fixture that is expected to fail, returning its errors.</summary>
+    public IReadOnlyList<string> GetErrors(string name)
+        => _errors.GetOrAdd(name, CompileExpectingFailure);
 
     public void Dispose()
     {
@@ -33,6 +38,19 @@ public sealed class CompiledFixtures : IDisposable
                 $"Fixture '{name}' failed to compile:\n{string.Join("\n", result.Errors)}");
 
         return result.OutputPath!;
+    }
+
+    private IReadOnlyList<string> CompileExpectingFailure(string name)
+    {
+        var sourcePath = FindFixturePath(name);
+        var buildDir = Path.Combine(_buildRoot, name);
+
+        var result = new SuruCompiler(sourcePath).Compile(buildDir);
+        if (result.Success)
+            throw new InvalidOperationException(
+                $"Fixture '{name}' was expected to fail, but compiled successfully.");
+
+        return result.Errors;
     }
 
     private static string FindFixturePath(string name)

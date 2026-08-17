@@ -53,7 +53,17 @@ public class Compiler
             return CompilationResult.Fail(semanticErrors);
 
         // 4. Codegen → LLVM IR → object file
-        using var llvmModule = CodeGenerator.Generate(module);
+        LLVMModuleRef llvmModule;
+        try
+        {
+            llvmModule = CodeGenerator.Generate(module);
+        }
+        catch (CodegenException ex)
+        {
+            return CompilationResult.Fail($"Internal compiler error: {ex.Message}");
+        }
+
+        using var ownedModule = llvmModule;
         var objectPath = Path.Combine(buildDir, baseName + ".o");
 
         try

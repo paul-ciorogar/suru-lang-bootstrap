@@ -42,7 +42,7 @@ public sealed class Parser
             _ = Expect(TokenKind.LeftParen);
             var args = ParseArguments();
             _ = Expect(TokenKind.RightParen);
-            return new CallExpression(token.Text, args);
+            return new CallExpression(PositionOf(token), token.Text, args);
         }
         return ParsePrimary();
     }
@@ -65,15 +65,18 @@ public sealed class Parser
     {
         var token = _tokens.Current();
         _tokens.Next();
+        var position = PositionOf(token);
         return token.Kind switch
         {
-            TokenKind.True    => new BoolLiteral(true),
-            TokenKind.False   => new BoolLiteral(false),
-            TokenKind.IntLiteral  => new IntLiteral(long.Parse(token.Text)),
-            TokenKind.FloatLiteral => new FloatLiteral(double.Parse(token.Text, CultureInfo.InvariantCulture)),
+            TokenKind.True    => new BoolLiteral(position, true),
+            TokenKind.False   => new BoolLiteral(position, false),
+            TokenKind.IntLiteral  => new IntLiteral(position, long.Parse(token.Text)),
+            TokenKind.FloatLiteral => new FloatLiteral(position, double.Parse(token.Text, CultureInfo.InvariantCulture)),
             _ => throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): unexpected token {token.Kind}"),
         };
     }
+
+    private static SourcePosition PositionOf(Token token) => new(token.Line, token.Column);
 
     private Token Expect(TokenKind kind)
     {
@@ -83,6 +86,8 @@ public sealed class Parser
             _tokens.Next();
             return token;
         }
+        // TODO: the parser should store the error message and try to continue parsing
+        // presenting the user with more errors is a good thing
         throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected {kind}, got {token.Kind}");
     }
 }
