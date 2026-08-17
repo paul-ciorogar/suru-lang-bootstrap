@@ -1,0 +1,53 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+Bootstrap compiler for **Suru Lang** — a minimalist, library-driven, general-purpose language with structural typing and no garbage collection, designed around LSP-driven interactive development. Written in C# (`net10.0`), emitting native executables via LLVM.
+
+The language is at a very early stage: the only working program shape is a sequence of top-level `printLn(<literal>)` calls (see [tests/fixtures/print/main.suru](tests/fixtures/print/main.suru)).
+
+## Commands
+
+```bash
+dotnet build Suru.slnx                          # build all projects
+dotnet test                                     # run all tests
+dotnet test --filter PrintTests                 # run one test class
+dotnet test --filter FullyQualifiedName~PrintsExpectedOutput   # run one test
+
+dotnet run --project src/Suru.CLI -- build path/to/file.suru
+```
+
+`suru build <file.suru>` writes the object file and executable to a `build/` directory **next to the source file**.
+
+Linking shells out to `cc`, so a C toolchain must be on `PATH`. LLVM comes from the `LLVMSharp` NuGet package.
+
+## Architecture
+
+Four projects (`Suru.slnx`): `Suru.Compiler` (all the logic), `Suru.CLI` (thin arg-parsing entry point), `Suru.LSP` (empty scaffold — no sources yet), `Suru.Tests`.
+
+The pipeline lives entirely in [Compiler.Compile](src/Suru.Compiler/Compiler.cs) and runs in fixed order:
+
+1. **Lex** — [Lexer](src/Suru.Compiler/Lex/Lexer.cs) is a pull-based scanner producing one `Token` at a time; it is never materialized into a list.
+2. **[Tokens](src/Suru.Compiler/Lex/Tokens.cs)** wraps the lexer with a `Current`/`Next`/`Peek`/`PeekN` cursor. Lookahead is backed by a replay `_buffer` that drains and clears itself once consumed — the parser gets arbitrary lookahead over a streaming lexer.
+3. **Parse** — [Parser](src/Suru.Compiler/Parse/Parser.cs), recursive descent, static `Parse(Tokens)` entry with a private instance. Produces a [Module](src/Suru.Compiler/Parse/Ast/Module.cs) of `Statement`s. Errors throw `ParseException`; the driver catches it and converts to a `CompilationResult` failure. There is no statement terminator.
+4. **Semantic** — [SemanticAnalyzer](src/Suru.Compiler/Semantic/SemanticAnalyzer.cs) currently a stub returning no errors; same static-entry/private-instance shape. It returns a list of error strings rather than throwing.
+5. **Codegen** — [CodeGenerator](src/Suru.Compiler/Codegen/CodeGenerator.cs) emits an LLVM module directly from the AST (no IR of its own). Everything is emitted into a single `main`; `printLn` is special-cased in `EmitPrintLn` into a `printf` call with a per-type format string. There is no function-declaration support yet.
+6. **Emit + link** — target machine from `LLVMTargetRef.DefaultTriple`, object file, then `cc` to link.
+
+Failure convention: every stage funnels into [CompilationResult](src/Suru.Compiler/CompilationResult.cs) (`Ok`/`Fail`); only the CLI prints anything.
+
+## Tests
+
+Integration tests compile real `.suru` fixtures and assert on the executable's stdout — there are no unit tests of individual stages.
+
+- [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs) is an xUnit `ICollectionFixture` shared via the `"Integration"` collection. It compiles each fixture once into a temp dir keyed by GUID and deletes it on dispose.
+- Fixtures live at `tests/fixtures/<name>/main.suru`; `GetExecutable("<name>")` locates them by walking up from `AppContext.BaseDirectory`, so a new fixture needs no csproj change.
+- To add a case: create the fixture directory, then a test class marked `[Collection("Integration")]` taking `CompiledFixtures` in its constructor.
+
+## Conventions
+
+- Record changes in [CHANGELOG.md](CHANGELOG.md) (Keep a Changelog format, under `## [Unreleased]`).
+- Compiler stages use `static Xxx(...)` factory entry points over private constructors + a `_Xxx()` instance method.
+- Nullable and implicit usings are enabled everywhere; `Suru.Compiler` also enables `AllowUnsafeBlocks` for LLVM interop.

@@ -1,6 +1,6 @@
 # Suru Lang
 
-> A minimalist, library-driven, general-purpose programming language with structural typing and no garbage collection.
+> A minimalist, library-driven, data oriented, general-purpose programming language with static typing and no garbage collection.
 
 ## Overview
 
