@@ -8,14 +8,14 @@ public sealed class Parser
 {
     private readonly Tokens _tokens;
 
-    private Parser(Tokens tokens)
+    private Parser(Lexer lexer)
     {
-        _tokens = tokens;
+        _tokens = new Tokens(lexer);
     }
 
-    public static Module Parse(Tokens tokens)
+    public static Module Parse(Lexer lexer)
     {
-        var parser = new Parser(tokens);
+        var parser = new Parser(lexer);
         return parser._Parse();
     }
 
