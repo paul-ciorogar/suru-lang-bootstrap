@@ -40,10 +40,18 @@ Failure convention: every stage funnels into [CompilationResult](src/Suru.Compil
 
 ## Tests
 
-Integration tests compile real `.suru` fixtures and assert on the executable's stdout — there are no unit tests of individual stages.
+Two layers. **Prefer the unit layer** — reach for a fixture only when the case genuinely needs a file on disk, codegen, or a real executable.
 
-- [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs) is an xUnit `ICollectionFixture` shared via the `"Integration"` collection. It compiles each fixture once into a temp dir keyed by GUID and deletes it on dispose.
-- Fixtures live at `tests/fixtures/<name>/main.suru`; `GetExecutable("<name>")` locates them by walking up from `AppContext.BaseDirectory`, so a new fixture needs no csproj change.
+**Unit tests over source text** ([LexerTests](tests/Suru.Tests/LexerTests.cs), [ParserTests](tests/Suru.Tests/ParserTests.cs), [SemanticTests](tests/Suru.Tests/SemanticTests.cs)) run the front end in-process with no LLVM and no `cc`. They go through [Source](tests/Suru.Tests/Source.cs):
+
+- `Source.Parse(text)` → `Module`, `Source.Analyze(text)` → error list, `Source.Analyzed(text)` → `Module` asserted error-free (for checking `Expression.Type`), `Source.SingleExpression(module)` unwraps the lone statement.
+- The source path is always the constant `Source.Path` (`"test.suru"`), so diagnostics can be asserted with `Assert.Equal` on the whole string.
+- The lexer is exercised through the parser — `Lexer.NextToken()` and `Tokens` are `internal` and there is no `InternalsVisibleTo`.
+
+**Integration tests** compile real `.suru` fixtures and assert on the executable's stdout ([PrintTests](tests/Suru.Tests/PrintTests.cs)):
+
+- [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs) is an xUnit `ICollectionFixture` shared via the `"Integration"` collection. It compiles each fixture once into a temp dir keyed by GUID and deletes it on dispose. `GetExecutable(name)` expects success; `GetErrors(name)` expects failure.
+- Fixtures live at `tests/fixtures/<name>/main.suru`, located by walking up from `AppContext.BaseDirectory`, so a new fixture needs no csproj change.
 - To add a case: create the fixture directory, then a test class marked `[Collection("Integration")]` taking `CompiledFixtures` in its constructor.
 
 ## Conventions
