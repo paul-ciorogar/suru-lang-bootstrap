@@ -41,7 +41,7 @@ public class Compiler
         {
             module = Parser.Parse(lexer);
         }
-        catch (ParseException ex)
+        catch (Exception ex) when (ex is ParseException or LexException)
         {
             return CompilationResult.Fail(ex.Message);
         }

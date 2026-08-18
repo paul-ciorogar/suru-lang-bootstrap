@@ -34,7 +34,7 @@ public sealed class Lexer(string source, string sourcePath)
                 case ')': Advance(); return new Token(TokenKind.RightParen, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
                 default:
-                    throw new Exception($"Unexpected character '{c}' at {_line}:{_column}");
+                    throw new LexException($"{sourcePath}({_line},{_column}): unexpected character '{c}'");
             }
         }
 
