@@ -29,6 +29,8 @@ printLn(1)
 printLn(1.2)
 ```
 
+That is close to the whole language today. [doc/](doc/README.md) is the language reference — what a program is, which types and literals exist, and what `printLn` accepts, all limited to what the compiler implements.
+
 ## Debugging the compiler
 
 Following normal compiler practice, the compiler does not log events — it dumps the whole intermediate form after each stage, so a bug is found by diffing what the program looked like before and after a stage. The dumps are always compiled in and off by default, and go to stderr so stdout stays usable for the build result.

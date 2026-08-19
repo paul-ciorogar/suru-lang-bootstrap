@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — language documentation
+- `doc/` — a language reference written for people writing `.suru` programs, kept strictly to what the compiler implements: `doc/README.md` (entry page, first program, table of contents), `doc/program-structure.md` (statements, no terminator, insignificant whitespace, error format), `doc/literals-and-types.md` (`bool`, `i64`, `f64`, `void` and literal syntax) and `doc/printing.md` (`printLn` and each of its diagnostics). Every example and every quoted diagnostic was produced by compiling and running the snippet
+- Compiler internals stay in `README.md` and `CLAUDE.md`; `doc/` links out to them rather than repeating them
+
 ### Added — stage dumps and IR verification
 - Stage dumps, the compiler equivalent of application logging: each stage can print its whole intermediate form, so a bug is found by diffing what the program looked like before and after a stage. Stages are `tokens`, `ast` (after parse), `typed-ast` (after semantic analysis) and `llvm`
 - `suru build --dump=<stages>` (also `--dump-<stage>` and a bare `--dump` for all), plus the `SURU_DUMP` environment variable — always compiled in, off by default, so a release build can be asked for a dump without a rebuild. Dumps go to stderr, leaving stdout for the build result
