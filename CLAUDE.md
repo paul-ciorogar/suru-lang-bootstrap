@@ -17,6 +17,8 @@ dotnet test --filter PrintTests                 # run one test class
 dotnet test --filter FullyQualifiedName~PrintsExpectedOutput   # run one test
 
 dotnet run --project src/Suru.CLI -- build path/to/file.suru
+dotnet run --project src/Suru.CLI -- build --dump path/to/file.suru   # all stage dumps to stderr
+dotnet run --project src/Suru.CLI -- build --dump=ast,llvm file.suru  # or --dump-ast, SURU_DUMP=ast
 ```
 
 `suru build <file.suru>` writes the object file and executable to a `build/` directory **next to the source file**.
@@ -34,7 +36,9 @@ The pipeline lives entirely in [Compiler.Compile](src/Suru.Compiler/Compiler.cs)
 3. **Parse** — [Parser](src/Suru.Compiler/Parse/Parser.cs), recursive descent, static `Parse(Lexer)` entry with a private instance. The parser constructs its own `Tokens` cursor and pulls tokens on demand; nothing between the lexer and the AST is materialized. Produces a [Module](src/Suru.Compiler/Parse/Ast/Module.cs) of `Statement`s. Errors throw `ParseException`; the driver catches it and converts to a `CompilationResult` failure. There is no statement terminator.
 4. **Semantic** — [SemanticAnalyzer](src/Suru.Compiler/Semantic/SemanticAnalyzer.cs) currently a stub returning no errors; same static-entry/private-instance shape. It returns a list of error strings rather than throwing.
 5. **Codegen** — [CodeGenerator](src/Suru.Compiler/Codegen/CodeGenerator.cs) emits an LLVM module directly from the AST (no IR of its own). Everything is emitted into a single `main`; `printLn` is special-cased in `EmitPrintLn` into a `printf` call with a per-type format string. There is no function-declaration support yet.
-6. **Emit + link** — target machine from `LLVMTargetRef.DefaultTriple`, object file, then `cc` to link.
+6. **Emit + link** — the module is verified (`TryVerify`, always, not gated on a flag) so malformed IR is reported as an internal compiler error rather than crashing the emitted binary; then target machine from `LLVMTargetRef.DefaultTriple`, object file, and `cc` to link.
+
+**Debugging** follows the compiler convention of dumping whole intermediate forms per stage rather than logging events — see [src/Suru.Compiler/Debug/](src/Suru.Compiler/Debug/). `Dump` is a `[Flags]` enum of stages (`tokens`, `ast`, `typed-ast`, `llvm`); `DumpOptions` pairs the enabled set with a `TextWriter` the CLI supplies, and its `Section(stage, title, body)` takes the body as a callback so a disabled stage never runs its printer. `DumpOptions.Off` is the default. `AstPrinter` serves both AST dumps — semantic analysis annotates in place, so `withTypes: true` is the only difference and the two dumps diff line for line. `TokenPrinter` re-lexes the source instead of teeing `Tokens`, keeping the parser's pull path untouched.
 
 Failure convention: every stage funnels into [CompilationResult](src/Suru.Compiler/CompilationResult.cs) (`Ok`/`Fail`); only the CLI prints anything.
 
