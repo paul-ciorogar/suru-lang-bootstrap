@@ -59,8 +59,24 @@ numbers are still tracked for error messages.
 
 ## Comments
 
-**There is no comment syntax yet.** `//`, `#` and `/* */` are all lex errors — see
-[Errors](#errors) below.
+`//` starts a comment that runs to the end of the line. It is the only comment syntax —
+there is no block comment, and `#` is a lex error.
+
+```suru
+// Comments are whitespace: the lexer drops them and the parser never sees them.
+printLn(1) // A comment can follow code on the same line.
+// printLn(2)
+printLn(3)
+```
+
+```
+1
+3
+```
+
+Because a comment ends at the newline, it can sit inside a call that is split across
+lines, and a comment on the last line does not need a trailing newline. A file that is
+nothing but comments is an empty program.
 
 ## Errors
 
@@ -79,8 +95,8 @@ error: hello.suru(1,1): unknown function 'print'
 error: hello.suru(1,10): 'printLn' expects 1 argument, got 2
 ```
 
-Any character that is not part of a literal, an identifier, `(`, `)`, `,` or whitespace is
-rejected by the lexer:
+Any character that is not part of a literal, an identifier, a comment, `(`, `)`, `,` or
+whitespace is rejected by the lexer:
 
 ```suru
 printLn(1) @
@@ -88,6 +104,16 @@ printLn(1) @
 
 ```
 error: hello.suru(1,12): unexpected character '@'
+```
+
+A lone `/` is one of those characters — only the pair `//` means anything:
+
+```suru
+printLn(1) / 2
+```
+
+```
+error: hello.suru(1,12): unexpected character '/'
 ```
 
 ## Not yet supported
