@@ -1,3 +1,4 @@
+using Suru.Compiler.Debug;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse.Ast;
 
@@ -70,6 +71,85 @@ public class LexerTests
             Source.SingleExpression(Source.Parse("  printLn  (  1  )  ")));
 
         Assert.Equal(1L, Assert.IsType<IntLiteral>(Assert.Single(call.Args)).Value);
+    }
+
+    [Fact]
+    public void SkipsLineComments()
+    {
+        var module = Source.Parse("""
+            // a leading comment
+            printLn(1) // a trailing comment
+            // printLn(2)
+            printLn(3)
+            """);
+
+        // The positions show the comments were skipped without disturbing the line count.
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (2,1)
+                CallExpression (2,1) printLn
+                  IntLiteral (2,9) 1
+              ExpressionStatement (4,1)
+                CallExpression (4,1) printLn
+                  IntLiteral (4,9) 3
+
+            """,
+            AstPrinter.Print(module));
+    }
+
+    [Fact]
+    public void ACommentEndsAtTheNewline()
+    {
+        var module = Source.Parse("printLn( // note\n1)");
+
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                CallExpression (1,1) printLn
+                  IntLiteral (2,1) 1
+
+            """,
+            AstPrinter.Print(module));
+    }
+
+    [Fact]
+    public void ACommentCanRunToTheEndOfTheFile()
+    {
+        var module = Source.Parse("printLn(1) // no newline");
+
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                CallExpression (1,1) printLn
+                  IntLiteral (1,9) 1
+
+            """,
+            AstPrinter.Print(module));
+    }
+
+    [Fact]
+    public void AFileOfOnlyCommentsIsAnEmptyProgram()
+    {
+        Assert.Empty(Source.Parse("// nothing here\n// or here").Statements);
+    }
+
+    [Fact]
+    public void ACommentDoesNotDisturbLaterPositions()
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse("// comment\nprintLn(1) $"));
+
+        Assert.Equal("test.suru(2,12): unexpected character '$'", exception.Message);
+    }
+
+    [Fact]
+    public void ASingleSlashIsNotAComment()
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse("printLn(1) / 2"));
+
+        Assert.Equal("test.suru(1,12): unexpected character '/'", exception.Message);
     }
 
     [Fact]

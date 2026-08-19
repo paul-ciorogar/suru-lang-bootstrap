@@ -27,6 +27,12 @@ public sealed class Lexer(string source, string sourcePath)
             if (char.IsDigit(c))
                 return ReadNumber();
 
+            if (c == '/' && Peek(1) == '/')
+            {
+                SkipLineComment();
+                continue;
+            }
+
             int startLine = _line, startCol = _column;
             switch (c)
             {
@@ -45,7 +51,7 @@ public sealed class Lexer(string source, string sourcePath)
     {
         int startLine = _line, startCol = _column;
         int start = _pos;
-        while (_pos < source.Length && (char.IsLetterOrDigit(source[_pos]) || source[_pos] == '_'))
+        while (char.IsLetterOrDigit(Peek()) || Peek() == '_')
             Advance();
         var text = source[start.._pos];
         var kind = text switch
@@ -61,17 +67,38 @@ public sealed class Lexer(string source, string sourcePath)
     {
         int startLine = _line, startCol = _column;
         int start = _pos;
-        while (_pos < source.Length && char.IsDigit(source[_pos]))
+        while (char.IsDigit(Peek()))
             Advance();
-        if (_pos < source.Length && source[_pos] == '.' && _pos + 1 < source.Length && char.IsDigit(source[_pos + 1]))
+        if (Peek() == '.' && char.IsDigit(Peek(1)))
         {
             Advance(); // consume '.'
-            while (_pos < source.Length && char.IsDigit(source[_pos]))
+            while (char.IsDigit(Peek()))
                 Advance();
             return new Token(TokenKind.FloatLiteral, source[start.._pos], startLine, startCol);
         }
         return new Token(TokenKind.IntLiteral, source[start.._pos], startLine, startCol);
     }
+
+    /// <summary>
+    /// Consumes <c>//</c> and everything up to — but not including — the newline, so the
+    /// newline itself still goes through <see cref="AdvanceWhitespace"/> and keeps the
+    /// line counter right. A comment at the end of the file just runs into EOF.
+    /// </summary>
+    private void SkipLineComment()
+    {
+        while (_pos < source.Length && Peek() != '\n')
+        {
+            Advance();
+        }
+    }
+
+    /// <summary>
+    /// The character <paramref name="offset"/> positions ahead of the cursor, or
+    /// <c>'\0'</c> past the end of the source — no token may contain a NUL, so every
+    /// caller stops on it the same way it stops on a character it does not accept.
+    /// </summary>
+    private char Peek(int offset = 0) =>
+        _pos + offset < source.Length ? source[_pos + offset] : '\0';
 
     private void Advance()
     {
