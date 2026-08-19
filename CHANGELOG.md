@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — stage dumps and IR verification
+- Stage dumps, the compiler equivalent of application logging: each stage can print its whole intermediate form, so a bug is found by diffing what the program looked like before and after a stage. Stages are `tokens`, `ast` (after parse), `typed-ast` (after semantic analysis) and `llvm`
+- `suru build --dump=<stages>` (also `--dump-<stage>` and a bare `--dump` for all), plus the `SURU_DUMP` environment variable — always compiled in, off by default, so a release build can be asked for a dump without a rebuild. Dumps go to stderr, leaving stdout for the build result
+- `DumpOptions` carries the enabled stages and the destination writer; the compiler never chooses a destination itself, so only the CLI prints. `DumpOptions.Off` is the default and makes every stage check a flag test
+- `AstPrinter` renders a `Module` as an indented tree, optionally annotating each expression with its resolved type. Semantic analysis annotates in place, so the after-parse and after-analysis dumps diff line for line. The typed dump is written before the error check, so a failed analysis still shows how far typing got
+- `TokenPrinter` lexes the source a second time rather than teeing the parser's cursor: lexing is context-free here, so the result is identical while the pull-based path stays untouched. A lex error is reported inline and ends the dump
+- LLVM module verification after codegen, run unconditionally — malformed IR is now reported as an internal compiler error at the stage that produced it instead of crashing the emitted executable. The LLVM dump is written before verification, since a module that fails is the one worth reading
+- `DumpTests` asserts the full text of every dump, and `DumpIntegrationTests` covers the LLVM dump and stage ordering over a real compile
+
+### Changed — stage dumps and IR verification
+- `Compiler` takes an optional `DumpOptions`; the existing single-argument constructor still means "no dumps"
+- `CompiledFixtures.FindFixturePath` is now the public `CompiledFixtures.FixturePath`, for tests that drive the compiler with their own options
+
 ### Added — unit-level front-end tests
 - `Source` test helper: `Parse`, `Analyze`, `Analyzed` and `SingleExpression` run lex → parse → analyze over in-memory source text with no file on disk, no LLVM and no C toolchain. The source path is the constant `test.suru`, so diagnostics are asserted in full
 - `LexerTests`, `ParserTests` and `SemanticTests` — token shapes, AST shapes and positions, type annotations, and every diagnostic, all in-process

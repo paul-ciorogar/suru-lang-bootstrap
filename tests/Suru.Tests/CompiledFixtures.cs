@@ -29,7 +29,7 @@ public sealed class CompiledFixtures : IDisposable
 
     private string Compile(string name)
     {
-        var sourcePath = FindFixturePath(name);
+        var sourcePath = FixturePath(name);
         var buildDir = Path.Combine(_buildRoot, name);
 
         var result = new SuruCompiler(sourcePath).Compile(buildDir);
@@ -42,7 +42,7 @@ public sealed class CompiledFixtures : IDisposable
 
     private IReadOnlyList<string> CompileExpectingFailure(string name)
     {
-        var sourcePath = FindFixturePath(name);
+        var sourcePath = FixturePath(name);
         var buildDir = Path.Combine(_buildRoot, name);
 
         var result = new SuruCompiler(sourcePath).Compile(buildDir);
@@ -53,7 +53,8 @@ public sealed class CompiledFixtures : IDisposable
         return result.Errors;
     }
 
-    private static string FindFixturePath(string name)
+    /// <summary>Locates a fixture's source, for tests that drive the compiler themselves.</summary>
+    public static string FixturePath(string name)
     {
         var dir = AppContext.BaseDirectory;
         while (dir is not null)

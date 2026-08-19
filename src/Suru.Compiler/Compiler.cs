@@ -5,16 +5,21 @@ using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 using Suru.Compiler.Semantic;
 using Suru.Compiler.Codegen;
+using Suru.Compiler.Debug;
 
 namespace Suru.Compiler;
 
 public class Compiler
 {
     private readonly string _sourcePath;
+    private readonly DumpOptions _dumps;
 
-    public Compiler(string sourcePath)
+    public Compiler(string sourcePath) : this(sourcePath, DumpOptions.Off) { }
+
+    public Compiler(string sourcePath, DumpOptions dumps)
     {
         _sourcePath = sourcePath;
+        _dumps = dumps;
         LLVM.InitializeAllTargetInfos();
         LLVM.InitializeAllTargets();
         LLVM.InitializeAllTargetMCs();
@@ -35,6 +40,9 @@ public class Compiler
 
         var lexer = new Lexer(source, _sourcePath);
 
+        // 1. Lex — dumped by lexing a second time, leaving the parser's pull-based cursor alone.
+        _dumps.Section(Dump.Tokens, "tokens", () => TokenPrinter.Print(source, _sourcePath));
+
         // 2. Parse
         Module module;
         try
@@ -46,8 +54,16 @@ public class Compiler
             return CompilationResult.Fail(ex.Message);
         }
 
+        _dumps.Section(Dump.Ast, "ast after parse", () => AstPrinter.Print(module));
+
         // 3. Semantic analysis
         var semanticErrors =  SemanticAnalyzer.Analyze(module);
+
+        // Dumped before the error check: a failed analysis is exactly when you
+        // want to see how far typing got.
+        _dumps.Section(Dump.TypedAst, "ast after semantic analysis",
+            () => AstPrinter.Print(module, withTypes: true));
+
         if (semanticErrors.Count > 0)
             return CompilationResult.Fail(semanticErrors);
 
@@ -63,6 +79,17 @@ public class Compiler
         }
 
         using var ownedModule = llvmModule;
+
+        // Dumped before verifying: a module that fails verification is precisely
+        // the one worth reading.
+        _dumps.Section(Dump.Llvm, "llvm ir", llvmModule.PrintToString);
+
+        // Verification is an invariant check, not a dump: it runs unconditionally
+        // so malformed IR is caught at the stage that produced it rather than as a
+        // crash in the emitted executable.
+        if (!llvmModule.TryVerify(LLVMVerifierFailureAction.LLVMReturnStatusAction, out var verifyError))
+            return CompilationResult.Fail($"Internal compiler error: invalid LLVM module: {verifyError}");
+
         var objectPath = Path.Combine(buildDir, baseName + ".o");
 
         try
