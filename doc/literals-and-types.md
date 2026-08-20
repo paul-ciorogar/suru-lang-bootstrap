@@ -30,24 +30,75 @@ false
 
 ## Integers
 
-An integer literal is one or more decimal digits. There are no separator, base prefix or
-suffix forms — `1_000`, `0xff` and `1i64` are all rejected. A literal carries no sign
-either: `-1` is the negation operator applied to the literal `1`, which prints the same
-but is an expression rather than a literal (see [Expressions](expressions.md)).
+An integer literal is one or more digits, written in decimal or behind a base prefix:
+
+| Base | Prefix | Example |
+| --- | --- | --- |
+| decimal | *none* | `1000000` |
+| hexadecimal | `0x` | `0xff` |
+| binary | `0b` | `0b1010` |
+| octal | `0o` | `0o755` |
+
+The prefix is lowercase — `0X`, `0B` and `0O` are errors, so a literal has one spelling and `0o`
+never has to be told apart from `00`. The hexadecimal *digits* may be written in either case:
+`0xff` and `0xFF` are the same literal.
+
+Digits can be grouped with `_`, which the compiler ignores. A `_` must sit **between** two
+digits, so it can neither open nor close a literal nor follow another `_` — `1_`, `1__0`
+and `0x_ff` are all errors.
 
 ```suru
 printLn(0)
-printLn(1000000)
+printLn(1_000_000)
+printLn(0xff)
+printLn(0b1010)
+printLn(0o755)
 ```
 
 ```
 0
 1000000
+255
+10
+493
 ```
 
+There is no suffix form: `1i64` is rejected, and so is anything else butted up against the
+end of a literal.
+
+```suru
+printLn(1i64)
+```
+
+```
+error: hello.suru(1,10): invalid digit 'i' in decimal literal
+```
+
+A `-` written directly in front of a number is part of the literal, not an operator applied
+to it: `-1` is the literal −1. This holds only in front of a number and only where an
+operand is expected — the `-` of `1 - 2` is still subtraction, and `-count` is still the
+negation operator. Written with a space, `- 1` is the same literal: the sign attaches to the
+number, not to the spacing.
+
 Every integer literal is `i64`, so the range is −9223372036854775808 to
-9223372036854775807. A literal larger than that is a known gap in the bootstrap
-compiler: instead of reporting an error it crashes with an unhandled overflow.
+9223372036854775807 whatever base it is written in. The lower bound is reachable only with
+its sign — 9223372036854775808 on its own is out of range.
+
+```suru
+printLn(-9223372036854775808)
+```
+
+```
+-9223372036854775808
+```
+
+```suru
+printLn(9223372036854775808)
+```
+
+```
+error: hello.suru(1,9): integer literal is out of range for 'i64'
+```
 
 ## Floats
 
@@ -63,7 +114,9 @@ error: hello.suru(1,10): unexpected character '.'
 ```
 
 Write `1.0` instead. There is no exponent form (`1e9`) and no leading-dot form (`.5`);
-write `0.5`.
+write `0.5`. A float takes `_` separators on either side of the `.` under the same rule as
+an integer — `1_000.000_1` — but no base prefix: a float is always decimal. A leading `-`
+folds into a float the same way it folds into an integer, so `-1.5` is one literal.
 
 ```suru
 printLn(1.2)

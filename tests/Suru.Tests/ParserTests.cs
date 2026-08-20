@@ -205,7 +205,7 @@ public class ParserTests
     }
 
     [Theory]
-    [InlineData("-1", UnaryOperator.Negate)]
+    [InlineData("-count", UnaryOperator.Negate)]
     [InlineData("not true", UnaryOperator.Not)]
     public void ParsesPrefixOperators(string text, UnaryOperator op)
     {
@@ -218,18 +218,65 @@ public class ParserTests
     [Fact]
     public void PrefixOperatorsBindTighterThanBinaryOnes()
     {
-        // '-1 + 2' negates only the 1.
+        // '-count + 2' negates only the count.
         Assert.Equal(
             """
             Module test.suru
               ExpressionStatement (1,1)
                 BinaryExpression (1,1) +
                   UnaryExpression (1,1) -
-                    IntLiteral (1,2) 1
-                  IntLiteral (1,6) 2
+                    IdentifierExpression (1,2) count
+                  IntLiteral (1,10) 2
 
             """,
-            AstPrinter.Print(Source.Parse("-1 + 2")));
+            AstPrinter.Print(Source.Parse("-count + 2")));
+    }
+
+    [Theory]
+    [InlineData("-1", -1L)]
+    [InlineData("- 1", -1L)]                               // the fold is over tokens, not characters
+    [InlineData("-0xff", -255L)]
+    [InlineData("-9223372036854775808", long.MinValue)]    // only writable as a signed literal
+    public void ASignInFrontOfANumberIsPartOfTheLiteral(string text, long value)
+    {
+        var literal = Assert.IsType<IntLiteral>(Source.SingleExpression(Source.Parse(text)));
+
+        Assert.Equal(value, literal.Value);
+        // The literal starts at the sign.
+        Assert.Equal(new SourcePosition(1, 1), literal.Position);
+    }
+
+    [Fact]
+    public void ASignInFrontOfAFloatIsPartOfTheLiteralToo()
+    {
+        Assert.Equal(-1.5, Assert.IsType<FloatLiteral>(Source.SingleExpression(Source.Parse("-1.5"))).Value);
+    }
+
+    [Fact]
+    public void AMinusBetweenOperandsStillSubtracts()
+    {
+        // Only a prefix '-' folds — the one in '1 - 2' is consumed as a binary operator
+        // before the right operand is parsed, and so is the one in '1 -2'.
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                BinaryExpression (1,1) -
+                  IntLiteral (1,1) 1
+                  IntLiteral (1,4) 2
+
+            """,
+            AstPrinter.Print(Source.Parse("1 -2")));
+    }
+
+    [Fact]
+    public void RejectsTheNegatedMinimumWithoutItsSign()
+    {
+        // The lexer decodes an unsigned magnitude, so this one is in range only when the
+        // '-' folds in; the parser is the stage that knows it did not.
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("printLn(9223372036854775808)"));
+
+        Assert.Equal($"{Source.Path}(1,9): integer literal is out of range for 'i64'", exception.Message);
     }
 
     [Fact]
