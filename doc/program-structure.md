@@ -1,7 +1,7 @@
 # Program structure
 
 A Suru program is a single file. The file is a sequence of statements, executed top to
-bottom, and every statement today is a call.
+bottom.
 
 ```suru
 printLn(1)
@@ -21,8 +21,15 @@ successfully.
 
 ## Statements
 
-A statement is an expression, and the expression must be a **call**. A bare literal is
-parsed fine but rejected as a statement:
+There are three kinds of statement:
+
+| Form | Example | Page |
+| --- | --- | --- |
+| A binding | `let count i64: 1` | [Bindings](bindings.md) |
+| An assignment | `count: 2` | [Bindings](bindings.md) |
+| A call | `printLn(count)` | [Printing](printing.md) |
+
+An expression statement must be a **call**. A bare value is parsed fine but rejected:
 
 ```suru
 1
@@ -32,8 +39,8 @@ parsed fine but rejected as a statement:
 error: hello.suru(1,1): only call expressions are allowed as statements
 ```
 
-This is deliberate: a value computed and then dropped is almost always a mistake, and
-until there are variables there is nothing else to do with it.
+This is deliberate: a value computed and then dropped is almost always a mistake. Bind
+it or print it.
 
 ## No statement terminator
 
@@ -56,6 +63,12 @@ printLn(true) printLn(1)
 
 Newlines carry no meaning, so a call can be split across lines freely. Line and column
 numbers are still tracked for error messages.
+
+With one consequence worth knowing: because nothing terminates a statement, an
+expression keeps going while the next token is a binary operator — even across a
+newline. A line that starts with an operator continues the line above rather than
+beginning a new statement. See [Splitting an expression across
+lines](expressions.md#splitting-an-expression-across-lines).
 
 ## Comments
 
@@ -95,8 +108,9 @@ error: hello.suru(1,1): unknown function 'print'
 error: hello.suru(1,10): 'printLn' expects 1 argument, got 2
 ```
 
-Any character that is not part of a literal, an identifier, a comment, `(`, `)`, `,` or
-whitespace is rejected by the lexer:
+Any character that is not part of a literal, an identifier, a comment, an operator (see
+[Expressions](expressions.md)), `(`, `)`, `,`, `:` or whitespace is rejected by the
+lexer:
 
 ```suru
 printLn(1) @
@@ -106,17 +120,7 @@ printLn(1) @
 error: hello.suru(1,12): unexpected character '@'
 ```
 
-A lone `/` is one of those characters — only the pair `//` means anything:
-
-```suru
-printLn(1) / 2
-```
-
-```
-error: hello.suru(1,12): unexpected character '/'
-```
-
 ## Not yet supported
 
-Variables, user-defined functions, control flow, operators, imports, and multi-file
-programs. Each will get its own page here when it lands.
+User-defined functions, control flow, imports, and multi-file programs. Each will get
+its own page here when it lands.

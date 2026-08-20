@@ -1,3 +1,4 @@
+using Suru.Compiler.Debug;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 
@@ -124,11 +125,20 @@ public class ParserTests
     }
 
     [Fact]
-    public void ReportsAMissingOpeningParen()
+    public void AnIdentifierWithoutParensIsAVariableAndNotACall()
     {
-        var exception = Assert.Throws<ParseException>(() => Source.Parse("printLn 1"));
+        // A call is an identifier followed by '('; without one this is two
+        // statements, both rejected later by semantic analysis.
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                IdentifierExpression (1,1) printLn
+              ExpressionStatement (1,9)
+                IntLiteral (1,9) 1
 
-        Assert.Equal("test.suru(1,9): expected LeftParen, got IntLiteral", exception.Message);
+            """,
+            AstPrinter.Print(Source.Parse("printLn 1")));
     }
 
     [Fact]
@@ -142,10 +152,155 @@ public class ParserTests
     [Fact]
     public void ReportsAnExpressionThatCannotStartAStatement()
     {
-        var exception = Assert.Throws<ParseException>(() => Source.Parse("(1)"));
+        var exception = Assert.Throws<ParseException>(() => Source.Parse(", 1"));
 
-        Assert.Equal("test.suru(1,1): unexpected token LeftParen", exception.Message);
+        Assert.Equal("test.suru(1,1): unexpected token Comma", exception.Message);
     }
+
+    [Fact]
+    public void FoldsBinaryOperatorsLeftToRightWithNoPrecedence()
+    {
+        // '1 + 2 * 3' is '(1 + 2) * 3': Suru has no precedence.
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                BinaryExpression (1,1) *
+                  BinaryExpression (1,1) +
+                    IntLiteral (1,1) 1
+                    IntLiteral (1,5) 2
+                  IntLiteral (1,9) 3
+
+            """,
+            AstPrinter.Print(Source.Parse("1 + 2 * 3")));
+    }
+
+    [Fact]
+    public void ParenthesesRegroupAnExpression()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                BinaryExpression (1,1) +
+                  IntLiteral (1,1) 1
+                  BinaryExpression (1,6) *
+                    IntLiteral (1,6) 2
+                    IntLiteral (1,10) 3
+
+            """,
+            AstPrinter.Print(Source.Parse("1 + (2 * 3)")));
+    }
+
+    [Fact]
+    public void ParsesAParenthesizedExpressionAsAStatement()
+    {
+        Assert.Equal(1L, Assert.IsType<IntLiteral>(Source.SingleExpression(Source.Parse("(1)"))).Value);
+    }
+
+    [Fact]
+    public void ABinaryExpressionTakesThePositionOfItsLeftOperand()
+    {
+        Assert.Equal(new SourcePosition(1, 1), ParseSingleBinary("1 + 2").Position);
+    }
+
+    [Theory]
+    [InlineData("-1", UnaryOperator.Negate)]
+    [InlineData("not true", UnaryOperator.Not)]
+    public void ParsesPrefixOperators(string text, UnaryOperator op)
+    {
+        var unary = Assert.IsType<UnaryExpression>(Source.SingleExpression(Source.Parse(text)));
+
+        Assert.Equal(op, unary.Operator);
+        Assert.Equal(new SourcePosition(1, 1), unary.Position);
+    }
+
+    [Fact]
+    public void PrefixOperatorsBindTighterThanBinaryOnes()
+    {
+        // '-1 + 2' negates only the 1.
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                BinaryExpression (1,1) +
+                  UnaryExpression (1,1) -
+                    IntLiteral (1,2) 1
+                  IntLiteral (1,6) 2
+
+            """,
+            AstPrinter.Print(Source.Parse("-1 + 2")));
+    }
+
+    [Fact]
+    public void ParsesALetBinding()
+    {
+        // The type's own position is not in the dump; it is covered by the
+        // 'unknown type' diagnostic in SemanticTests.
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) count i64
+                IntLiteral (1,16) 1
+
+            """,
+            AstPrinter.Print(Source.Parse("let count i64: 1")));
+    }
+
+    [Fact]
+    public void ParsesAnAssignment()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              AssignmentStatement (1,1) count
+                IntLiteral (1,8) 2
+
+            """,
+            AstPrinter.Print(Source.Parse("count: 2")));
+    }
+
+    [Fact]
+    public void ReportsAMissingColonInALetBinding()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("let count i64 1"));
+
+        Assert.Equal("test.suru(1,15): expected Colon, got IntLiteral", exception.Message);
+    }
+
+    [Fact]
+    public void AnOperatorOnTheNextLineContinuesTheExpression()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) sum i64
+                BinaryExpression (1,14) +
+                  IntLiteral (1,14) 1
+                  IntLiteral (2,5) 2
+
+            """,
+            AstPrinter.Print(Source.Parse("let sum i64: 1\n  + 2")));
+    }
+
+    [Fact]
+    public void AnythingElseOnTheNextLineStartsANewStatement()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) sum i64
+                IntLiteral (1,14) 1
+              ExpressionStatement (2,1)
+                CallExpression (2,1) printLn
+                  IdentifierExpression (2,9) sum
+
+            """,
+            AstPrinter.Print(Source.Parse("let sum i64: 1\nprintLn(sum)")));
+    }
+
+    private static BinaryExpression ParseSingleBinary(string text) =>
+        Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse(text)));
 
     private static CallExpression ParseSingleCall(string text) =>
         Assert.IsType<CallExpression>(Source.SingleExpression(Source.Parse(text)));

@@ -29,3 +29,28 @@ public sealed class CallExpression(SourcePosition position, string name, IReadOn
     public string Name { get; } = name;
     public IReadOnlyList<Expression> Args { get; } = args;
 }
+
+/// <summary>A use of a name bound by a <see cref="LetStatement"/>.</summary>
+public sealed class IdentifierExpression(SourcePosition position, string name) : Expression(position)
+{
+    public string Name { get; } = name;
+}
+
+/// <summary>
+/// Two operands and an operator. There is no precedence: the parser folds every
+/// binary operator left to right, so the position is the left operand's.
+/// </summary>
+public sealed class BinaryExpression(
+    SourcePosition position, BinaryOperator op, Expression left, Expression right) : Expression(position)
+{
+    public BinaryOperator Operator { get; } = op;
+    public Expression Left { get; } = left;
+    public Expression Right { get; } = right;
+}
+
+public sealed class UnaryExpression(SourcePosition position, UnaryOperator op, Expression operand)
+    : Expression(position)
+{
+    public UnaryOperator Operator { get; } = op;
+    public Expression Operand { get; } = operand;
+}

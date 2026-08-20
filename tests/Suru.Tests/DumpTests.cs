@@ -93,6 +93,32 @@ public class DumpTests
             dump);
     }
 
+    [Fact]
+    public void DumpsBindingsOperatorsAndVariableUses()
+    {
+        var dump = AstPrinter.Print(
+            Source.Analyzed("let total i64: 1 + 2\ntotal: -total\nprintLn(not false)"),
+            withTypes: true);
+
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) total i64
+                BinaryExpression (1,16) + : i64
+                  IntLiteral (1,16) 1 : i64
+                  IntLiteral (1,20) 2 : i64
+              AssignmentStatement (2,1) total
+                UnaryExpression (2,8) - : i64
+                  IdentifierExpression (2,9) total : i64
+              ExpressionStatement (3,1)
+                CallExpression (3,1) printLn : void
+                  UnaryExpression (3,9) not : bool
+                    BoolLiteral (3,13) false : bool
+
+            """,
+            dump);
+    }
+
     [Theory]
     [InlineData("tokens", Dump.Tokens)]
     [InlineData("ast", Dump.Ast)]

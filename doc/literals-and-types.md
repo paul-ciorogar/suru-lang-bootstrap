@@ -1,7 +1,7 @@
 # Literals and types
 
-Suru is statically typed. Today there are three types you can write a value of, plus
-`void`, which you can only observe in an error message.
+Suru is statically typed. Today there are three types you can write a value of — and
+name in a binding — plus `void`, which you can only observe in an error message.
 
 | Type | Meaning | Written as |
 | --- | --- | --- |
@@ -30,8 +30,10 @@ false
 
 ## Integers
 
-An integer literal is one or more decimal digits. There are no sign, separator, base
-prefix or suffix forms — `-1`, `1_000`, `0xff` and `1i64` are all rejected.
+An integer literal is one or more decimal digits. There are no separator, base prefix or
+suffix forms — `1_000`, `0xff` and `1i64` are all rejected. A literal carries no sign
+either: `-1` is the negation operator applied to the literal `1`, which prints the same
+but is an expression rather than a literal (see [Expressions](expressions.md)).
 
 ```suru
 printLn(0)
@@ -106,6 +108,5 @@ yet.
 ## Not yet supported
 
 Strings and characters, unsigned and narrower integer types (`u64`, `i32`, …), `f32`,
-arithmetic and comparison operators, and any form of composite type — structs, arrays,
-pointers. There is also no way to name a value: variables do not exist yet, so a literal
-can only be used where it is written.
+and any form of composite type — structs, arrays, pointers. A type is also never
+inferred: a binding always writes its type out.

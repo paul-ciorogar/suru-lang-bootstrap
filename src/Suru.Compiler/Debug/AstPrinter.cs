@@ -34,6 +34,14 @@ public static class AstPrinter
                 AppendNode(output, depth, "ExpressionStatement", statement.Position);
                 AppendExpression(output, expressionStatement.Expression, depth + 1, withTypes);
                 break;
+            case LetStatement let:
+                AppendNode(output, depth, "LetStatement", let.Position, $"{let.Name} {let.TypeName}");
+                AppendExpression(output, let.Value, depth + 1, withTypes);
+                break;
+            case AssignmentStatement assignment:
+                AppendNode(output, depth, "AssignmentStatement", assignment.Position, assignment.Name);
+                AppendExpression(output, assignment.Value, depth + 1, withTypes);
+                break;
             default:
                 AppendNode(output, depth, statement.GetType().Name, statement.Position);
                 break;
@@ -59,6 +67,18 @@ public static class AstPrinter
                 AppendNode(output, depth, "CallExpression", call.Position, call.Name, type);
                 foreach (var argument in call.Args)
                     AppendExpression(output, argument, depth + 1, withTypes);
+                break;
+            case IdentifierExpression identifier:
+                AppendNode(output, depth, "IdentifierExpression", identifier.Position, identifier.Name, type);
+                break;
+            case BinaryExpression binary:
+                AppendNode(output, depth, "BinaryExpression", binary.Position, Operators.Text(binary.Operator), type);
+                AppendExpression(output, binary.Left, depth + 1, withTypes);
+                AppendExpression(output, binary.Right, depth + 1, withTypes);
+                break;
+            case UnaryExpression unary:
+                AppendNode(output, depth, "UnaryExpression", unary.Position, Operators.Text(unary.Operator), type);
+                AppendExpression(output, unary.Operand, depth + 1, withTypes);
                 break;
             default:
                 AppendNode(output, depth, expression.GetType().Name, expression.Position, type: type);
