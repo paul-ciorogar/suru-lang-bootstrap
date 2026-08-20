@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — numeric literal separators and base prefixes
+- Digit separators: `1_000_000`, and `1_000.000_1` on either side of a float's `.`. A `_` must sit between two digits, so `1_`, `1__0` and `0x_ff` are errors — the separator groups digits, it never stands in for one
+- Base prefixes for integers: `0x` hexadecimal, `0b` binary and `0o` octal, each accepting separators too. The prefix must be lowercase — `0X`, `0B` and `0O` are errors (`base prefix 'X' must be lowercase`), so a literal has one spelling and `0o` never has to be told apart from `00`; the hexadecimal digits themselves may still be written in either case. A float is always decimal. Every base shares the one `i64` range, so `0xFFFFFFFFFFFFFFFF` is out of range rather than `-1` — there are no unsigned types to reinterpret it as
+- Signed literals: a `-` directly in front of a number is part of the literal rather than the negation operator applied to it, so `-1` is the literal −1 and the `i64` minimum, −9223372036854775808, can be written at last. The fold happens only where an operand is expected, so `1 - 2` still subtracts and `-count` is still the operator
+- A literal is now decoded by the lexer rather than the parser: only the lexer knows the base, and it has the line and column to report a bad digit against. `Token` carries the decoded `IntMagnitude`/`FloatValue` alongside the raw lexeme, which stays in `Text` so token dumps and diagnostics still show what was written. The magnitude is unsigned and the sign is applied by the parser, which is the only stage that can tell the negated minimum from an out-of-range positive
+
+### Changed — numeric literal separators and base prefixes
+- An integer literal out of range for `i64` is reported as `integer literal is out of range for 'i64'`, closing the documented gap where it crashed the compiler with an unhandled overflow. It comes from the lexer for a magnitude past 9223372036854775808 and from the parser for that magnitude written without its sign
+- A letter, digit or `_` butted up against the end of a literal is a lex error (`invalid digit 'i' in decimal literal`) instead of lexing as a separate identifier. `1i64` used to reach semantic analysis as `1` and an unknown variable `i64`; the same rule is what keeps `0xffz` from splitting into `0xff` and `z`
+
 ### Added — binary expressions, bindings and assignment
 - Operators: `+ - * / %`, the comparisons `= <> < <= > >=`, and the word operators `and`, `or`, `not`. Equality is a single `=`, not-equal is `<>`, and prefix `-` negates. Integer `/` is truncating division yielding an `i64`; `%` is its remainder
 - **No operator precedence.** Every binary operator folds left to right, so `1 + 2 * 3` is `(1 + 2) * 3` — a Suru expression is a recipe, a list of steps in order, not a formula to untangle. Parentheses now group an expression and are the only way to say otherwise

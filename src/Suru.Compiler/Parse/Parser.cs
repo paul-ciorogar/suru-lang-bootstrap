@@ -1,4 +1,3 @@
-using System.Globalization;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse.Ast;
 
@@ -78,6 +77,17 @@ public sealed class Parser
     private Expression ParseUnary()
     {
         var token = _tokens.Current();
+
+        // A '-' straight in front of a number is part of the literal, not an operator on
+        // it: '-1' is the literal -1. Only here, in prefix position — the '-' of '1 - 2'
+        // is consumed as a binary operator before this is ever reached. It is also the
+        // only way to write the i64 minimum, whose magnitude no positive literal may have.
+        if (token.Kind == TokenKind.Minus && IsNumber(_tokens.Peek().Kind))
+        {
+            _tokens.Next();
+            return NumberLiteral(_tokens.Current(), PositionOf(token), negated: true);
+        }
+
         var op = token.Kind switch
         {
             TokenKind.Minus => (UnaryOperator?)UnaryOperator.Negate,
@@ -89,6 +99,34 @@ public sealed class Parser
 
         _tokens.Next();
         return new UnaryExpression(PositionOf(token), op.Value, ParseUnary());
+    }
+
+    private static bool IsNumber(TokenKind kind) =>
+        kind is TokenKind.IntLiteral or TokenKind.FloatLiteral;
+
+    /// <summary>
+    /// Builds the literal for a number token, applying a folded-in sign. The lexer decodes
+    /// an unsigned magnitude, so the range check lands here: 9223372036854775808 is the
+    /// <c>i64</c> minimum when negated and out of range when not.
+    /// </summary>
+    private Expression NumberLiteral(Token token, SourcePosition position, bool negated)
+    {
+        _tokens.Next();
+
+        if (token.Kind == TokenKind.FloatLiteral)
+            return new FloatLiteral(position, negated ? -token.FloatValue : token.FloatValue);
+
+        ulong magnitude = token.IntMagnitude;
+        if (negated)
+            return new IntLiteral(
+                position,
+                magnitude == (ulong)long.MaxValue + 1 ? long.MinValue : -(long)magnitude);
+
+        if (magnitude > long.MaxValue)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({token.Line},{token.Column}): integer literal is out of range for 'i64'");
+
+        return new IntLiteral(position, (long)magnitude);
     }
 
     private static BinaryOperator? BinaryOperatorOf(TokenKind kind) => kind switch
@@ -147,14 +185,16 @@ public sealed class Parser
             return new CallExpression(PositionOf(token), token.Text, args);
         }
 
+        // The lexer decodes a number, since only it knows the base it was written in.
+        if (IsNumber(token.Kind))
+            return NumberLiteral(token, PositionOf(token), negated: false);
+
         _tokens.Next();
         var position = PositionOf(token);
         return token.Kind switch
         {
-            TokenKind.True    => new BoolLiteral(position, true),
-            TokenKind.False   => new BoolLiteral(position, false),
-            TokenKind.IntLiteral  => new IntLiteral(position, long.Parse(token.Text)),
-            TokenKind.FloatLiteral => new FloatLiteral(position, double.Parse(token.Text, CultureInfo.InvariantCulture)),
+            TokenKind.True  => new BoolLiteral(position, true),
+            TokenKind.False => new BoolLiteral(position, false),
             _ => throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): unexpected token {token.Kind}"),
         };
     }

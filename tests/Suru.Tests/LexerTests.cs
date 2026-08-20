@@ -44,6 +44,14 @@ public class LexerTests
     [InlineData("0", 0L)]
     [InlineData("42", 42L)]
     [InlineData("9223372036854775807", long.MaxValue)]
+    [InlineData("1_000", 1000L)]
+    [InlineData("1_000_000", 1000000L)]
+    [InlineData("0xff", 255L)]
+    [InlineData("0xFF", 255L)]    // the digits may be either case, only the prefix may not
+    [InlineData("0x7fff_ffff_ffff_ffff", long.MaxValue)]
+    [InlineData("0b1010", 10L)]
+    [InlineData("0b1010_1010", 170L)]
+    [InlineData("0o755", 493L)]
     public void LexesIntegerLiterals(string text, long value)
     {
         Assert.Equal(value, Assert.IsType<IntLiteral>(Source.SingleExpression(Source.Parse(text))).Value);
@@ -52,6 +60,7 @@ public class LexerTests
     [Theory]
     [InlineData("1.2", 1.2)]
     [InlineData("0.5", 0.5)]
+    [InlineData("1_000.000_1", 1000.0001)]
     public void LexesFloatLiterals(string text, double value)
     {
         Assert.Equal(value, Assert.IsType<FloatLiteral>(Source.SingleExpression(Source.Parse(text))).Value);
@@ -62,6 +71,78 @@ public class LexerTests
     {
         // "1." lexes as IntLiteral(1) followed by an unexpected '.'.
         Assert.Throws<LexException>(() => Source.Parse("1."));
+    }
+
+    [Theory]
+    [InlineData("0x")]        // a prefix with no digits
+    [InlineData("0b")]
+    [InlineData("0o")]
+    [InlineData("0xg")]       // not a digit of the base
+    [InlineData("0b2")]
+    [InlineData("0o8")]
+    [InlineData("0xffz")]     // junk butted up against a complete literal
+    [InlineData("1i64")]
+    [InlineData("1abc")]
+    [InlineData("1_")]        // a separator that does not separate two digits
+    [InlineData("1__0")]
+    [InlineData("0x_ff")]
+    [InlineData("1_.0")]
+    public void RejectsMalformedNumbers(string text)
+    {
+        Assert.Throws<LexException>(() => Source.Parse(text));
+    }
+
+    [Theory]
+    [InlineData("0XFF")]
+    [InlineData("0B1010")]
+    [InlineData("0O777")]
+    public void RejectsAnUppercaseBasePrefix(string text)
+    {
+        Assert.Throws<LexException>(() => Source.Parse(text));
+    }
+
+    [Fact]
+    public void ReportsAnUppercaseBasePrefixWhereItSits()
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse("printLn(0XFF)"));
+
+        Assert.Equal($"{Source.Path}(1,10): base prefix 'X' must be lowercase", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("9223372036854775809")]
+    [InlineData("0xFFFFFFFFFFFFFFFF")]
+    public void RejectsIntegerLiteralsOutOfRange(string text)
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse(text));
+
+        Assert.Equal($"{Source.Path}(1,1): integer literal is out of range for 'i64'", exception.Message);
+    }
+
+    [Fact]
+    public void ASignDoesNotRescueAMagnitudeTheLexerCannotHold()
+    {
+        // One past the i64 minimum: out of range whether or not the '-' folds in, so the
+        // lexer still reports it against the digits.
+        var exception = Assert.Throws<LexException>(() => Source.Parse("-9223372036854775809"));
+
+        Assert.Equal($"{Source.Path}(1,2): integer literal is out of range for 'i64'", exception.Message);
+    }
+
+    [Fact]
+    public void ReportsAnInvalidDigitWhereItSits()
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse("printLn(0xffz)"));
+
+        Assert.Equal($"{Source.Path}(1,13): invalid digit 'z' in hexadecimal literal", exception.Message);
+    }
+
+    [Fact]
+    public void ReportsAMisplacedSeparatorWhereItSits()
+    {
+        var exception = Assert.Throws<LexException>(() => Source.Parse("printLn(1_000_)"));
+
+        Assert.Equal($"{Source.Path}(1,14): '_' must separate digits", exception.Message);
     }
 
     [Fact]

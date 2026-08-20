@@ -50,7 +50,8 @@ folds as `((a = 1) and b) = 2`, which is a type error, not a mistake the compile
 guesses its way out of. Write `(a = 1) and (b = 2)`.
 
 A prefix operator is not part of this: it binds to the operand that follows it, so
-`-1 + 2` is `(-1) + 2`.
+`-count + 2` is `(-count) + 2`. A `-` in front of a number is not even an operator —
+`-1` is the literal −1 (see [Literals and types](literals-and-types.md)).
 
 ## Splitting an expression across lines
 
