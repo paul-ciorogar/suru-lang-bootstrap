@@ -30,6 +30,8 @@ public sealed class Parser
     private Statement ParseStatement()
     {
         var token = _tokens.Current();
+        if (token.Kind == TokenKind.LeftBrace)
+            return ParseBlock();
         if (token.Kind == TokenKind.Let)
             return ParseLet();
         // An identifier starts an assignment only when a ':' follows; otherwise it
@@ -37,6 +39,21 @@ public sealed class Parser
         if (token.Kind == TokenKind.Identifier && _tokens.Peek().Kind == TokenKind.Colon)
             return ParseAssignment();
         return new ExpressionStatement(ParseExpression());
+    }
+
+    /// <summary>
+    /// The same loop as <see cref="_Parse"/>, stopping at the closing brace. It stops at
+    /// <c>Eof</c> too, so an unterminated block ends as 'expected RightBrace, got Eof'
+    /// rather than spinning.
+    /// </summary>
+    private Statement ParseBlock()
+    {
+        var open = Expect(TokenKind.LeftBrace);
+        var stmts = new List<Statement>();
+        while (_tokens.Current().Kind is not TokenKind.RightBrace and not TokenKind.Eof)
+            stmts.Add(ParseStatement());
+        _ = Expect(TokenKind.RightBrace);
+        return new BlockStatement(PositionOf(open), stmts);
     }
 
     private Statement ParseLet()

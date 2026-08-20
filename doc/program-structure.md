@@ -21,13 +21,14 @@ successfully.
 
 ## Statements
 
-There are three kinds of statement:
+There are four kinds of statement:
 
 | Form | Example | Page |
 | --- | --- | --- |
 | A binding | `let count i64: 1` | [Bindings](bindings.md) |
 | An assignment | `count: 2` | [Bindings](bindings.md) |
 | A call | `printLn(count)` | [Printing](printing.md) |
+| A block | `{ printLn(count) }` | [Blocks](blocks.md) |
 
 An expression statement must be a **call**. A bare value is parsed fine but rejected:
 
@@ -109,8 +110,8 @@ error: hello.suru(1,10): 'printLn' expects 1 argument, got 2
 ```
 
 Any character that is not part of a literal, an identifier, a comment, an operator (see
-[Expressions](expressions.md)), `(`, `)`, `,`, `:` or whitespace is rejected by the
-lexer:
+[Expressions](expressions.md)), `(`, `)`, `{`, `}`, `,`, `:` or whitespace is rejected by
+the lexer:
 
 ```suru
 printLn(1) @

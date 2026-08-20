@@ -346,6 +346,94 @@ public class ParserTests
             AstPrinter.Print(Source.Parse("let sum i64: 1\nprintLn(sum)")));
     }
 
+    [Fact]
+    public void ParsesAnEmptyBlock()
+    {
+        var block = Assert.IsType<BlockStatement>(Assert.Single(Source.Parse("{}").Statements));
+
+        Assert.Empty(block.Statements);
+        Assert.Equal(new SourcePosition(1, 1), block.Position);
+    }
+
+    [Fact]
+    public void ParsesTheStatementsInsideABlock()
+    {
+        var block = Assert.IsType<BlockStatement>(Assert.Single(Source.Parse("{ printLn(1) printLn(2) }").Statements));
+
+        Assert.Collection(block.Statements,
+            statement => AssertCall(statement, "printLn", 1),
+            statement => AssertCall(statement, "printLn", 2));
+    }
+
+    [Fact]
+    public void ParsesABlockAmongTopLevelStatements()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (1,1)
+                CallExpression (1,1) printLn
+                  IntLiteral (1,9) 1
+              BlockStatement (2,1)
+                ExpressionStatement (2,3)
+                  CallExpression (2,3) printLn
+                    IntLiteral (2,11) 2
+              ExpressionStatement (3,1)
+                CallExpression (3,1) printLn
+                  IntLiteral (3,9) 3
+
+            """,
+            AstPrinter.Print(Source.Parse("printLn(1)\n{ printLn(2) }\nprintLn(3)")));
+    }
+
+    [Fact]
+    public void ParsesNestedBlocks()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              BlockStatement (1,1)
+                BlockStatement (1,3)
+                  BlockStatement (1,5)
+                    ExpressionStatement (1,7)
+                      CallExpression (1,7) printLn
+                        IntLiteral (1,15) 1
+
+            """,
+            AstPrinter.Print(Source.Parse("{ { { printLn(1) } } }")));
+    }
+
+    [Fact]
+    public void ReportsAnUnterminatedBlock()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("{ printLn(1)"));
+
+        Assert.Equal("test.suru(1,13): expected RightBrace, got Eof", exception.Message);
+    }
+
+    [Fact]
+    public void ReportsAClosingBraceWithNoBlock()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("printLn(1) }"));
+
+        Assert.Equal("test.suru(1,12): unexpected token RightBrace", exception.Message);
+    }
+
+    [Fact]
+    public void ABlockOnTheNextLineDoesNotContinueAnExpression()
+    {
+        // Only a binary operator continues an expression, and '{' is not one.
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) sum i64
+                IntLiteral (1,14) 1
+              BlockStatement (2,1)
+
+            """,
+            AstPrinter.Print(Source.Parse("let sum i64: 1\n{}")));
+    }
+
     private static BinaryExpression ParseSingleBinary(string text) =>
         Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse(text)));
 

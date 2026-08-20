@@ -49,8 +49,8 @@ as above.
 
 ## Scope
 
-A binding is visible from the line it appears on to the end of the file. There are no
-blocks to nest one inside yet, so every binding is a program-wide one, and a name cannot
+A binding is visible from the line it appears on to the end of the enclosing
+[block](blocks.md) — or to the end of the file, for one not inside a block. A name cannot
 be used before it is bound:
 
 ```suru
@@ -77,7 +77,8 @@ error: hello.suru(1,11): unknown type 'int'
 `void` is not among them — it is the type of a `printLn` call, not something a program
 can write down.
 
-A name can be bound only once:
+A name can be bound only once in a scope. A binding inside a block may
+[shadow](blocks.md#shadowing) one further out, but not one of its own:
 
 ```suru
 let count i64: 1
@@ -122,5 +123,4 @@ error: hello.suru(1,1): unknown variable 'count'
 
 ## Not yet supported
 
-Every binding is mutable. There is no shadowing (a name is bound once per program), no type
-inference.
+Every binding is mutable. There is no type inference — a `let` always writes its type out.

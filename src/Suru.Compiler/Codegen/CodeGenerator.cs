@@ -12,8 +12,12 @@ public sealed class CodeGenerator
     private readonly LLVMValueRef _printfFn;
     private readonly Dictionary<string, LLVMValueRef> _strings = [];
 
-    /// <summary>The stack slot behind each binding, with the type to load it back through.</summary>
-    private readonly Dictionary<string, (LLVMValueRef Slot, LLVMTypeRef Type)> _variables = [];
+    /// <summary>
+    /// The stack slot behind each binding, with the type to load it back through. Scoped
+    /// the same way the analyzer scopes types, so a shadowing binding gets its own slot
+    /// and the outer one comes back when the block ends.
+    /// </summary>
+    private readonly ScopeStack<(LLVMValueRef Slot, LLVMTypeRef Type)> _scopes = new();
 
     private CodeGenerator(Module module)
     {
@@ -63,6 +67,13 @@ public sealed class CodeGenerator
             case AssignmentStatement assignment:
                 _builder.BuildStore(EmitExpr(assignment.Value), Variable(assignment.Name).Slot);
                 break;
+            case BlockStatement block:
+                // Purely lexical: no branch and no new basic block, only a scope.
+                _scopes.EnterNew();
+                foreach (var inner in block.Statements)
+                    EmitStatement(inner);
+                _scopes.Exit();
+                break;
             default:
                 throw new CodegenException($"cannot emit statement '{statement.GetType().Name}'");
         }
@@ -98,9 +109,10 @@ public sealed class CodeGenerator
     }
 
     /// <summary>
-    /// The slot is allocated where the binding sits. Everything is one straight-line
-    /// <c>main</c>, so there is no loop for the alloca to run inside; hoisting to the
-    /// entry block becomes necessary when control flow arrives.
+    /// The slot is allocated where the binding sits — a binding that shadows another is
+    /// simply a second alloca. Everything is one straight-line <c>main</c>, so there is no
+    /// loop for the alloca to run inside; hoisting to the entry block becomes necessary
+    /// when control flow arrives, which a lexical block is not.
     /// </summary>
     private void EmitLet(LetStatement let)
     {
@@ -110,7 +122,7 @@ public sealed class CodeGenerator
 
         var slot = _builder.BuildAlloca(type, let.Name);
         _builder.BuildStore(value, slot);
-        _variables[let.Name] = (slot, type);
+        _scopes.Declare(let.Name, (slot, type));
     }
 
     /// <summary>
@@ -182,7 +194,7 @@ public sealed class CodeGenerator
     }
 
     private (LLVMValueRef Slot, LLVMTypeRef Type) Variable(string name) =>
-        _variables.TryGetValue(name, out var variable)
+        _scopes.TryLookup(name, out var variable)
             ? variable
             : throw new CodegenException($"unknown variable '{name}'");
 

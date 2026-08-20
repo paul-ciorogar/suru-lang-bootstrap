@@ -210,10 +210,81 @@ public class SemanticTests
     }
 
     [Fact]
+    public void ABindingInsideABlockShadowsAnOuterOne()
+    {
+        var module = Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\nprintLn(x)\n}");
+        var block = Assert.IsType<BlockStatement>(module.Statements[1]);
+
+        Assert.Equal(SuruType.F64, PrintedArgument(block.Statements[1]).Type);
+    }
+
+    [Fact]
+    public void TheOuterBindingComesBackAfterTheBlock()
+    {
+        var module = Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\n}\nprintLn(x)");
+
+        Assert.Equal(SuruType.I64, PrintedArgument(module.Statements[2]).Type);
+    }
+
+    [Fact]
+    public void ABindingDoesNotEscapeItsBlock()
+    {
+        var error = Assert.Single(Source.Analyze("{\nlet x i64: 1\n}\nprintLn(x)"));
+
+        Assert.Equal("test.suru(4,9): unknown variable 'x'", error);
+    }
+
+    [Fact]
+    public void ReportsARedeclarationWithinTheSameBlock()
+    {
+        // Shadowing crosses nesting levels; it does not license rebinding in one scope.
+        var error = Assert.Single(Source.Analyze("{\nlet x i64: 1\nlet x i64: 2\n}"));
+
+        Assert.Equal("test.suru(3,1): 'x' is already declared", error);
+    }
+
+    [Fact]
+    public void ABlockCanBindANameThatIsFreeOutsideIt()
+    {
+        Assert.Empty(Source.Analyze("{\nlet x i64: 1\nprintLn(x)\n}\n{\nlet x i64: 2\nprintLn(x)\n}"));
+    }
+
+    [Fact]
+    public void ABlockCanReadAndAssignAnOuterBinding()
+    {
+        Assert.Empty(Source.Analyze("let count i64: 1\n{\ncount: count + 1\n}\nprintLn(count)"));
+    }
+
+    [Fact]
+    public void AnAssignmentInsideABlockStillChecksTheOuterType()
+    {
+        var error = Assert.Single(Source.Analyze("let count i64: 1\n{\ncount: true\n}"));
+
+        Assert.Equal("test.suru(3,8): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
+    }
+
+    [Fact]
+    public void ABlockReportsTheErrorsInsideIt()
+    {
+        var errors = Source.Analyze("{\nprintLn(missing)\n1\n}");
+
+        Assert.Collection(errors,
+            error => Assert.Equal("test.suru(2,9): unknown variable 'missing'", error),
+            error => Assert.Equal("test.suru(3,1): only call expressions are allowed as statements", error));
+    }
+
+    [Fact]
     public void ErrorsAreReportedWithTheSourcePathAndPosition()
     {
         var error = Assert.Single(Source.Analyze("42"));
 
         Assert.Matches(@"^test\.suru\(\d+,\d+\): ", error);
+    }
+
+    /// <summary>The lone argument of a <c>printLn</c> statement, to read its resolved type off.</summary>
+    private static Expression PrintedArgument(Statement statement)
+    {
+        var call = Assert.IsType<CallExpression>(Assert.IsType<ExpressionStatement>(statement).Expression);
+        return Assert.Single(call.Args);
     }
 }

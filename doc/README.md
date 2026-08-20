@@ -53,6 +53,7 @@ There is no runtime and no interpreter — `build/hello` is an ordinary native e
 | [Literals and types](literals-and-types.md) | `bool`, `i64`, `f64`, and how literals are written |
 | [Expressions](expressions.md) | Operators, the absence of precedence, and how types combine |
 | [Bindings](bindings.md) | `let`, assignment, and scope |
+| [Blocks](blocks.md) | `{}`, block scope and shadowing |
 | [Printing](printing.md) | `printLn`, the only builtin function |
 
 ## Elsewhere in this repository

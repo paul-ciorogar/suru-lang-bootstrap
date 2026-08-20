@@ -42,6 +42,11 @@ public static class AstPrinter
                 AppendNode(output, depth, "AssignmentStatement", assignment.Position, assignment.Name);
                 AppendExpression(output, assignment.Value, depth + 1, withTypes);
                 break;
+            case BlockStatement block:
+                AppendNode(output, depth, "BlockStatement", block.Position);
+                foreach (var inner in block.Statements)
+                    AppendStatement(output, inner, depth + 1, withTypes);
+                break;
             default:
                 AppendNode(output, depth, statement.GetType().Name, statement.Position);
                 break;
