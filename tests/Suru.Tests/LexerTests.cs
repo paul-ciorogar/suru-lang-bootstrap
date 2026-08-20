@@ -145,11 +145,49 @@ public class LexerTests
     }
 
     [Fact]
-    public void ASingleSlashIsNotAComment()
+    public void ASingleSlashIsDivisionAndNotAComment()
     {
-        var exception = Assert.Throws<LexException>(() => Source.Parse("printLn(1) / 2"));
+        var binary = Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse("6 / 2 // half")));
 
-        Assert.Equal("test.suru(1,12): unexpected character '/'", exception.Message);
+        Assert.Equal(BinaryOperator.Divide, binary.Operator);
+        Assert.Equal(6L, Assert.IsType<IntLiteral>(binary.Left).Value);
+        Assert.Equal(2L, Assert.IsType<IntLiteral>(binary.Right).Value);
+    }
+
+    [Theory]
+    [InlineData("1 + 2", BinaryOperator.Add)]
+    [InlineData("1 - 2", BinaryOperator.Subtract)]
+    [InlineData("1 * 2", BinaryOperator.Multiply)]
+    [InlineData("1 / 2", BinaryOperator.Divide)]
+    [InlineData("1 % 2", BinaryOperator.Remainder)]
+    [InlineData("1 = 2", BinaryOperator.Equal)]
+    [InlineData("1 <> 2", BinaryOperator.NotEqual)]
+    [InlineData("1 < 2", BinaryOperator.Less)]
+    [InlineData("1 <= 2", BinaryOperator.LessOrEqual)]
+    [InlineData("1 > 2", BinaryOperator.Greater)]
+    [InlineData("1 >= 2", BinaryOperator.GreaterOrEqual)]
+    [InlineData("1 and 2", BinaryOperator.And)]
+    [InlineData("1 or 2", BinaryOperator.Or)]
+    public void LexesBinaryOperators(string text, BinaryOperator op)
+    {
+        Assert.Equal(op, Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse(text))).Operator);
+    }
+
+    [Fact]
+    public void OperatorsNeedNoSurroundingWhitespace()
+    {
+        var binary = Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse("1<=2")));
+
+        Assert.Equal(BinaryOperator.LessOrEqual, binary.Operator);
+    }
+
+    [Fact]
+    public void WordOperatorsAreKeywordsAndNotIdentifiers()
+    {
+        // "ands" starts with "and" but is a single identifier.
+        var identifier = Assert.IsType<IdentifierExpression>(Source.SingleExpression(Source.Parse("ands")));
+
+        Assert.Equal("ands", identifier.Name);
     }
 
     [Fact]

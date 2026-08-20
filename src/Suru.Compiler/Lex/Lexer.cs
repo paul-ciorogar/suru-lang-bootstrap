@@ -39,6 +39,16 @@ public sealed class Lexer(string source, string sourcePath)
                 case '(': Advance(); return new Token(TokenKind.LeftParen, startLine, startCol);
                 case ')': Advance(); return new Token(TokenKind.RightParen, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
+                case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
+                case '+': Advance(); return new Token(TokenKind.Plus, startLine, startCol);
+                case '-': Advance(); return new Token(TokenKind.Minus, startLine, startCol);
+                case '*': Advance(); return new Token(TokenKind.Star, startLine, startCol);
+                // A '/' pair is a comment, handled above; a lone one divides.
+                case '/': Advance(); return new Token(TokenKind.Slash, startLine, startCol);
+                case '%': Advance(); return new Token(TokenKind.Percent, startLine, startCol);
+                case '=': Advance(); return new Token(TokenKind.Equal, startLine, startCol);
+                case '<': return ReadLess(startLine, startCol);
+                case '>': return ReadGreater(startLine, startCol);
                 default:
                     throw new LexException($"{sourcePath}({_line},{_column}): unexpected character '{c}'");
             }
@@ -58,9 +68,36 @@ public sealed class Lexer(string source, string sourcePath)
         {
             "true" => TokenKind.True,
             "false" => TokenKind.False,
+            "let" => TokenKind.Let,
+            "and" => TokenKind.And,
+            "or" => TokenKind.Or,
+            "not" => TokenKind.Not,
             _ => TokenKind.Identifier,
         };
         return new Token(kind, text, startLine, startCol);
+    }
+
+    /// <summary>'&lt;' opens three operators: '&lt;', '&lt;=' and the not-equal '&lt;&gt;'.</summary>
+    private Token ReadLess(int startLine, int startCol)
+    {
+        Advance();
+        switch (Peek())
+        {
+            case '=': Advance(); return new Token(TokenKind.LessOrEqual, startLine, startCol);
+            case '>': Advance(); return new Token(TokenKind.NotEqual, startLine, startCol);
+            default: return new Token(TokenKind.Less, startLine, startCol);
+        }
+    }
+
+    private Token ReadGreater(int startLine, int startCol)
+    {
+        Advance();
+        if (Peek() == '=')
+        {
+            Advance();
+            return new Token(TokenKind.GreaterOrEqual, startLine, startCol);
+        }
+        return new Token(TokenKind.Greater, startLine, startCol);
     }
 
     private Token ReadNumber()

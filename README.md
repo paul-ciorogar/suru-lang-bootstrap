@@ -24,12 +24,12 @@ dotnet run --project src/Suru.CLI -- build path/to/file.suru
 The object file and executable are written to a `build/` directory next to the source. The examples below shorten the invocation to `suru`.
 
 ```suru
-printLn(true)
-printLn(1)
-printLn(1.2)
+let width i64: 3
+let height i64: 4
+printLn(width * height)
 ```
 
-That is close to the whole language today. [doc/](doc/README.md) is the language reference — what a program is, which types and literals exist, and what `printLn` accepts, all limited to what the compiler implements.
+That is close to the whole language today: bindings, operators and `printLn`. [doc/](doc/README.md) is the language reference — what a program is, which types and literals exist, how expressions combine, and what `printLn` accepts, all limited to what the compiler implements.
 
 ## Debugging the compiler
 

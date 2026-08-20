@@ -86,6 +86,129 @@ public class SemanticTests
         Assert.Equal("test.suru(1,9): unknown function 'foo'", error);
     }
 
+    [Theory]
+    [InlineData("printLn(1 + 2)", "i64")]
+    [InlineData("printLn(1.0 * 2.0)", "f64")]
+    [InlineData("printLn(1 < 2)", "bool")]
+    [InlineData("printLn(1.0 <> 2.0)", "bool")]
+    [InlineData("printLn(true and false)", "bool")]
+    [InlineData("printLn(true = false)", "bool")]
+    [InlineData("printLn(-1)", "i64")]
+    [InlineData("printLn(not true)", "bool")]
+    public void AnnotatesAnOperatorWithItsResultType(string text, string typeName)
+    {
+        var call = Assert.IsType<CallExpression>(Source.SingleExpression(Source.Analyzed(text)));
+
+        Assert.Equal(new SuruType(typeName), Assert.Single(call.Args).Type);
+    }
+
+    [Fact]
+    public void AnnotatesAVariableWithTheTypeItWasBoundAt()
+    {
+        var module = Source.Analyzed("let count i64: 1\nprintLn(count)");
+
+        var call = Assert.IsType<CallExpression>(
+            Assert.IsType<ExpressionStatement>(module.Statements[1]).Expression);
+        Assert.Equal(SuruType.I64, Assert.Single(call.Args).Type);
+    }
+
+    [Fact]
+    public void AcceptsAnAssignmentOfTheBoundType()
+    {
+        Assert.Empty(Source.Analyze("let count i64: 1\ncount: count + 1"));
+    }
+
+    [Theory]
+    [InlineData("printLn(1 + 1.5)", "test.suru(1,9): operator '+' cannot be applied to 'i64' and 'f64'")]
+    [InlineData("printLn(true = 1)", "test.suru(1,9): operator '=' cannot be applied to 'bool' and 'i64'")]
+    [InlineData("printLn(true < false)", "test.suru(1,9): operator '<' cannot be applied to 'bool' and 'bool'")]
+    [InlineData("printLn(1 and 2)", "test.suru(1,9): operator 'and' cannot be applied to 'i64' and 'i64'")]
+    [InlineData("printLn(not 1)", "test.suru(1,9): operator 'not' cannot be applied to 'i64'")]
+    [InlineData("printLn(-true)", "test.suru(1,9): operator '-' cannot be applied to 'bool'")]
+    public void ReportsAnOperatorAppliedToTheWrongTypes(string text, string expected)
+    {
+        Assert.Equal(expected, Assert.Single(Source.Analyze(text)));
+    }
+
+    [Fact]
+    public void AnOperandThatFailedReportsOnlyOneError()
+    {
+        // The left operand has no type, so the operator check stays quiet rather
+        // than piling a second error onto the same expression.
+        var error = Assert.Single(Source.Analyze("printLn(missing + 1)"));
+
+        Assert.Equal("test.suru(1,9): unknown variable 'missing'", error);
+    }
+
+    [Fact]
+    public void ReportsAnUnknownTypeAtTheTypeName()
+    {
+        var error = Assert.Single(Source.Analyze("let count int: 1"));
+
+        Assert.Equal("test.suru(1,11): unknown type 'int'", error);
+    }
+
+    [Fact]
+    public void ReportsVoidAsAnUnknownType()
+    {
+        // 'void' is the type of a printLn call, not something a program can write down.
+        var error = Assert.Single(Source.Analyze("let nothing void: printLn(1)"));
+
+        Assert.Equal("test.suru(1,13): unknown type 'void'", error);
+    }
+
+    [Fact]
+    public void ReportsARedeclaredBinding()
+    {
+        var error = Assert.Single(Source.Analyze("let count i64: 1\nlet count i64: 2"));
+
+        Assert.Equal("test.suru(2,1): 'count' is already declared", error);
+    }
+
+    [Fact]
+    public void ReportsABindingWhoseValueHasTheWrongType()
+    {
+        var error = Assert.Single(Source.Analyze("let count i64: 1.5"));
+
+        Assert.Equal("test.suru(1,16): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
+    }
+
+    [Fact]
+    public void ReportsAnAssignmentOfTheWrongType()
+    {
+        var error = Assert.Single(Source.Analyze("let count i64: 1\ncount: true"));
+
+        Assert.Equal("test.suru(2,8): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
+    }
+
+    [Fact]
+    public void ReportsAnUnknownVariable()
+    {
+        var errors = Source.Analyze("printLn(count)\ncount: 1");
+
+        Assert.Collection(errors,
+            error => Assert.Equal("test.suru(1,9): unknown variable 'count'", error),
+            error => Assert.Equal("test.suru(2,1): unknown variable 'count'", error));
+    }
+
+    [Fact]
+    public void ABindingWithABadValueIsStillDeclared()
+    {
+        // One error for the initialiser; the later use resolves rather than
+        // reporting 'unknown variable' as well.
+        var error = Assert.Single(Source.Analyze("let count i64: 1.5\nprintLn(count)"));
+
+        Assert.Equal("test.suru(1,16): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
+    }
+
+    [Fact]
+    public void ReportsAVariableUsedBeforeItIsBound()
+    {
+        var error = Assert.Single(Source.Analyze("printLn(count)\nlet count i64: 1"));
+
+        Assert.Equal("test.suru(1,9): unknown variable 'count'", error);
+    }
+
     [Fact]
     public void ErrorsAreReportedWithTheSourcePathAndPosition()
     {

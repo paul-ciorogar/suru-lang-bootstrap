@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — binary expressions, bindings and assignment
+- Operators: `+ - * / %`, the comparisons `= <> < <= > >=`, and the word operators `and`, `or`, `not`. Equality is a single `=`, not-equal is `<>`, and prefix `-` negates. Integer `/` is truncating division yielding an `i64`; `%` is its remainder
+- **No operator precedence.** Every binary operator folds left to right, so `1 + 2 * 3` is `(1 + 2) * 3` — a Suru expression is a recipe, a list of steps in order, not a formula to untangle. Parentheses now group an expression and are the only way to say otherwise
+- Line continuation falls out of the same rule: an expression continues while the next token is a binary operator, wherever it sits, so a line beginning with an operator joins the line above. No newline tracking is needed in the lexer, since no statement can begin with a binary operator
+- Bindings: `let <name> <type>: <expression>`, with the type written out — never inferred. Assignment is `<name>: <expression>`. The parser tells an assignment from a call by the `:` that follows the name, using the existing one-token lookahead
+- Semantic analysis gains a symbol table (one flat scope — there are no blocks yet) and the diagnostics for it: `unknown type`, `already declared`, `cannot bind a value of type`, `cannot assign a value of type`, `unknown variable`, and `operator '<op>' cannot be applied to` for both binary and unary operands. No type converts implicitly, so both operands of an operator must already agree
+- Codegen gains stack slots: a binding is an `alloca` plus a `store`, a use is a `load`. `and`/`or` evaluate both sides — no expression can have a side effect yet, so short-circuiting waits for user-defined functions
+- `doc/expressions.md` and `doc/bindings.md`, and the fixture `tests/fixtures/expressions` covering the lot end to end
+
+### Changed — binary expressions, bindings and assignment
+- A bare identifier is now an expression (a variable use), so `printLn 1` parses as two statements instead of failing with "expected LeftParen"; the missing parentheses are reported by semantic analysis instead. A call is still an identifier followed by `(`
+- A lone `/` is division rather than a lex error; `//` is still a comment
+- `PrintTests`' process runner moved to a shared `Executable.Run`, now that a second integration test needs it
+
 ### Added — line comments
 - `//` starts a comment that runs to the end of the line. It is the only comment syntax: there is no block comment, and a lone `/` is still an unexpected character
 - The lexer treats a comment as whitespace and never produces a token for it, so the parser is unchanged. The terminating newline is left for the whitespace path, keeping line and column numbers correct after a comment

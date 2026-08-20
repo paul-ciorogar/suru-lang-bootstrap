@@ -30,22 +30,84 @@ public sealed class Parser
 
     private Statement ParseStatement()
     {
+        var token = _tokens.Current();
+        if (token.Kind == TokenKind.Let)
+            return ParseLet();
+        // An identifier starts an assignment only when a ':' follows; otherwise it
+        // is the start of an expression — a call, or a use of the name.
+        if (token.Kind == TokenKind.Identifier && _tokens.Peek().Kind == TokenKind.Colon)
+            return ParseAssignment();
         return new ExpressionStatement(ParseExpression());
     }
 
+    private Statement ParseLet()
+    {
+        var let = Expect(TokenKind.Let);
+        var name = Expect(TokenKind.Identifier);
+        var type = Expect(TokenKind.Identifier);
+        _ = Expect(TokenKind.Colon);
+        return new LetStatement(
+            PositionOf(let), name.Text, type.Text, PositionOf(type), ParseExpression());
+    }
+
+    private Statement ParseAssignment()
+    {
+        var name = Expect(TokenKind.Identifier);
+        _ = Expect(TokenKind.Colon);
+        return new AssignmentStatement(PositionOf(name), name.Text, ParseExpression());
+    }
+
+    /// <summary>
+    /// Operands folded left to right with no precedence — Suru has none, so this is
+    /// one loop rather than a precedence table. It is also the whole line-continuation
+    /// rule: an expression keeps going while the next token is a binary operator, and
+    /// since no statement can begin with one, the following line joins exactly when it
+    /// starts with an operator.
+    /// </summary>
     private Expression ParseExpression()
     {
-        var token = _tokens.Current();
-        if (token.Kind == TokenKind.Identifier)
+        var left = ParseUnary();
+        while (BinaryOperatorOf(_tokens.Current().Kind) is { } op)
         {
             _tokens.Next();
-            _ = Expect(TokenKind.LeftParen);
-            var args = ParseArguments();
-            _ = Expect(TokenKind.RightParen);
-            return new CallExpression(PositionOf(token), token.Text, args);
+            left = new BinaryExpression(left.Position, op, left, ParseUnary());
         }
-        return ParsePrimary();
+        return left;
     }
+
+    private Expression ParseUnary()
+    {
+        var token = _tokens.Current();
+        var op = token.Kind switch
+        {
+            TokenKind.Minus => (UnaryOperator?)UnaryOperator.Negate,
+            TokenKind.Not => UnaryOperator.Not,
+            _ => null,
+        };
+        if (op is null)
+            return ParsePrimary();
+
+        _tokens.Next();
+        return new UnaryExpression(PositionOf(token), op.Value, ParseUnary());
+    }
+
+    private static BinaryOperator? BinaryOperatorOf(TokenKind kind) => kind switch
+    {
+        TokenKind.Plus => BinaryOperator.Add,
+        TokenKind.Minus => BinaryOperator.Subtract,
+        TokenKind.Star => BinaryOperator.Multiply,
+        TokenKind.Slash => BinaryOperator.Divide,
+        TokenKind.Percent => BinaryOperator.Remainder,
+        TokenKind.Equal => BinaryOperator.Equal,
+        TokenKind.NotEqual => BinaryOperator.NotEqual,
+        TokenKind.Less => BinaryOperator.Less,
+        TokenKind.LessOrEqual => BinaryOperator.LessOrEqual,
+        TokenKind.Greater => BinaryOperator.Greater,
+        TokenKind.GreaterOrEqual => BinaryOperator.GreaterOrEqual,
+        TokenKind.And => BinaryOperator.And,
+        TokenKind.Or => BinaryOperator.Or,
+        _ => null,
+    };
 
     private List<Expression> ParseArguments()
     {
@@ -64,6 +126,27 @@ public sealed class Parser
     private Expression ParsePrimary()
     {
         var token = _tokens.Current();
+
+        if (token.Kind == TokenKind.LeftParen)
+        {
+            _tokens.Next();
+            var grouped = ParseExpression();
+            _ = Expect(TokenKind.RightParen);
+            return grouped;
+        }
+
+        if (token.Kind == TokenKind.Identifier)
+        {
+            _tokens.Next();
+            if (_tokens.Current().Kind != TokenKind.LeftParen)
+                return new IdentifierExpression(PositionOf(token), token.Text);
+
+            _tokens.Next();
+            var args = ParseArguments();
+            _ = Expect(TokenKind.RightParen);
+            return new CallExpression(PositionOf(token), token.Text, args);
+        }
+
         _tokens.Next();
         var position = PositionOf(token);
         return token.Kind switch

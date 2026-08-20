@@ -12,6 +12,9 @@ public sealed class CodeGenerator
     private readonly LLVMValueRef _printfFn;
     private readonly Dictionary<string, LLVMValueRef> _strings = [];
 
+    /// <summary>The stack slot behind each binding, with the type to load it back through.</summary>
+    private readonly Dictionary<string, (LLVMValueRef Slot, LLVMTypeRef Type)> _variables = [];
+
     private CodeGenerator(Module module)
     {
         _module = module;
@@ -54,6 +57,12 @@ public sealed class CodeGenerator
             case ExpressionStatement exprStmt:
                 EmitExpr(exprStmt.Expression);
                 break;
+            case LetStatement let:
+                EmitLet(let);
+                break;
+            case AssignmentStatement assignment:
+                _builder.BuildStore(EmitExpr(assignment.Value), Variable(assignment.Name).Slot);
+                break;
             default:
                 throw new CodegenException($"cannot emit statement '{statement.GetType().Name}'");
         }
@@ -76,9 +85,113 @@ public sealed class CodeGenerator
             case CallExpression { Name: "printLn", Args.Count: 1 } call:
                 EmitPrintLn(call.Args[0]);
                 return default;
+            case IdentifierExpression identifier:
+                var variable = Variable(identifier.Name);
+                return _builder.BuildLoad2(variable.Type, variable.Slot, identifier.Name);
+            case BinaryExpression binary:
+                return EmitBinary(binary);
+            case UnaryExpression unary:
+                return EmitUnary(unary);
             default:
                 throw new CodegenException($"cannot emit expression '{expression.GetType().Name}'");
         }
+    }
+
+    /// <summary>
+    /// The slot is allocated where the binding sits. Everything is one straight-line
+    /// <c>main</c>, so there is no loop for the alloca to run inside; hoisting to the
+    /// entry block becomes necessary when control flow arrives.
+    /// </summary>
+    private void EmitLet(LetStatement let)
+    {
+        var value = EmitExpr(let.Value);
+        var type = LlvmType(let.Value.Type
+            ?? throw new CodegenException($"binding '{let.Name}' at {let.Position} was never typed"));
+
+        var slot = _builder.BuildAlloca(type, let.Name);
+        _builder.BuildStore(value, slot);
+        _variables[let.Name] = (slot, type);
+    }
+
+    /// <summary>
+    /// Both operands are evaluated: no expression can have a side effect yet, so
+    /// <c>and</c> and <c>or</c> need no branching. Short-circuiting arrives with
+    /// user-defined functions.
+    /// </summary>
+    private LLVMValueRef EmitBinary(BinaryExpression binary)
+    {
+        var left = EmitExpr(binary.Left);
+        var right = EmitExpr(binary.Right);
+        var operandType = binary.Left.Type
+            ?? throw new CodegenException($"operand at {binary.Left.Position} was never typed");
+
+        if (operandType == SuruType.F64)
+            return EmitFloatBinary(binary.Operator, left, right);
+
+        return binary.Operator switch
+        {
+            BinaryOperator.Add => _builder.BuildAdd(left, right),
+            BinaryOperator.Subtract => _builder.BuildSub(left, right),
+            BinaryOperator.Multiply => _builder.BuildMul(left, right),
+            // Integer division truncates toward zero and yields an integer.
+            BinaryOperator.Divide => _builder.BuildSDiv(left, right),
+            BinaryOperator.Remainder => _builder.BuildSRem(left, right),
+            BinaryOperator.And => _builder.BuildAnd(left, right),
+            BinaryOperator.Or => _builder.BuildOr(left, right),
+            _ => _builder.BuildICmp(IntPredicate(binary.Operator), left, right),
+        };
+    }
+
+    private LLVMValueRef EmitFloatBinary(BinaryOperator op, LLVMValueRef left, LLVMValueRef right) =>
+        op switch
+        {
+            BinaryOperator.Add => _builder.BuildFAdd(left, right),
+            BinaryOperator.Subtract => _builder.BuildFSub(left, right),
+            BinaryOperator.Multiply => _builder.BuildFMul(left, right),
+            BinaryOperator.Divide => _builder.BuildFDiv(left, right),
+            BinaryOperator.Remainder => _builder.BuildFRem(left, right),
+            BinaryOperator.Equal => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, left, right),
+            BinaryOperator.NotEqual => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, left, right),
+            BinaryOperator.Less => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, left, right),
+            BinaryOperator.LessOrEqual => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLE, left, right),
+            BinaryOperator.Greater => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGT, left, right),
+            BinaryOperator.GreaterOrEqual => _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGE, left, right),
+            _ => throw new CodegenException($"cannot apply operator '{Operators.Text(op)}' to 'f64'"),
+        };
+
+    private static LLVMIntPredicate IntPredicate(BinaryOperator op) => op switch
+    {
+        BinaryOperator.Equal => LLVMIntPredicate.LLVMIntEQ,
+        BinaryOperator.NotEqual => LLVMIntPredicate.LLVMIntNE,
+        BinaryOperator.Less => LLVMIntPredicate.LLVMIntSLT,
+        BinaryOperator.LessOrEqual => LLVMIntPredicate.LLVMIntSLE,
+        BinaryOperator.Greater => LLVMIntPredicate.LLVMIntSGT,
+        BinaryOperator.GreaterOrEqual => LLVMIntPredicate.LLVMIntSGE,
+        _ => throw new CodegenException($"cannot apply operator '{Operators.Text(op)}' to an integer"),
+    };
+
+    private LLVMValueRef EmitUnary(UnaryExpression unary)
+    {
+        var operand = EmitExpr(unary.Operand);
+        return unary.Operator switch
+        {
+            UnaryOperator.Not => _builder.BuildNot(operand),
+            _ when unary.Operand.Type == SuruType.F64 => _builder.BuildFNeg(operand),
+            _ => _builder.BuildNeg(operand),
+        };
+    }
+
+    private (LLVMValueRef Slot, LLVMTypeRef Type) Variable(string name) =>
+        _variables.TryGetValue(name, out var variable)
+            ? variable
+            : throw new CodegenException($"unknown variable '{name}'");
+
+    private static LLVMTypeRef LlvmType(SuruType type)
+    {
+        if (type == SuruType.Bool) return LLVMTypeRef.Int1;
+        if (type == SuruType.I64) return LLVMTypeRef.Int64;
+        if (type == SuruType.F64) return LLVMTypeRef.Double;
+        throw new CodegenException($"type '{type}' has no representation");
     }
 
     private void EmitPrintLn(Expression arg)

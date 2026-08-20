@@ -1,0 +1,28 @@
+// Bindings and every operator, compiled and run end to end.
+
+let total i64: 1 + 2 * 3   // no precedence: (1 + 2) * 3
+printLn(total)
+
+total: total / 2           // integer division truncates
+printLn(total)
+
+printLn(7 % 3)
+printLn(-total)
+printLn(1 + (2 * 3))       // parentheses are the only way to regroup
+
+let ratio f64: 3.0 / 2.0
+printLn(ratio)
+printLn(ratio * 2.0)
+
+printLn(total < 5)
+printLn(total <> 4)
+
+let ok bool: total = 4 and not false
+printLn(ok)
+printLn(false or ok)
+
+// An operator on the next line continues the expression above.
+let sum i64: 1
+  + 2
+  + 3
+printLn(sum)
