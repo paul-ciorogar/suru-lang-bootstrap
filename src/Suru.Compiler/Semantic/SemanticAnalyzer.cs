@@ -27,8 +27,8 @@ public sealed class SemanticAnalyzer
     private readonly Module _module;
     private readonly List<string> _errors = [];
 
-    /// <summary>One flat scope: there are no blocks or functions to nest one inside yet.</summary>
-    private readonly Dictionary<string, SuruType> _bindings = [];
+    /// <summary>The bindings in scope. A block enters a scope and exits it again.</summary>
+    private readonly ScopeStack<SuruType> _scopes = new();
 
     private SemanticAnalyzer(Module module)
     {
@@ -65,6 +65,13 @@ public sealed class SemanticAnalyzer
             case AssignmentStatement assignment:
                 AnalyzeAssignment(assignment);
                 break;
+            case BlockStatement block:
+                // Errors are collected rather than thrown, so the exit always runs.
+                _scopes.EnterNew();
+                foreach (var inner in block.Statements)
+                    AnalyzeStatement(inner);
+                _scopes.Exit();
+                break;
             default:
                 Error(statement.Position, $"unsupported statement '{statement.GetType().Name}'");
                 break;
@@ -79,7 +86,8 @@ public sealed class SemanticAnalyzer
         if (declared is null)
             Error(let.TypePosition, $"unknown type '{let.TypeName}'");
 
-        if (_bindings.ContainsKey(let.Name))
+        // Only the innermost scope: a name may shadow an outer binding, but not one of its own.
+        if (_scopes.DeclaredHere(let.Name))
         {
             Error(let.Position, $"'{let.Name}' is already declared");
             return;
@@ -92,14 +100,14 @@ public sealed class SemanticAnalyzer
         // Registered even when the initialiser or the type name failed, so later uses
         // of the name report their own problems instead of 'unknown variable'.
         if (declared is not null)
-            _bindings[let.Name] = declared;
+            _scopes.Declare(let.Name, declared);
     }
 
     private void AnalyzeAssignment(AssignmentStatement assignment)
     {
         var valueType = AnalyzeExpression(assignment.Value);
 
-        if (!_bindings.TryGetValue(assignment.Name, out var declared))
+        if (!_scopes.TryLookup(assignment.Name, out var declared))
         {
             Error(assignment.Position, $"unknown variable '{assignment.Name}'");
             return;
@@ -143,7 +151,7 @@ public sealed class SemanticAnalyzer
 
     private SuruType? ResolveIdentifier(IdentifierExpression identifier)
     {
-        if (_bindings.TryGetValue(identifier.Name, out var type))
+        if (_scopes.TryLookup(identifier.Name, out var type))
             return type;
 
         Error(identifier.Position, $"unknown variable '{identifier.Name}'");

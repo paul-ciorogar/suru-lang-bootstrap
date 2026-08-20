@@ -40,6 +40,8 @@ public sealed class Lexer(string source, string sourcePath)
             {
                 case '(': Advance(); return new Token(TokenKind.LeftParen, startLine, startCol);
                 case ')': Advance(); return new Token(TokenKind.RightParen, startLine, startCol);
+                case '{': Advance(); return new Token(TokenKind.LeftBrace, startLine, startCol);
+                case '}': Advance(); return new Token(TokenKind.RightBrace, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
                 case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
                 case '+': Advance(); return new Token(TokenKind.Plus, startLine, startCol);

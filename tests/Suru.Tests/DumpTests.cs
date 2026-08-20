@@ -119,6 +119,48 @@ public class DumpTests
             dump);
     }
 
+    [Fact]
+    public void DumpsABlockWithItsStatementsIndentedOneLevel()
+    {
+        var dump = AstPrinter.Print(
+            Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\nprintLn(x)\n}\nprintLn(x)"),
+            withTypes: true);
+
+        // The two 'x' uses differ only in type: the inner one resolves to the shadow.
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) x i64
+                IntLiteral (1,12) 1 : i64
+              BlockStatement (2,1)
+                LetStatement (3,1) x f64
+                  FloatLiteral (3,12) 1.5 : f64
+                ExpressionStatement (4,1)
+                  CallExpression (4,1) printLn : void
+                    IdentifierExpression (4,9) x : f64
+              ExpressionStatement (6,1)
+                CallExpression (6,1) printLn : void
+                  IdentifierExpression (6,9) x : i64
+
+            """,
+            dump);
+    }
+
+    [Fact]
+    public void DumpsBracesAsTokens()
+    {
+        var dump = TokenPrinter.Print("{}", Source.Path);
+
+        Assert.Equal(
+            """
+            (1,1)     LeftBrace
+            (1,2)     RightBrace
+            (1,3)     Eof
+
+            """,
+            dump);
+    }
+
     [Theory]
     [InlineData("tokens", Dump.Tokens)]
     [InlineData("ast", Dump.Ast)]

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — blocks and block scope
+- `{}` is a fourth kind of statement: it runs the statements inside it in order and, more to the point, is a **scope**. A binding made in a block is visible until the closing `}` and no further, while everything already in scope stays readable and assignable from inside it. Blocks nest to any depth
+- Shadowing: a `let` inside a block may reuse a name bound further out, and since it is a new binding rather than an assignment it declares its own type — an `i64` `x` can be shadowed by an `f64` one, with the outer binding untouched and back in scope at the `}`. Shadowing crosses nesting levels only; two `let`s of one name in the same block are still `'x' is already declared`, which is now a per-scope rather than a per-program rule
+- `ScopeStack<T>`, one shared innermost-last stack of scopes, replaces the flat symbol table in *both* semantic analysis (keyed to types) and codegen (keyed to stack slots). Codegen needed the same treatment rather than just the analyzer: its table was keyed on the bare name, so a shadowing binding would otherwise have overwritten the outer slot and never given it back. `EnterNew`/`Exit` rather than push/pop — a caller enters a scope, it has nothing to hand in or take back out
+- A block is purely lexical: no branch and no new LLVM basic block, so statements keep emitting straight-line into `main`'s single `entry` block and a shadowing binding is simply a second `alloca`. Hoisting allocas to the entry block still only becomes necessary when real control flow arrives
+- A block is a statement, not an expression — it yields no value and cannot appear where one is expected. That, and the absence of anything that takes a block as a *body*, is the whole of what it does today; it lands now because control flow and user-defined functions both need this scope stack first
+- `doc/blocks.md`, and the fixture `tests/fixtures/blocks` — eight nested scopes each shadowing the same name, printing on the way in and again on the way out, so every level is proved to keep its own slot
+
 ### Added — numeric literal separators and base prefixes
 - Digit separators: `1_000_000`, and `1_000.000_1` on either side of a float's `.`. A `_` must sit between two digits, so `1_`, `1__0` and `0x_ff` are errors — the separator groups digits, it never stands in for one
 - Base prefixes for integers: `0x` hexadecimal, `0b` binary and `0o` octal, each accepting separators too. The prefix must be lowercase — `0X`, `0B` and `0O` are errors (`base prefix 'X' must be lowercase`), so a literal has one spelling and `0o` never has to be told apart from `00`; the hexadecimal digits themselves may still be written in either case. A float is always decimal. Every base shares the one `i64` range, so `0xFFFFFFFFFFFFFFFF` is out of range rather than `-1` — there are no unsigned types to reinterpret it as

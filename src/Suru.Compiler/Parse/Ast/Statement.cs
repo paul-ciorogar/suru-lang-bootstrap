@@ -28,6 +28,16 @@ public sealed class LetStatement(
     public Expression Value { get; } = value;
 }
 
+/// <summary>
+/// <c>{ ... }</c>. A scope: bindings made inside it are visible only until the <c>}</c>,
+/// and one may shadow an outer binding of the same name.
+/// </summary>
+public sealed class BlockStatement(SourcePosition position, IReadOnlyList<Statement> statements)
+    : Statement(position)
+{
+    public IReadOnlyList<Statement> Statements { get; } = statements;
+}
+
 /// <summary><c>&lt;name&gt;: &lt;value&gt;</c>, storing into an existing binding.</summary>
 public sealed class AssignmentStatement(SourcePosition position, string name, Expression value)
     : Statement(position)

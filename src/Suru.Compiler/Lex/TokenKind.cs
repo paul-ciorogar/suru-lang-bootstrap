@@ -14,6 +14,8 @@ public enum TokenKind
     FloatLiteral,
     LeftParen,
     RightParen,
+    LeftBrace,
+    RightBrace,
     Comma,
     Colon,
     Plus,
