@@ -21,6 +21,14 @@ public sealed class TestResult
     /// <summary>How many <c>#view</c> values were written back into the source.</summary>
     public int Views { get; private init; }
 
+    /// <summary>
+    /// Directives — <c>#view</c> and <c>#assert</c> alike — the run never reached, each written
+    /// back as <c>undefined</c>. Deliberately neither a pass nor a failure and not part of
+    /// <see cref="Success"/>: an assertion inside a branch the run does not take is honest, not
+    /// broken. What would be dishonest is hiding it, which this count prevents.
+    /// </summary>
+    public int Undefined { get; private init; }
+
     /// <summary>What the program itself printed, with the test records taken out.</summary>
     public string Output { get; private init; } = "";
 
@@ -31,7 +39,8 @@ public sealed class TestResult
     public static TestResult Fail(string error) => Fail([error]);
 
     internal static TestResult Ran(
-        string output, int exitCode, IReadOnlyList<string> failures, int passed, int views) =>
+        string output, int exitCode, IReadOnlyList<string> failures,
+        int passed, int views, int undefined) =>
         new()
         {
             Output = output,
@@ -40,5 +49,6 @@ public sealed class TestResult
             Passed = passed,
             Failed = failures.Count,
             Views = views,
+            Undefined = undefined,
         };
 }

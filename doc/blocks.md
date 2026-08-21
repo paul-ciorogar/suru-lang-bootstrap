@@ -19,8 +19,9 @@ printLn(4)
 4
 ```
 
-What a block adds is a **scope**. It is the only reason to write one today — there is no
-control flow yet for a block to be the body of.
+What a block adds is a **scope**. That is also what an [`if`](control-flow.md) takes as a body:
+an arm is a block, so everything on this page is true of one. Written on its own, as above, the
+scope is the only reason to write it.
 
 ## Scope
 
@@ -148,5 +149,5 @@ error: hello.suru(3,1): expected RightBrace, got Eof
 ## Not yet supported
 
 A block is a statement, not an expression — it produces no value, so it cannot appear
-where one is expected. There is nothing yet that takes a block as a body: control flow
-and user-defined functions are still to come.
+where one is expected. The only thing that takes a block as a body is
+[`if`](control-flow.md); loops and user-defined functions are still to come.

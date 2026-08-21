@@ -21,7 +21,7 @@ successfully.
 
 ## Statements
 
-There are four kinds of statement:
+There are five kinds of statement:
 
 | Form | Example | Page |
 | --- | --- | --- |
@@ -29,6 +29,7 @@ There are four kinds of statement:
 | An assignment | `count: 2` | [Bindings](bindings.md) |
 | A call | `printLn(count)` | [Printing](printing.md) |
 | A block | `{ printLn(count) }` | [Blocks](blocks.md) |
+| A branch | `if ready { printLn(count) }` | [Control flow](control-flow.md) |
 
 An expression statement must be a **call**. A bare value is parsed fine but rejected:
 
@@ -123,5 +124,5 @@ error: hello.suru(1,12): unexpected character '@'
 
 ## Not yet supported
 
-User-defined functions, control flow, imports, and multi-file programs. Each will get
+User-defined functions, loops, imports, and multi-file programs. Each will get
 its own page here when it lands.

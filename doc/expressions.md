@@ -135,5 +135,5 @@ with the feature that makes it matter.
 ## Not yet supported
 
 Bitwise operators, shifts, exponentiation, string concatenation, and any operator on a
-type other than `bool`, `i64` and `f64`. There is also no `if` — a comparison can be
-printed or bound, but not yet branched on.
+type other than `bool`, `i64` and `f64`. A comparison is also what an
+[`if`](control-flow.md) branches on.

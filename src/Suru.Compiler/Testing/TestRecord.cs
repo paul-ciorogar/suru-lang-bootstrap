@@ -23,6 +23,13 @@ internal static class TestRecord
     internal const string View = "view";
     internal const string Assert = "assert";
 
+    /// <summary>
+    /// Written back into a directive's line when it reported nothing at all. Not part of the
+    /// protocol — no record ever carries it — because it means the absence of a record: the
+    /// directive was compiled and the program never reached it.
+    /// </summary>
+    internal const string Undefined = "undefined";
+
     /// <summary>Fields after the prefix: <c>view</c>, the directive's id, the rendered value.</summary>
     internal const int ViewFieldCount = 3;
 

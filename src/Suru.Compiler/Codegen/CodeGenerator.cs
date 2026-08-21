@@ -9,6 +9,14 @@ public sealed class CodeGenerator
     private readonly Module _module;
     private readonly LLVMModuleRef _llvmModule;
     private readonly LLVMBuilderRef _builder;
+
+    /// <summary>
+    /// Positioned at <c>main</c>'s entry block and never moved. Every stack slot is built
+    /// through it, so a binding's slot belongs to the frame however deeply branched the
+    /// statement that declares it is.
+    /// </summary>
+    private readonly LLVMBuilderRef _allocas;
+
     private readonly LLVMTypeRef _printfType;
     private readonly LLVMValueRef _printfFn;
     private readonly Dictionary<string, LLVMValueRef> _strings = [];
@@ -25,6 +33,7 @@ public sealed class CodeGenerator
         _module = module;
         _llvmModule = LLVMModuleRef.CreateWithName("suru");
         _builder = LLVMBuilderRef.Create(_llvmModule.Context);
+        _allocas = LLVMBuilderRef.Create(_llvmModule.Context);
 
         // Declare printf: i32 (ptr, ...)
         var ptrType = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
@@ -44,12 +53,25 @@ public sealed class CodeGenerator
         var mainFn = _llvmModule.AddFunction("main", mainType);
         mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
-        _builder.PositionAtEnd(mainFn.AppendBasicBlock("entry"));
+        // Two blocks rather than one: 'entry' is the frame and holds nothing but allocas,
+        // 'body' holds the code. Keeping them apart is what lets _allocas sit at the end of
+        // 'entry' for the whole run without later code getting in ahead of it — which one
+        // block could not promise the moment a branch terminates it.
+        var entry = mainFn.AppendBasicBlock("entry");
+        var body = mainFn.AppendBasicBlock("body");
+
+        _allocas.PositionAtEnd(entry);
+        _builder.PositionAtEnd(body);
 
         foreach (var statement in _module.Statements)
             EmitStatement(statement);
 
         _builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
+
+        // Terminated last, once every slot is in.
+        _allocas.BuildBr(body);
+
+        _allocas.Dispose();
         _builder.Dispose();
 
         return _llvmModule;
@@ -69,11 +91,15 @@ public sealed class CodeGenerator
                 _builder.BuildStore(EmitExpr(assignment.Value), Variable(assignment.Name).Slot);
                 break;
             case BlockStatement block:
-                // Purely lexical: no branch and no new basic block, only a scope.
+                // Still purely lexical: no branch and no new basic block, only a scope. An
+                // arm gets its blocks from the 'if', not from the block that is its body.
                 _scopes.EnterNew();
                 foreach (var inner in block.Statements)
                     EmitStatement(inner);
                 _scopes.Exit();
+                break;
+            case IfStatement branch:
+                EmitIf(branch);
                 break;
             case MockDirective mock:
                 // Emitted exactly as the assignment it is; only reaching codegen at all is
@@ -121,10 +147,62 @@ public sealed class CodeGenerator
     }
 
     /// <summary>
-    /// The slot is allocated where the binding sits — a binding that shadows another is
-    /// simply a second alloca. Everything is one straight-line <c>main</c>, so there is no
-    /// loop for the alloca to run inside; hoisting to the entry block becomes necessary
-    /// when control flow arrives, which a lexical block is not.
+    /// The first construct to emit more than one basic block. The condition is already an
+    /// <c>i1</c> — <c>bool</c> maps to <see cref="LLVMTypeRef.Int1"/> and a comparison yields
+    /// one — so it feeds the branch with nothing in between.
+    /// <para>
+    /// With no <c>else</c> the false edge goes straight to <c>if.end</c>: there is no
+    /// alternative to run, only somewhere to be afterwards, which is why the block exists in
+    /// both shapes and is named for continuing rather than for merging.
+    /// </para>
+    /// <para>
+    /// Both arms are branched to the end unconditionally, because nothing can leave one early:
+    /// there is no <c>return</c>, no <c>break</c> and no diverging call. So <c>if.end</c>
+    /// always has a predecessor and neither arm can already be terminated. That is the
+    /// assumption to revisit the day a statement can leave a block.
+    /// </para>
+    /// </summary>
+    private void EmitIf(IfStatement branch)
+    {
+        // The condition is emitted first, so the function is read back from where emission
+        // actually ended up rather than from where it started — which will matter the day an
+        // expression can move the insert point, as a short-circuiting 'and' would.
+        var condition = EmitExpr(branch.Condition);
+        var function = _builder.InsertBlock.Parent;
+
+        var otherwise = branch.Else;
+
+        // Appended in source order so the IR reads in it. Not an LLVMBasicBlockRef? for the
+        // absent arm: the type converts implicitly from a raw pointer, so a null literal
+        // would quietly become a non-null nullable holding a null handle.
+        var thenBlock = function.AppendBasicBlock("if.then");
+        var elseBlock = otherwise is null ? default : function.AppendBasicBlock("if.else");
+        var endBlock = function.AppendBasicBlock("if.end");
+
+        _builder.BuildCondBr(condition, thenBlock, otherwise is null ? endBlock : elseBlock);
+
+        _builder.PositionAtEnd(thenBlock);
+        EmitStatement(branch.Then);
+        _builder.BuildBr(endBlock);
+
+        // 'else if' arrives here as an IfStatement and needs no case of its own: it appends
+        // its own blocks, leaves the builder at its own end, and the branch below terminates
+        // that block rather than this one.
+        if (otherwise is not null)
+        {
+            _builder.PositionAtEnd(elseBlock);
+            EmitStatement(otherwise);
+            _builder.BuildBr(endBlock);
+        }
+
+        _builder.PositionAtEnd(endBlock);
+    }
+
+    /// <summary>
+    /// The slot goes in the entry block and the store stays where the binding sits: a frame
+    /// slot belongs to the frame, and it is the store — not the alloca — that carries the
+    /// binding's position, so initialisation stays in order. A binding that shadows another is
+    /// still simply a second alloca, which LLVM gives its own name.
     /// </summary>
     private void EmitLet(LetStatement let)
     {
@@ -132,7 +210,7 @@ public sealed class CodeGenerator
         var type = LlvmType(let.Value.Type
             ?? throw new CodegenException($"binding '{let.Name}' at {let.Position} was never typed"));
 
-        var slot = _builder.BuildAlloca(type, let.Name);
+        var slot = _allocas.BuildAlloca(type, let.Name);
         _builder.BuildStore(value, slot);
         _scopes.Declare(let.Name, (slot, type));
     }

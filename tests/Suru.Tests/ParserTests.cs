@@ -434,6 +434,148 @@ public class ParserTests
             AstPrinter.Print(Source.Parse("let sum i64: 1\n{}")));
     }
 
+    [Fact]
+    public void ParsesAnIfWithoutAnElse()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                BoolLiteral (1,4) true
+                BlockStatement (1,9)
+                  ExpressionStatement (1,11)
+                    CallExpression (1,11) printLn
+                      IntLiteral (1,19) 1
+
+            """,
+            AstPrinter.Print(Source.Parse("if true { printLn(1) }")));
+    }
+
+    [Fact]
+    public void ParsesAnIfWithAnElse()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                BoolLiteral (1,4) true
+                BlockStatement (1,9)
+                  ExpressionStatement (1,11)
+                    CallExpression (1,11) printLn
+                      IntLiteral (1,19) 1
+                BlockStatement (1,29)
+                  ExpressionStatement (1,31)
+                    CallExpression (1,31) printLn
+                      IntLiteral (1,39) 2
+
+            """,
+            AstPrinter.Print(Source.Parse("if true { printLn(1) } else { printLn(2) }")));
+    }
+
+    [Fact]
+    public void ElseIfIsAnElseWhoseBodyIsAnIf()
+    {
+        // The nesting is the whole of what 'else if' is, and it is what makes the trailing
+        // 'else' belong to the inner 'if' rather than the outer one.
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                IdentifierExpression (1,4) a
+                BlockStatement (1,6)
+                IfStatement (1,14)
+                  IdentifierExpression (1,17) b
+                  BlockStatement (1,19)
+                  BlockStatement (1,27)
+
+            """,
+            AstPrinter.Print(Source.Parse("if a {} else if b {} else {}")));
+    }
+
+    [Fact]
+    public void ParsesEmptyArms()
+    {
+        var branch = Assert.IsType<IfStatement>(Assert.Single(Source.Parse("if true {} else {}").Statements));
+
+        Assert.Empty(branch.Then.Statements);
+        Assert.Empty(Assert.IsType<BlockStatement>(branch.Else).Statements);
+    }
+
+    [Fact]
+    public void AnIfBodyMustBeABlock()
+    {
+        // There is no single-statement form, which is why there is no dangling 'else' to
+        // have a rule about.
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("if true printLn(1)"));
+
+        Assert.Equal("test.suru(1,9): expected LeftBrace, got Identifier", exception.Message);
+    }
+
+    [Fact]
+    public void AnElseBodyMustBeABlockOrAnIf()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("if true {} else printLn(1)"));
+
+        Assert.Equal("test.suru(1,17): expected LeftBrace, got Identifier", exception.Message);
+    }
+
+    [Fact]
+    public void ReportsAMissingCondition()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("if { }"));
+
+        Assert.Equal("test.suru(1,4): unexpected token LeftBrace", exception.Message);
+    }
+
+    [Fact]
+    public void AConditionContinuesOntoTheNextLineOnAnOperator()
+    {
+        // The condition is an ordinary expression, so the ordinary continuation rule applies.
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                BinaryExpression (1,4) >
+                  IdentifierExpression (1,4) x
+                  IntLiteral (2,3) 1
+                BlockStatement (2,5)
+
+            """,
+            AstPrinter.Print(Source.Parse("if x\n> 1 {\n}")));
+    }
+
+    [Fact]
+    public void ABraceOnTheNextLineStillOpensTheBody()
+    {
+        // The counterpart of ABlockOnTheNextLineDoesNotContinueAnExpression: after a 'let' a
+        // lone '{}' is a separate statement, but after a condition it is the body, because an
+        // 'if' requires one.
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                IdentifierExpression (1,4) x
+                BlockStatement (2,1)
+
+            """,
+            AstPrinter.Print(Source.Parse("if x\n{\n}")));
+    }
+
+    [Fact]
+    public void AnElseNeedNotShareALineWithItsBrace()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              IfStatement (1,1)
+                IdentifierExpression (1,4) a
+                BlockStatement (1,6)
+                BlockStatement (3,6)
+
+            """,
+            AstPrinter.Print(Source.Parse("if a {\n}\nelse {\n}")));
+    }
+
     private static BinaryExpression ParseSingleBinary(string text) =>
         Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse(text)));
 

@@ -273,6 +273,60 @@ public class SemanticTests
             error => Assert.Equal("test.suru(3,1): only call expressions are allowed as statements", error));
     }
 
+    [Theory]
+    [InlineData("if true { }")]
+    [InlineData("if not false { }")]
+    [InlineData("let x i64: 1\nif x = 1 { } else { }")]
+    [InlineData("let ok bool: true\nif ok { } else if not ok { } else { }")]
+    public void AcceptsABooleanCondition(string text)
+    {
+        Assert.Empty(Source.Analyze(text));
+    }
+
+    [Theory]
+    [InlineData("if 1 { }", "i64")]
+    [InlineData("if 1.5 { }", "f64")]
+    [InlineData("if printLn(1) { }", "void")]
+    public void ReportsANonBooleanCondition(string text, string typeName)
+    {
+        // Nothing converts implicitly, so a number is not a truth value.
+        Assert.Equal(
+            $"test.suru(1,4): 'if' cannot branch on a value of type '{typeName}'; expected 'bool'",
+            Assert.Single(Source.Analyze(text)));
+    }
+
+    [Fact]
+    public void SaysNothingMoreWhenTheConditionAlreadyFailed()
+    {
+        Assert.Equal("test.suru(1,4): unknown variable 'missing'",
+            Assert.Single(Source.Analyze("if missing { }")));
+    }
+
+    [Fact]
+    public void ChecksTheConditionOfEveryArmInAChain()
+    {
+        Assert.Equal("test.suru(1,21): 'if' cannot branch on a value of type 'i64'; expected 'bool'",
+            Assert.Single(Source.Analyze("if true { } else if 1 { }")));
+    }
+
+    [Fact]
+    public void EachArmIsItsOwnScope()
+    {
+        // Both arms bind 'x', which is only legal if neither can see the other's.
+        Assert.Equal("test.suru(6,9): unknown variable 'x'",
+            Assert.Single(Source.Analyze("if true {\nlet x i64: 1\n} else {\nlet x f64: 1.5\n}\nprintLn(x)")));
+    }
+
+    [Fact]
+    public void ReportsTheErrorsInBothArms()
+    {
+        var errors = Source.Analyze("if true {\nfoo()\n} else {\nbar()\n}");
+
+        Assert.Collection(errors,
+            error => Assert.Equal("test.suru(2,1): unknown function 'foo'", error),
+            error => Assert.Equal("test.suru(4,1): unknown function 'bar'", error));
+    }
+
     [Fact]
     public void ErrorsAreReportedWithTheSourcePathAndPosition()
     {

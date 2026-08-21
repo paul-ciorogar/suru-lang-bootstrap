@@ -72,6 +72,9 @@ public sealed class SemanticAnalyzer
                     AnalyzeStatement(inner);
                 _scopes.Exit();
                 break;
+            case IfStatement branch:
+                AnalyzeIf(branch);
+                break;
             case MockDirective mock:
                 // A mock is an assignment, down to the diagnostics it produces.
                 AnalyzeStore(mock.NamePosition, mock.Name, mock.Value);
@@ -86,6 +89,25 @@ public sealed class SemanticAnalyzer
                 Error(statement.Position, $"unsupported statement '{statement.GetType().Name}'");
                 break;
         }
+    }
+
+    /// <summary>
+    /// The condition must already be a <c>bool</c> — nothing converts implicitly, so a number is
+    /// not a truth value. Each arm is analyzed as the ordinary statement it is, which is where
+    /// its scope comes from and why <c>else if</c> needs nothing of its own here.
+    /// </summary>
+    private void AnalyzeIf(IfStatement branch)
+    {
+        var condition = AnalyzeExpression(branch.Condition);
+
+        // A null type means the condition already reported its own error.
+        if (condition is not null && condition != SuruType.Bool)
+            Error(branch.Condition.Position,
+                $"'if' cannot branch on a value of type '{condition}'; expected '{SuruType.Bool}'");
+
+        AnalyzeStatement(branch.Then);
+        if (branch.Else is not null)
+            AnalyzeStatement(branch.Else);
     }
 
     private void AnalyzeLet(LetStatement let)

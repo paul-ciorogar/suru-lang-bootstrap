@@ -1,5 +1,6 @@
 using Suru.Compiler.Debug;
 using Suru.Compiler.Lex;
+using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 
 namespace Suru.Tests;
@@ -269,6 +270,27 @@ public class LexerTests
         var identifier = Assert.IsType<IdentifierExpression>(Source.SingleExpression(Source.Parse("ands")));
 
         Assert.Equal("ands", identifier.Name);
+    }
+
+    [Theory]
+    [InlineData("iffy")]
+    [InlineData("elsewhere")]
+    public void IfAndElseAreKeywordsAndNotIdentifiers(string name)
+    {
+        // Each starts with a keyword but is a single identifier.
+        var identifier = Assert.IsType<IdentifierExpression>(Source.SingleExpression(Source.Parse(name)));
+
+        Assert.Equal(name, identifier.Name);
+    }
+
+    [Fact]
+    public void IfIsNotUsableAsAName()
+    {
+        // Unlike 'view' and 'mock', which the parser recognises after a '#', these are real
+        // keywords and are out of the namespace.
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("let if i64: 1"));
+
+        Assert.Equal("test.suru(1,5): expected Identifier, got If", exception.Message);
     }
 
     [Fact]
