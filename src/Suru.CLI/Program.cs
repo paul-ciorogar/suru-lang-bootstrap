@@ -5,7 +5,12 @@ const string DumpFlag = "--dump";
 const string DumpEnvironmentVariable = "SURU_DUMP";
 
 var usage = $"""
-    Usage: suru build [options] <file.suru>
+    Usage: suru <command> [options] <file.suru>
+
+    Commands:
+      build             compile to a native executable; '#' directives are ignored
+      test              compile with the '#' directives live, run the result, and
+                        write each '#view' and '#assert' result into the source
 
     Options:
       --dump=<stages>   write the named compiler stages to stderr
@@ -17,7 +22,8 @@ var usage = $"""
     {DumpEnvironmentVariable} holds the same stage list and applies to every run.
     """;
 
-if (args.Length < 1 || args[0] != "build")
+var command = args.Length > 0 ? args[0] : "";
+if (command is not ("build" or "test"))
 {
     Console.Error.WriteLine(usage);
     return 1;
@@ -89,6 +95,10 @@ var buildDir = Path.Combine(Path.GetDirectoryName(sourcePath)!, "build");
 
 // Dumps go to stderr so stdout stays usable for the build result.
 var compiler = new Compiler(sourcePath, new DumpOptions(dump, Console.Error));
+
+if (command == "test")
+    return Test();
+
 var result = compiler.Compile(buildDir);
 
 if (!result.Success)
@@ -100,3 +110,32 @@ if (!result.Success)
 
 Console.WriteLine($"Built: {result.OutputPath}");
 return 0;
+
+int Test()
+{
+    var run = compiler.Test(buildDir);
+
+    if (run.Errors.Count > 0)
+    {
+        foreach (var error in run.Errors)
+            Console.Error.WriteLine($"error: {error}");
+        return 1;
+    }
+
+    // The program's own output first, verbatim, so a test run reads like an ordinary run.
+    Console.Write(run.Output);
+
+    foreach (var failure in run.Failures)
+        Console.Error.WriteLine($"error: {failure}");
+
+    // Views are reported by count: their values went into the source file, which is where
+    // they are meant to be read.
+    var views = run.Views == 1 ? "1 view" : $"{run.Views} views";
+    Console.Error.WriteLine(
+        $"{run.Passed} passed, {run.Failed} failed, {views} written to {sourcePath}");
+
+    if (run.ExitCode != 0)
+        Console.Error.WriteLine($"error: the program exited with {run.ExitCode}");
+
+    return run.Success ? 0 : 1;
+}

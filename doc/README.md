@@ -23,6 +23,9 @@ Save it as `hello.suru` and build it:
 suru build hello.suru
 ```
 
+(There is a second command, `suru test`, which builds with the `#` test directives live and
+runs the result — see [Testing](testing.md).)
+
 The compiler writes an object file and a native executable into a `build/` directory next
 to the source:
 
@@ -55,6 +58,7 @@ There is no runtime and no interpreter — `build/hello` is an ordinary native e
 | [Bindings](bindings.md) | `let`, assignment, and scope |
 | [Blocks](blocks.md) | `{}`, block scope and shadowing |
 | [Printing](printing.md) | `printLn`, the only builtin function |
+| [Testing](testing.md) | `#mock`, `#view`, `#assert` and `suru test` |
 
 ## Elsewhere in this repository
 

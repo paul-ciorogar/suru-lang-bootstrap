@@ -47,6 +47,19 @@ public static class AstPrinter
                 foreach (var inner in block.Statements)
                     AppendStatement(output, inner, depth + 1, withTypes);
                 break;
+            case MockDirective mock:
+                AppendNode(output, depth, "MockDirective", mock.Position, mock.Name);
+                AppendExpression(output, mock.Value, depth + 1, withTypes);
+                break;
+            case ViewDirective view:
+                AppendNode(output, depth, "ViewDirective", view.Position, $"#{view.Id}");
+                AppendExpression(output, view.Subject, depth + 1, withTypes);
+                break;
+            case AssertDirective assert:
+                AppendNode(output, depth, "AssertDirective", assert.Position, $"#{assert.Id}");
+                AppendExpression(output, assert.Actual, depth + 1, withTypes);
+                AppendExpression(output, assert.Expected, depth + 1, withTypes);
+                break;
             default:
                 AppendNode(output, depth, statement.GetType().Name, statement.Position);
                 break;

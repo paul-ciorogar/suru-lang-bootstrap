@@ -18,6 +18,8 @@ public enum TokenKind
     RightBrace,
     Comma,
     Colon,
+    /// <summary>Opens a test directive. Only ever produced in <see cref="BuildMode.Test"/>.</summary>
+    Hash,
     Plus,
     Minus,
     Star,

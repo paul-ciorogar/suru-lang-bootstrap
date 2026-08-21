@@ -7,6 +7,9 @@ public sealed class Parser
 {
     private readonly Tokens _tokens;
 
+    /// <summary>Numbers the directives that report a value at runtime, in source order.</summary>
+    private int _directives;
+
     private Parser(Lexer lexer)
     {
         _tokens = new Tokens(lexer);
@@ -32,6 +35,8 @@ public sealed class Parser
         var token = _tokens.Current();
         if (token.Kind == TokenKind.LeftBrace)
             return ParseBlock();
+        if (token.Kind == TokenKind.Hash)
+            return ParseDirective();
         if (token.Kind == TokenKind.Let)
             return ParseLet();
         // An identifier starts an assignment only when a ':' follows; otherwise it
@@ -71,6 +76,95 @@ public sealed class Parser
         var name = Expect(TokenKind.Identifier);
         _ = Expect(TokenKind.Colon);
         return new AssignmentStatement(PositionOf(name), name.Text, ParseExpression());
+    }
+
+    /// <summary>
+    /// A <c>#</c> test directive. The word after the <c>#</c> is an ordinary identifier
+    /// rather than a keyword, so <c>mock</c>, <c>view</c> and <c>assert</c> remain usable as
+    /// names everywhere else in the language.
+    /// </summary>
+    private Statement ParseDirective()
+    {
+        var hash = Expect(TokenKind.Hash);
+        var name = Expect(TokenKind.Identifier);
+
+        return name.Text switch
+        {
+            "mock" => ParseMock(hash),
+            "view" => ParseView(hash),
+            "assert" => ParseAssert(hash),
+            _ => throw new ParseException(
+                $"{_tokens.SourcePath}({name.Line},{name.Column}): unknown directive " +
+                $"'#{name.Text}'; expected '#mock', '#view' or '#assert'"),
+        };
+    }
+
+    private Statement ParseMock(Token hash)
+    {
+        var name = Expect(TokenKind.Identifier);
+        _ = Expect(TokenKind.Colon);
+        var value = ParseExpression();
+        RequireOneLine(hash);
+        return new MockDirective(PositionOf(hash), name.Text, PositionOf(name), value);
+    }
+
+    private Statement ParseView(Token hash)
+    {
+        var subject = ParseExpression();
+        RequireOneLine(hash);
+        SkipAnnotation(hash);
+        return new ViewDirective(PositionOf(hash), _directives++, subject);
+    }
+
+    private Statement ParseAssert(Token hash)
+    {
+        _ = Expect(TokenKind.LeftParen);
+        var args = ParseArguments();
+        _ = Expect(TokenKind.RightParen);
+        RequireOneLine(hash);
+
+        if (args.Count != 2)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({hash.Line},{hash.Column}): " +
+                $"'#assert' expects 2 arguments, got {args.Count}");
+
+        SkipAnnotation(hash);
+        return new AssertDirective(PositionOf(hash), _directives++, args[0], args[1]);
+    }
+
+    /// <summary>
+    /// Discards the compiler-written annotation that follows a <c>#view</c> or
+    /// <c>#assert</c>, so the directive survives being read back after a test run wrote its
+    /// result into the line. Everything after the colon belongs to the compiler and is
+    /// thrown away without being lexed — see <see cref="Tokens.SkipRestOfLine"/> for why it
+    /// cannot simply be parsed and ignored.
+    /// </summary>
+    private void SkipAnnotation(Token hash)
+    {
+        var next = _tokens.Current();
+        if (next.Kind == TokenKind.Colon && next.Line == hash.Line)
+            _tokens.SkipRestOfLine();
+    }
+
+    /// <summary>
+    /// Holds a directive to the line its <c>#</c> is on. Ordinary statements may run over
+    /// several lines, but a directive is a comment as far as a production build is
+    /// concerned, and a comment stops at the newline.
+    /// </summary>
+    private void RequireOneLine(Token hash)
+    {
+        // TODO: add multy line directives ex:
+        // #mock val
+        // # + 1
+        // # * 3
+        // or in the case of a view that will print a lot of text adding a new line with # would continue the print ex:
+        // #view largeTextVal: "some really large text
+        // # that continues on this line also"
+        var last = _tokens.LastConsumed!;
+        if (last.Line != hash.Line)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({last.Line},{last.Column}): " +
+                $"a directive must be written on one line; '#' is on line {hash.Line}");
     }
 
     /// <summary>
