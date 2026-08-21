@@ -163,7 +163,7 @@ makes `suru test` exit non-zero:
 
 ```
 error: hello.suru(6,1): assert failed: expected 12, got 40
-4 passed, 1 failed, 5 views written to hello.suru
+4 passed, 1 failed, 0 undefined, 5 views written to hello.suru
 ```
 
 Two places on purpose: the annotation is for reading the code, the error is for your editor
@@ -186,12 +186,39 @@ error: hello.suru(1,1): '#assert' cannot compare 'i64' with 'bool'
 
 ```
 40
-4 passed, 1 failed, 5 views written to hello.suru
+4 passed, 1 failed, 0 undefined, 5 views written to hello.suru
 ```
 
 The program's own output goes to stdout and the summary to stderr, so piping a test run
 gives you the program's output alone. Viewed values are reported only as a count — they were
 written into your source, which is where they are meant to be read.
+
+## Directives the run never reached
+
+A directive inside an [`if`](control-flow.md) arm is an ordinary statement of that arm: it obeys
+the arm's scope, and it only runs when the arm does.
+
+A directive in a branch that is **not** taken reports nothing, so there is no value to write
+back. What the compiler writes instead is `undefined`:
+
+```suru
+let x i64: 2
+
+if x = 0 {
+  #view x: undefined
+  #assert(x, 0): undefined
+}
+```
+
+```
+0 passed, 0 failed, 2 undefined, 0 views written to hello.suru
+```
+
+An unreached `#assert` is deliberately **neither a pass nor a failure**. It is counted on its
+own, produces no error on the terminal, and does not make `suru test` exit non-zero: an
+assertion in a branch this run did not take is honest, not broken. Counting it as a pass would
+be the dishonest option, which is why it has a figure of its own rather than being folded into
+one of the other two.
 
 ## Not yet supported
 
@@ -200,11 +227,13 @@ one set at a time. `#spec` and `#save` are designed for that and wait on user-de
 functions, which is the unit a test case really belongs to.
 
 `#view-step-N <expression>:` — a `#view` that keeps a counter of its own and shows the value
-from the Nth time execution reached it — is designed and waits on control flow, together
-with `undefined`, the test-mode-only value that stands for "there was nothing to see here":
-an input nobody mocked, or an Nth hit that never happened. `undefined` absorbs whatever it
-takes part in, so
-`#view param1 + param2:` with only `param1` mocked writes `undefined` rather than a number
-that looks like an answer.
+from the Nth time execution reached it — is designed and waits on loops, since there is
+nothing yet to reach a line more than once.
+
+`undefined` exists so far only as the annotation above: a directive that did not report. The
+rest of it — `undefined` as a *value* that absorbs whatever it takes part in, so
+`#view param1 + param2:` with only `param1` mocked writes `undefined` rather than a number that
+looks like an answer — waits on user-defined functions, since an input nobody mocked presumes a
+parameter.
 
 Both are described in [todo.md](../todo.md).

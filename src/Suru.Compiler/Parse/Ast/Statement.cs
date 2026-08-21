@@ -38,6 +38,24 @@ public sealed class BlockStatement(SourcePosition position, IReadOnlyList<Statem
     public IReadOnlyList<Statement> Statements { get; } = statements;
 }
 
+/// <summary>
+/// <c>if &lt;condition&gt; { ... }</c>, with an optional <c>else</c>. Both arms are blocks, so
+/// both are scopes and neither needs a rule of its own.
+/// <para>
+/// <see cref="Else"/> is a <see cref="BlockStatement"/>, or another <see cref="IfStatement"/>
+/// when the source wrote <c>else if</c> — that nesting is the whole of what <c>else if</c> is,
+/// which is why no stage past the parser has a case for it.
+/// </para>
+/// </summary>
+public sealed class IfStatement(
+    SourcePosition position, Expression condition, BlockStatement then, Statement? otherwise)
+    : Statement(position)
+{
+    public Expression Condition { get; } = condition;
+    public BlockStatement Then { get; } = then;
+    public Statement? Else { get; } = otherwise;
+}
+
 /// <summary><c>&lt;name&gt;: &lt;value&gt;</c>, storing into an existing binding.</summary>
 public sealed class AssignmentStatement(SourcePosition position, string name, Expression value)
     : Statement(position)

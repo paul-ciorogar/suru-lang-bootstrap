@@ -7,6 +7,8 @@ public enum TokenKind
     True,
     False,
     Let,
+    If,
+    Else,
     And,
     Or,
     Not,

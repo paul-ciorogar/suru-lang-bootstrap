@@ -147,6 +147,57 @@ public class DumpTests
     }
 
     [Fact]
+    public void DumpsAnIfWithItsConditionAndArms()
+    {
+        var dump = AstPrinter.Print(
+            Source.Analyzed("let x i64: 1\nif x > 0 {\nprintLn(x)\n} else {\nprintLn(0)\n}"),
+            withTypes: true);
+
+        // The condition types as 'bool' although both its operands are 'i64' — that is what
+        // makes it a condition at all.
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) x i64
+                IntLiteral (1,12) 1 : i64
+              IfStatement (2,1)
+                BinaryExpression (2,4) > : bool
+                  IdentifierExpression (2,4) x : i64
+                  IntLiteral (2,8) 0 : i64
+                BlockStatement (2,10)
+                  ExpressionStatement (3,1)
+                    CallExpression (3,1) printLn : void
+                      IdentifierExpression (3,9) x : i64
+                BlockStatement (4,8)
+                  ExpressionStatement (5,1)
+                    CallExpression (5,1) printLn : void
+                      IntLiteral (5,9) 0 : i64
+
+            """,
+            dump);
+    }
+
+    [Fact]
+    public void DumpsIfAndElseAsKeywordTokens()
+    {
+        var dump = TokenPrinter.Print("if {} else {}", Source.Path);
+
+        // Keywords carry their text, unlike the punctuation around them.
+        Assert.Equal(
+            """
+            (1,1)     If if
+            (1,4)     LeftBrace
+            (1,5)     RightBrace
+            (1,7)     Else else
+            (1,12)    LeftBrace
+            (1,13)    RightBrace
+            (1,14)    Eof
+
+            """,
+            dump);
+    }
+
+    [Fact]
     public void DumpsBracesAsTokens()
     {
         var dump = TokenPrinter.Print("{}", Source.Path);

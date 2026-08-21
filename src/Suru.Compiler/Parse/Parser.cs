@@ -39,6 +39,8 @@ public sealed class Parser
             return ParseDirective();
         if (token.Kind == TokenKind.Let)
             return ParseLet();
+        if (token.Kind == TokenKind.If)
+            return ParseIf();
         // An identifier starts an assignment only when a ':' follows; otherwise it
         // is the start of an expression — a call, or a use of the name.
         if (token.Kind == TokenKind.Identifier && _tokens.Peek().Kind == TokenKind.Colon)
@@ -51,7 +53,7 @@ public sealed class Parser
     /// <c>Eof</c> too, so an unterminated block ends as 'expected RightBrace, got Eof'
     /// rather than spinning.
     /// </summary>
-    private Statement ParseBlock()
+    private BlockStatement ParseBlock()
     {
         var open = Expect(TokenKind.LeftBrace);
         var stmts = new List<Statement>();
@@ -59,6 +61,38 @@ public sealed class Parser
             stmts.Add(ParseStatement());
         _ = Expect(TokenKind.RightBrace);
         return new BlockStatement(PositionOf(open), stmts);
+    }
+
+    /// <summary>
+    /// <c>if &lt;condition&gt; { ... }</c> with an optional <c>else</c>. The body is always
+    /// braced: there is no single-statement form, so there is no dangling <c>else</c> to have a
+    /// rule about.
+    /// <para>
+    /// <c>else if</c> recurses here rather than being a form of its own, which is what makes a
+    /// trailing <c>else</c> belong to the nearest <c>if</c>. The condition needs no terminator
+    /// either: <c>{</c> is not a binary operator, so the fold in
+    /// <see cref="ParseExpression"/> stops at it on its own.
+    /// </para>
+    /// <para>
+    /// Only <see cref="Tokens.Current"/> is consulted, never <see cref="Tokens.Peek"/>: a
+    /// directive inside an arm relies on <see cref="Tokens.SkipRestOfLine"/>, which refuses to
+    /// run with anything buffered ahead of it.
+    /// </para>
+    /// </summary>
+    private IfStatement ParseIf()
+    {
+        var keyword = Expect(TokenKind.If);
+        var condition = ParseExpression();
+        var then = ParseBlock();
+
+        Statement? otherwise = null;
+        if (_tokens.Current().Kind == TokenKind.Else)
+        {
+            _tokens.Next();
+            otherwise = _tokens.Current().Kind == TokenKind.If ? ParseIf() : ParseBlock();
+        }
+
+        return new IfStatement(PositionOf(keyword), condition, then, otherwise);
     }
 
     private Statement ParseLet()

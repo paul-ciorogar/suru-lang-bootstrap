@@ -20,6 +20,14 @@ internal static class TestRun
         var failures = new List<string>();
         int passed = 0, views = 0;
 
+        // Every directive starts out undefined, and a record overwrites it. That is the whole
+        // of what 'undefined' means here — the directive was compiled and never reported —
+        // so it needs no notion of a branch, and will be the same answer for an unreached
+        // '#view-step-N' or an unmocked parameter when those exist.
+        var pending = new HashSet<int>(directives.Keys);
+        foreach (var directive in directives.Values)
+            annotations[directive.Position.Line] = TestRecord.Undefined;
+
         foreach (var raw in stdout.Split('\n'))
         {
             if (!raw.StartsWith(TestRecord.Prefix, StringComparison.Ordinal))
@@ -36,12 +44,14 @@ internal static class TestRun
             if (fields is [TestRecord.View, _, var value] )
             {
                 annotations[directive.Position.Line] = value;
+                pending.Remove(id);
                 views++;
             }
             else if (fields is [TestRecord.Assert, _, var outcome, var actual, var expected])
             {
                 var held = outcome == "1";
                 annotations[directive.Position.Line] = held ? "pass" : $"fail, got {actual}";
+                pending.Remove(id);
 
                 if (held)
                     passed++;
@@ -54,26 +64,41 @@ internal static class TestRun
 
         Annotate(sourcePath, annotations);
 
-        return TestResult.Ran(string.Join('\n', output), exitCode, failures, passed, views);
+        return TestResult.Ran(
+            string.Join('\n', output), exitCode, failures, passed, views, pending.Count);
     }
 
     private static void CollectDirectives(
         IReadOnlyList<Statement> statements, Dictionary<int, Directive> into)
     {
         foreach (var statement in statements)
+            CollectDirectives(statement, into);
+    }
+
+    /// <summary>
+    /// Finds every directive that can report, however deeply nested. A record carries only an
+    /// id, so a directive this misses is a record with nothing to annotate: it is dropped at
+    /// the lookup and the run goes quiet about it, which is the failure mode this has to be
+    /// exhaustive to avoid.
+    /// </summary>
+    private static void CollectDirectives(Statement statement, Dictionary<int, Directive> into)
+    {
+        switch (statement)
         {
-            switch (statement)
-            {
-                case ViewDirective view:
-                    into[view.Id] = view;
-                    break;
-                case AssertDirective assert:
-                    into[assert.Id] = assert;
-                    break;
-                case BlockStatement block:
-                    CollectDirectives(block.Statements, into);
-                    break;
-            }
+            case ViewDirective view:
+                into[view.Id] = view;
+                break;
+            case AssertDirective assert:
+                into[assert.Id] = assert;
+                break;
+            case BlockStatement block:
+                CollectDirectives(block.Statements, into);
+                break;
+            case IfStatement branch:
+                CollectDirectives(branch.Then, into);
+                if (branch.Else is not null)
+                    CollectDirectives(branch.Else, into);
+                break;
         }
     }
 

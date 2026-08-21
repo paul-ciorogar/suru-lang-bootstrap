@@ -30,9 +30,41 @@ public class TestModeTests
     {
         var result = _fixtures.GetTestRun("directives").Result;
 
-        Assert.Equal(4, result.Passed);
+        Assert.Equal(5, result.Passed);
         Assert.Equal(1, result.Failed);
         Assert.False(result.Success);
+    }
+
+    [Fact]
+    public void AnnotatesADirectiveInsideATakenBranch()
+    {
+        // Without walking into the arm these two records would have nothing to annotate and
+        // would be dropped, taking a failing assertion with them.
+        var source = _fixtures.GetTestRun("directives").Source;
+
+        Assert.Contains("  #view area: 40\n", source);
+        Assert.Contains("  #assert(area, 40): pass\n", source);
+    }
+
+    [Fact]
+    public void WritesUndefinedForADirectiveInAnUntakenBranch()
+    {
+        var run = _fixtures.GetTestRun("directives");
+
+        Assert.Contains("  #view area: undefined\n", run.Source);
+        Assert.Contains("  #assert(area, 0): undefined\n", run.Source);
+        Assert.Equal(2, run.Result.Undefined);
+    }
+
+    [Fact]
+    public void AnUnreachedAssertIsNotAFailure()
+    {
+        // An assertion in a branch the run does not take is honest, not broken: it is counted
+        // apart from the passes and failures rather than being either.
+        var result = _fixtures.GetTestRun("directives").Result;
+
+        Assert.Single(result.Failures);
+        Assert.Equal(1, result.Failed);
     }
 
     [Fact]
@@ -55,7 +87,7 @@ public class TestModeTests
         Assert.Contains("#view ready: true\n", source);
         Assert.Contains("#assert(area, 40): pass\n", source);
         Assert.Contains("#assert(area, 12): fail, got 40\n", source);
-        Assert.Equal(5, _fixtures.GetTestRun("directives").Result.Views);
+        Assert.Equal(6, _fixtures.GetTestRun("directives").Result.Views);
     }
 
     [Fact]

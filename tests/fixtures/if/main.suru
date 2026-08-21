@@ -1,0 +1,54 @@
+// The first control flow, and so the first program that is more than one basic block. Every
+// case prints only what it actually reached: a number that appears out of order, or at all
+// when it should not, means an edge went to the wrong block.
+
+let x i64: 2
+
+if x > 1 { printLn(1) }
+if x > 10 { printLn(0) }              // never reached: the false edge skips the arm
+
+if x = 2 { printLn(2) } else { printLn(0) }
+if x = 99 { printLn(0) } else { printLn(3) }
+
+// 'else if' is an 'else' whose body is another 'if', so a chain needs no new syntax and the
+// final 'else' belongs to the nearest 'if'.
+if x = 0 { printLn(0) } else if x = 2 { printLn(4) } else { printLn(0) }
+if x = 0 { printLn(0) } else if x = 1 { printLn(0) } else { printLn(5) }
+
+// An arm is a block, so it is a scope: this 'x' is a second slot that shadows the outer one,
+// which is back at the '}'. Its alloca is hoisted to the frame like any other, so the two
+// never share storage.
+if x = 2 {
+  let x i64: 6
+  printLn(x)
+}
+printLn(x + 5)                        // 7 — the outer binding, untouched
+
+// A branch can assign a binding it can see, and the store outlives the branch.
+let total i64: 0
+if x = 2 { total: total + 8 }
+printLn(total)
+
+// A bool printed inside a branch and again after it: both go through the one interned
+// 'true'/'false' global, which has to be reachable from either block.
+let ok bool: x = 2
+if ok { printLn(ok) }
+printLn(not ok)
+
+// Empty arms are legal and emit nothing but the branch itself.
+if ok { } else { }
+
+// The condition follows the ordinary line-continuation rule, and 'else' need not share a
+// line with the '}'.
+if x
+  > 1 {
+  printLn(9)
+}
+else {
+  printLn(0)
+}
+
+// Nesting: an 'if' inside an arm is just another statement.
+if ok {
+  if x = 2 { printLn(10) }
+}

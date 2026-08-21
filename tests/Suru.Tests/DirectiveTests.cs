@@ -245,6 +245,21 @@ public class DirectiveTests
         Assert.Contains("Hash", TokenPrinter.Print("#view 1:", Source.Path, BuildMode.Test));
     }
 
+    [Fact]
+    public void AMockInsideAnArmSeesTheArmsScope()
+    {
+        Assert.Empty(Source.Analyze("let seed i64: 7\nif true {\n#mock seed: 1\n}", BuildMode.Test));
+    }
+
+    [Fact]
+    public void ADirectiveInAnArmObeysTheSameRules()
+    {
+        // Nesting changes nothing about what a directive accepts.
+        Assert.Equal(
+            "test.suru(2,7): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
+            Assert.Single(Source.Analyze("if true {\n#view printLn(1):\n}", BuildMode.Test)));
+    }
+
     private static T ParseSingle<T>(string text) where T : Statement =>
         Assert.IsType<T>(Source.Parse(text, BuildMode.Test).Statements[^1]);
 

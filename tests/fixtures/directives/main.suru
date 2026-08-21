@@ -31,3 +31,17 @@ let ready bool: area > 0
 #assert(ready, true)
 
 printLn(area)
+
+// An arm is a scope like any other block, and the driver has to walk into one to find the
+// directive a record belongs to at all.
+if area = 40 {
+  #view area:
+  #assert(area, 40)
+}
+
+// A branch that is not taken never reports, so the compiler writes 'undefined' into both
+// lines. The second run re-reads that tail, which is not an expression either.
+if area = 0 {
+  #view area:
+  #assert(area, 0)
+}

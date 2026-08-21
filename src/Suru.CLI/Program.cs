@@ -132,7 +132,8 @@ int Test()
     // they are meant to be read.
     var views = run.Views == 1 ? "1 view" : $"{run.Views} views";
     Console.Error.WriteLine(
-        $"{run.Passed} passed, {run.Failed} failed, {views} written to {sourcePath}");
+        $"{run.Passed} passed, {run.Failed} failed, {run.Undefined} undefined, " +
+        $"{views} written to {sourcePath}");
 
     if (run.ExitCode != 0)
         Console.Error.WriteLine($"error: the program exited with {run.ExitCode}");

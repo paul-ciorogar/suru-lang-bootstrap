@@ -47,6 +47,16 @@ public static class AstPrinter
                 foreach (var inner in block.Statements)
                     AppendStatement(output, inner, depth + 1, withTypes);
                 break;
+            // Condition, then-arm and else-arm as unlabelled children in source order. An
+            // 'else if' shows up as a nested IfStatement one level in, which is what tells it
+            // apart from an 'if' inside the then-arm — that one sits under a BlockStatement.
+            case IfStatement branch:
+                AppendNode(output, depth, "IfStatement", branch.Position);
+                AppendExpression(output, branch.Condition, depth + 1, withTypes);
+                AppendStatement(output, branch.Then, depth + 1, withTypes);
+                if (branch.Else is not null)
+                    AppendStatement(output, branch.Else, depth + 1, withTypes);
+                break;
             case MockDirective mock:
                 AppendNode(output, depth, "MockDirective", mock.Position, mock.Name);
                 AppendExpression(output, mock.Value, depth + 1, withTypes);
