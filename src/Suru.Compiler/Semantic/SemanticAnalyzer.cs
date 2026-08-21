@@ -72,6 +72,16 @@ public sealed class SemanticAnalyzer
                     AnalyzeStatement(inner);
                 _scopes.Exit();
                 break;
+            case MockDirective mock:
+                // A mock is an assignment, down to the diagnostics it produces.
+                AnalyzeStore(mock.NamePosition, mock.Name, mock.Value);
+                break;
+            case ViewDirective view:
+                AnalyzeView(view);
+                break;
+            case AssertDirective assert:
+                AnalyzeAssert(assert);
+                break;
             default:
                 Error(statement.Position, $"unsupported statement '{statement.GetType().Name}'");
                 break;
@@ -103,19 +113,62 @@ public sealed class SemanticAnalyzer
             _scopes.Declare(let.Name, declared);
     }
 
-    private void AnalyzeAssignment(AssignmentStatement assignment)
-    {
-        var valueType = AnalyzeExpression(assignment.Value);
+    private void AnalyzeAssignment(AssignmentStatement assignment) =>
+        AnalyzeStore(assignment.Position, assignment.Name, assignment.Value);
 
-        if (!_scopes.TryLookup(assignment.Name, out var declared))
+    /// <summary>
+    /// Checks a store into an existing binding. Shared by <c>&lt;name&gt;: &lt;value&gt;</c>
+    /// and by <c>#mock</c>, which is that statement restricted to test builds — so the two
+    /// cannot drift apart in what they accept or in what they say when they refuse.
+    /// </summary>
+    private void AnalyzeStore(SourcePosition position, string name, Expression value)
+    {
+        var valueType = AnalyzeExpression(value);
+
+        if (!_scopes.TryLookup(name, out var declared))
         {
-            Error(assignment.Position, $"unknown variable '{assignment.Name}'");
+            Error(position, $"unknown variable '{name}'");
             return;
         }
 
         if (valueType is not null && valueType != declared)
-            Error(assignment.Value.Position,
-                $"cannot assign a value of type '{valueType}' to '{assignment.Name}' of type '{declared}'");
+            Error(value.Position,
+                $"cannot assign a value of type '{valueType}' to '{name}' of type '{declared}'");
+    }
+
+    /// <summary>A view prints its subject, so it accepts exactly what <c>printLn</c> does.</summary>
+    private void AnalyzeView(ViewDirective view)
+    {
+        var type = AnalyzeExpression(view.Subject);
+        if (type is not null && !PrintableTypes.Contains(type))
+            Error(view.Subject.Position,
+                $"'#view' cannot show a value of type '{type}'; expected {Printable()}");
+    }
+
+    /// <summary>
+    /// An assertion compares, then prints both sides, so its operands must satisfy the rule
+    /// <c>=</c> already applies and be printable — which for the types that exist today is
+    /// the same set twice over.
+    /// </summary>
+    private void AnalyzeAssert(AssertDirective assert)
+    {
+        var actual = AnalyzeExpression(assert.Actual);
+        var expected = AnalyzeExpression(assert.Expected);
+
+        // A null type means that operand already reported its own error.
+        if (actual is null || expected is null)
+            return;
+
+        if (actual != expected)
+        {
+            Error(assert.Position,
+                $"'#assert' cannot compare '{actual}' with '{expected}'");
+            return;
+        }
+
+        if (!PrintableTypes.Contains(actual))
+            Error(assert.Position,
+                $"'#assert' cannot compare values of type '{actual}'; expected {Printable()}");
     }
 
     private SuruType? AnalyzeExpression(Expression expression)

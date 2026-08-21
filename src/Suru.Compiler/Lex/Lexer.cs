@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Suru.Compiler.Lex;
 
-public sealed class Lexer(string source, string sourcePath)
+public sealed class Lexer(string source, string sourcePath, BuildMode mode = BuildMode.Production)
 {
     private int _pos;
     private int _line = 1;
@@ -31,7 +31,16 @@ public sealed class Lexer(string source, string sourcePath)
 
             if (c == '/' && Peek(1) == '/')
             {
-                SkipLineComment();
+                SkipRestOfLine();
+                continue;
+            }
+
+            // A production build treats a directive as a comment, so the parser never learns
+            // one was there; a test build hands the '#' over and lexes the rest of the line
+            // like any other code.
+            if (c == '#' && mode == BuildMode.Production)
+            {
+                SkipRestOfLine();
                 continue;
             }
 
@@ -43,6 +52,8 @@ public sealed class Lexer(string source, string sourcePath)
                 case '{': Advance(); return new Token(TokenKind.LeftBrace, startLine, startCol);
                 case '}': Advance(); return new Token(TokenKind.RightBrace, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
+                // Reached only in BuildMode.Test; a production build skipped the line above.
+                case '#': Advance(); return new Token(TokenKind.Hash, startLine, startCol);
                 case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
                 case '+': Advance(); return new Token(TokenKind.Plus, startLine, startCol);
                 case '-': Advance(); return new Token(TokenKind.Minus, startLine, startCol);
@@ -251,11 +262,17 @@ public sealed class Lexer(string source, string sourcePath)
     private const ulong NegatedMinimum = (ulong)long.MaxValue + 1;
 
     /// <summary>
-    /// Consumes <c>//</c> and everything up to — but not including — the newline, so the
-    /// newline itself still goes through <see cref="AdvanceWhitespace"/> and keeps the
-    /// line counter right. A comment at the end of the file just runs into EOF.
+    /// Consumes everything up to — but not including — the newline, so the newline itself
+    /// still goes through <see cref="AdvanceWhitespace"/> and keeps the line counter right.
+    /// A last line without one just runs into EOF.
+    /// <para>
+    /// Three callers, all discarding text no stage will look at: a <c>//</c> comment, a
+    /// <c>#</c> directive in a production build, and the compiler-written annotation on a
+    /// <c>#view</c> or <c>#assert</c> line. The last is why this is reachable from the
+    /// parser: an annotation is output, not source, and need not lex at all.
+    /// </para>
     /// </summary>
-    private void SkipLineComment()
+    internal void SkipRestOfLine()
     {
         while (_pos < source.Length && Peek() != '\n')
         {

@@ -1,3 +1,4 @@
+using Suru.Compiler;
 using Suru.Compiler.Lex;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
@@ -14,14 +15,16 @@ internal static class Source
 {
     public const string Path = "test.suru";
 
-    public static Module Parse(string text) => Parser.Parse(new Lexer(text, Path));
+    public static Module Parse(string text, BuildMode mode = BuildMode.Production) =>
+        Parser.Parse(new Lexer(text, Path, mode));
 
-    public static IReadOnlyList<string> Analyze(string text) => SemanticAnalyzer.Analyze(Parse(text));
+    public static IReadOnlyList<string> Analyze(string text, BuildMode mode = BuildMode.Production) =>
+        SemanticAnalyzer.Analyze(Parse(text, mode));
 
     /// <summary>Parses and analyzes, asserting the source is error free, and returns the module.</summary>
-    public static Module Analyzed(string text)
+    public static Module Analyzed(string text, BuildMode mode = BuildMode.Production)
     {
-        var module = Parse(text);
+        var module = Parse(text, mode);
         Assert.Empty(SemanticAnalyzer.Analyze(module));
         return module;
     }

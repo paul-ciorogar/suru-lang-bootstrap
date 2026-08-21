@@ -14,9 +14,9 @@ namespace Suru.Compiler.Debug;
 /// </summary>
 public static class TokenPrinter
 {
-    public static string Print(string source, string sourcePath)
+    public static string Print(string source, string sourcePath, BuildMode mode = BuildMode.Production)
     {
-        var lexer = new Lexer(source, sourcePath);
+        var lexer = new Lexer(source, sourcePath, mode);
         var output = new StringBuilder();
 
         try

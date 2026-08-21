@@ -1,5 +1,6 @@
 using LLVMSharp.Interop;
 using Suru.Compiler.Parse.Ast;
+using Suru.Compiler.Testing;
 
 namespace Suru.Compiler.Codegen;
 
@@ -73,6 +74,17 @@ public sealed class CodeGenerator
                 foreach (var inner in block.Statements)
                     EmitStatement(inner);
                 _scopes.Exit();
+                break;
+            case MockDirective mock:
+                // Emitted exactly as the assignment it is; only reaching codegen at all is
+                // what makes it a test-build feature.
+                _builder.BuildStore(EmitExpr(mock.Value), Variable(mock.Name).Slot);
+                break;
+            case ViewDirective view:
+                EmitView(view);
+                break;
+            case AssertDirective assert:
+                EmitAssert(assert);
                 break;
             default:
                 throw new CodegenException($"cannot emit statement '{statement.GetType().Name}'");
@@ -208,32 +220,76 @@ public sealed class CodeGenerator
 
     private void EmitPrintLn(Expression arg)
     {
-        var value = EmitExpr(arg);
-        var type = arg.Type
-            ?? throw new CodegenException($"argument at {arg.Position} was never typed");
-
-        if (type == SuruType.Bool)
-        {
-            // printf has no bool conversion, so pick the literal text at runtime.
-            var text = _builder.BuildSelect(value, String("true"), String("false"));
-            Printf("%s\n", text);
-        }
-        else if (type == SuruType.I64)
-        {
-            Printf("%lld\n", value);
-        }
-        else if (type == SuruType.F64)
-        {
-            Printf("%g\n", value);
-        }
-        else
-        {
-            throw new CodegenException($"cannot print a value of type '{type}'");
-        }
+        var (format, argument) = Render(EmitExpr(arg), TypeOf(arg));
+        Printf(format + "\n", argument);
     }
 
-    private void Printf(string format, LLVMValueRef value) =>
-        _builder.BuildCall2(_printfType, _printfFn, new LLVMValueRef[] { String(format), value }, "");
+    private void EmitView(ViewDirective view)
+    {
+        var (format, argument) = Render(EmitExpr(view.Subject), TypeOf(view.Subject));
+        Printf(Record(TestRecord.View, view.Id, format), argument);
+    }
+
+    /// <summary>
+    /// Compares the two operands and reports the outcome along with both values, so the
+    /// driver can say what was expected and what turned up without evaluating anything
+    /// itself. The comparison is the one the program computes, not a comparison of the
+    /// printed text — <c>%g</c> rounds, and two <c>f64</c>s that print alike need not be
+    /// equal.
+    /// </summary>
+    private void EmitAssert(AssertDirective assert)
+    {
+        var type = TypeOf(assert.Actual);
+        var actual = EmitExpr(assert.Actual);
+        var expected = EmitExpr(assert.Expected);
+
+        var equal = type == SuruType.F64
+            ? _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, actual, expected)
+            : _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, actual, expected);
+
+        // printf's varargs promote to int; an i1 would be read as four bytes of stack.
+        var outcome = _builder.BuildZExt(equal, LLVMTypeRef.Int32);
+
+        var (format, actualArgument) = Render(actual, type);
+        var (_, expectedArgument) = Render(expected, type);
+
+        Printf(
+            Record(TestRecord.Assert, assert.Id, "%d", format, format),
+            outcome, actualArgument, expectedArgument);
+    }
+
+    /// <summary>
+    /// The printf specifier for a value of the given type, and the argument to pass with it.
+    /// One source of truth for how a value is rendered, so <c>printLn</c> and the test
+    /// records cannot disagree about what a value looks like.
+    /// </summary>
+    private (string Format, LLVMValueRef Argument) Render(LLVMValueRef value, SuruType type)
+    {
+        // printf has no bool conversion, so pick the literal text at runtime.
+        if (type == SuruType.Bool)
+            return ("%s", _builder.BuildSelect(value, String("true"), String("false")));
+        if (type == SuruType.I64)
+            return ("%lld", value);
+        if (type == SuruType.F64)
+            return ("%g", value);
+
+        throw new CodegenException($"cannot print a value of type '{type}'");
+    }
+
+    private static string Record(string kind, int id, params string[] formats) =>
+        TestRecord.Prefix + string.Join(TestRecord.Separator, [kind, id.ToString(), .. formats]) + "\n";
+
+    private static SuruType TypeOf(Expression expression) =>
+        expression.Type
+            ?? throw new CodegenException($"expression at {expression.Position} was never typed");
+
+    private void Printf(string format, params LLVMValueRef[] values)
+    {
+        // The argument array is built and typed explicitly: BuildCall2 also has a
+        // ReadOnlySpan overload, and a collection expression cannot choose between them.
+        LLVMValueRef[] arguments = [String(format), .. values];
+        _builder.BuildCall2(_printfType, _printfFn, arguments, "");
+    }
 
     /// <summary>Interns a global string constant so repeated literals share one global.</summary>
     private LLVMValueRef String(string value)

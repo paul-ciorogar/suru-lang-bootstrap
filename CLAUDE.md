@@ -8,6 +8,8 @@ Bootstrap compiler for **Suru Lang** — a minimalist, library-driven, general-p
 
 The language is at a very early stage: a program is a sequence of bindings (`let x i64: 1`), assignments (`x: 2`), calls and `{}` blocks, with operators but **no operator precedence** — every binary operator folds left to right (see [tests/fixtures/expressions/main.suru](tests/fixtures/expressions/main.suru)). A block is a scope and allows shadowing (see [tests/fixtures/blocks/main.suru](tests/fixtures/blocks/main.suru)), but it is a statement, not an expression. There are no user-defined functions and no control flow.
 
+Tests live in the program they test, as `#` directives a production build never lexes and `suru test` executes — `#mock`, `#view` and `#assert` (see [doc/testing.md](doc/testing.md) and [todo.md](todo.md), which also holds the deferred `#spec`/`#save` design).
+
 ## Commands
 
 ```bash
@@ -17,11 +19,14 @@ dotnet test --filter PrintTests                 # run one test class
 dotnet test --filter FullyQualifiedName~PrintsExpectedOutput   # run one test
 
 dotnet run --project src/Suru.CLI -- build path/to/file.suru
+dotnet run --project src/Suru.CLI -- test  path/to/file.suru          # build with '#' directives, run, annotate
 dotnet run --project src/Suru.CLI -- build --dump path/to/file.suru   # all stage dumps to stderr
 dotnet run --project src/Suru.CLI -- build --dump=ast,llvm file.suru  # or --dump-ast, SURU_DUMP=ast
 ```
 
 `suru build <file.suru>` writes the object file and executable to a `build/` directory **next to the source file**.
+
+`suru test <file.suru>` **rewrites the source file** — never point it at anything you are not prepared to have annotated.
 
 Linking shells out to `cc`, so a C toolchain must be on `PATH`. LLVM comes from the `LLVMSharp` NuGet package.
 
@@ -29,13 +34,14 @@ Linking shells out to `cc`, so a C toolchain must be on `PATH`. LLVM comes from 
 
 Four projects (`Suru.slnx`): `Suru.Compiler` (all the logic), `Suru.CLI` (thin arg-parsing entry point), `Suru.LSP` (empty scaffold — no sources yet), `Suru.Tests`.
 
-The pipeline lives entirely in [Compiler.Compile](src/Suru.Compiler/Compiler.cs) and runs in fixed order:
+The pipeline lives entirely in `Compiler.Build` ([Compiler.cs](src/Suru.Compiler/Compiler.cs)) and runs in fixed order. `Compile` is `Build` in [BuildMode](src/Suru.Compiler/BuildMode.cs)`.Production`; `Test` is `Build` in `Test` mode plus a sixth step — it *runs* the executable, since `#view` and `#assert` observe values that only exist at runtime:
 
 1. **Lex** — [Lexer](src/Suru.Compiler/Lex/Lexer.cs) is a pull-based scanner producing one `Token` at a time; it is never materialized into a list.
 2. **[Tokens](src/Suru.Compiler/Lex/Tokens.cs)** is an internal cursor over the lexer (`Current`/`Next`/`Peek`/`PeekN`). Lookahead is a queue of pending tokens that `Next` drains before pulling from the lexer again — the parser gets arbitrary lookahead over a streaming lexer.
 3. **Parse** — [Parser](src/Suru.Compiler/Parse/Parser.cs), recursive descent, static `Parse(Lexer)` entry with a private instance. The parser constructs its own `Tokens` cursor and pulls tokens on demand; nothing between the lexer and the AST is materialized. Produces a [Module](src/Suru.Compiler/Parse/Ast/Module.cs) of `Statement`s. Errors throw `ParseException`; the driver catches it and converts to a `CompilationResult` failure. There is no statement terminator.
 4. **Semantic** — [SemanticAnalyzer](src/Suru.Compiler/Semantic/SemanticAnalyzer.cs) annotates every expression with its `SuruType` and tracks bindings in a [ScopeStack](src/Suru.Compiler/ScopeStack.cs) — the shared innermost-last scope structure a `BlockStatement` enters and exits, which codegen uses too for the matching stack slots; same static-entry/private-instance shape. It returns a list of error strings rather than throwing, so one run reports every problem.
 5. **Codegen** — [CodeGenerator](src/Suru.Compiler/Codegen/CodeGenerator.cs) emits an LLVM module directly from the AST (no IR of its own). Everything is emitted into a single `main`; a binding is an `alloca` + `store` where the statement sits, and `printLn` is special-cased in `EmitPrintLn` into a `printf` call with a per-type format string. Instructions are chosen from an expression's resolved type, not its node class. There is no function-declaration support yet.
+5b. **Run + collect** (test mode only) — [Testing/](src/Suru.Compiler/Testing/) holds the `#` directive machinery downstream of codegen. The emitted binary prints a [TestRecord](src/Suru.Compiler/Testing/TestRecord.cs) line per `#view`/`#assert`; [TestRun](src/Suru.Compiler/Testing/TestRun.cs) splits those out of stdout, matches each to its directive by id, and rewrites the source line. `BuildMode` is decided in the **lexer**: `Production` skips a `#` line exactly like `//`, so no later stage can be broken by a directive it does not understand.
 6. **Emit + link** — the module is verified (`TryVerify`, always, not gated on a flag) so malformed IR is reported as an internal compiler error rather than crashing the emitted binary; then target machine from `LLVMTargetRef.DefaultTriple`, object file, and `cc` to link.
 
 **Debugging** follows the compiler convention of dumping whole intermediate forms per stage rather than logging events — see [src/Suru.Compiler/Debug/](src/Suru.Compiler/Debug/). `Dump` is a `[Flags]` enum of stages (`tokens`, `ast`, `typed-ast`, `llvm`); `DumpOptions` pairs the enabled set with a `TextWriter` the CLI supplies, and its `Section(stage, title, body)` takes the body as a callback so a disabled stage never runs its printer. `DumpOptions.Off` is the default. `AstPrinter` serves both AST dumps — semantic analysis annotates in place, so `withTypes: true` is the only difference and the two dumps diff line for line. `TokenPrinter` re-lexes the source instead of teeing `Tokens`, keeping the parser's pull path untouched.
@@ -56,6 +62,7 @@ Two layers. **Prefer the unit layer** — reach for a fixture only when the case
 
 - [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs) is an xUnit `ICollectionFixture` shared via the `"Integration"` collection. It compiles each fixture once into a temp dir keyed by GUID and deletes it on dispose. `GetExecutable(name)` expects success; `GetErrors(name)` expects failure.
 - Fixtures live at `tests/fixtures/<name>/main.suru`, located by walking up from `AppContext.BaseDirectory`, so a new fixture needs no csproj change.
+- `GetTestRun(name)` runs a fixture through `suru test`. It **copies the fixture into the temp build root first**, because a test run rewrites the source it is given; it runs twice, so the second run has to re-parse what the first one wrote.
 - To add a case: create the fixture directory, then a test class marked `[Collection("Integration")]` taking `CompiledFixtures` in its constructor.
 
 ## Conventions
