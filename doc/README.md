@@ -67,3 +67,5 @@ There is no runtime and no interpreter — `build/hello` is an ordinary native e
   debug it
 - [CHANGELOG.md](../CHANGELOG.md) — what has landed, in order
 - [CLAUDE.md](../CLAUDE.md) — the compiler's architecture, for contributors
+- [Test protocol](test-protocol.md) — the wire a test build reports its directives on. Not a
+  language page: nothing in it is written in a `.suru` file

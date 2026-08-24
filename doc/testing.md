@@ -231,6 +231,9 @@ The program's own output goes to stdout and the summary to stderr, so piping a t
 gives you the program's output alone. Viewed values are reported only as a count — they were
 written into your source, which is where they are meant to be read.
 
+How the running program tells the compiler what its directives saw is not something you write
+or read yourself, but it is written down: see [the test protocol](test-protocol.md).
+
 ## Directives the run never reached
 
 A directive inside an [`if`](control-flow.md) arm is an ordinary statement of that arm: it obeys
