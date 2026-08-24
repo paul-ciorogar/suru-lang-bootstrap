@@ -75,7 +75,7 @@ public sealed class Parser
     /// </para>
     /// <para>
     /// Only <see cref="Tokens.Current"/> is consulted, never <see cref="Tokens.Peek"/>: a
-    /// directive inside an arm relies on <see cref="Tokens.SkipRestOfLine"/>, which refuses to
+    /// directive inside an arm relies on <see cref="Tokens.DiscardRestOfLine"/>, which refuses to
     /// run with anything buffered ahead of it.
     /// </para>
     /// </summary>
@@ -116,6 +116,13 @@ public sealed class Parser
     /// A <c>#</c> test directive. The word after the <c>#</c> is an ordinary identifier
     /// rather than a keyword, so <c>mock</c>, <c>view</c> and <c>assert</c> remain usable as
     /// names everywhere else in the language.
+    /// <para>
+    /// A directive owns the rest of its line. Each of the three ends at a terminator of its
+    /// own — the <c>:</c> of a <c>#view</c>, the <c>)</c> of a <c>#assert</c>, the value
+    /// expression of a <c>#mock</c> — and the two that carry an annotation throw away
+    /// everything from that terminator to the newline without lexing it. Nothing downstream
+    /// ever sees a second directive on a line, because the first one consumed it.
+    /// </para>
     /// </summary>
     private Statement ParseDirective()
     {
@@ -133,59 +140,93 @@ public sealed class Parser
         };
     }
 
+    /// <summary>
+    /// <c>#mock &lt;name&gt;: &lt;value&gt;</c>. The colon is the assignment's, not an
+    /// annotation's: what follows it is an expression, and a mock reports nothing, so it is
+    /// never written back to. Its value expression is therefore the end of the directive, and
+    /// anything else on the line is a mistake rather than text to discard.
+    /// </summary>
     private Statement ParseMock(Token hash)
     {
         var name = Expect(TokenKind.Identifier);
         _ = Expect(TokenKind.Colon);
         var value = ParseExpression();
-        RequireOneLine(hash);
+        RequireOneLine(hash, _tokens.LastConsumed!);
+        RequireNothingElseOnTheLine(hash);
         return new MockDirective(PositionOf(hash), name.Text, PositionOf(name), value);
     }
 
+    /// <summary>
+    /// <c>#view &lt;expression&gt;:</c>. The colon is required — it is where the run writes
+    /// the value, so a <c>#view</c> without one has nowhere to report to — and it ends the
+    /// directive: everything after it is discarded up to the newline.
+    /// </summary>
     private Statement ParseView(Token hash)
     {
         var subject = ParseExpression();
-        RequireOneLine(hash);
-        SkipAnnotation(hash);
+        RequireOneLine(hash, _tokens.LastConsumed!);
+
+        var colon = _tokens.Current();
+        if (colon.Kind != TokenKind.Colon || colon.Line != hash.Line)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({colon.Line},{colon.Column}): expected {TokenKind.Colon}, got {colon.Kind}");
+
+        _tokens.DiscardRestOfLine();
         return new ViewDirective(PositionOf(hash), _directives++, subject);
     }
 
+    /// <summary>
+    /// <c>#assert(&lt;actual&gt;, &lt;expected&gt;)</c>. The <c>)</c> ends the directive, so
+    /// the annotation a run writes after it — colon and all — is discarded up to the newline.
+    /// <para>
+    /// The <c>)</c> is not consumed with <see cref="Expect"/>: that would lex the token after
+    /// it, and the annotation is text no lexer can accept.
+    /// </para>
+    /// </summary>
     private Statement ParseAssert(Token hash)
     {
         _ = Expect(TokenKind.LeftParen);
         var args = ParseArguments();
-        _ = Expect(TokenKind.RightParen);
-        RequireOneLine(hash);
+
+        var close = _tokens.Current();
+        if (close.Kind != TokenKind.RightParen)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({close.Line},{close.Column}): expected {TokenKind.RightParen}, got {close.Kind}");
+        RequireOneLine(hash, close);
 
         if (args.Count != 2)
             throw new ParseException(
                 $"{_tokens.SourcePath}({hash.Line},{hash.Column}): " +
                 $"'#assert' expects 2 arguments, got {args.Count}");
 
-        SkipAnnotation(hash);
+        _tokens.DiscardRestOfLine();
         return new AssertDirective(PositionOf(hash), _directives++, args[0], args[1]);
     }
 
     /// <summary>
-    /// Discards the compiler-written annotation that follows a <c>#view</c> or
-    /// <c>#assert</c>, so the directive survives being read back after a test run wrote its
-    /// result into the line. Everything after the colon belongs to the compiler and is
-    /// thrown away without being lexed — see <see cref="Tokens.SkipRestOfLine"/> for why it
-    /// cannot simply be parsed and ignored.
+    /// Rejects anything still sitting on the directive's line. Only <c>#mock</c> needs it:
+    /// the other two discard the rest of the line at their terminator, so there is nothing
+    /// left for this to find.
     /// </summary>
-    private void SkipAnnotation(Token hash)
+    private void RequireNothingElseOnTheLine(Token hash)
     {
         var next = _tokens.Current();
-        if (next.Kind == TokenKind.Colon && next.Line == hash.Line)
-            _tokens.SkipRestOfLine();
+        if (next.Kind != TokenKind.Eof && next.Line == hash.Line)
+            throw new ParseException(
+                $"{_tokens.SourcePath}({next.Line},{next.Column}): " +
+                "a directive ends at the end of its line");
     }
 
     /// <summary>
     /// Holds a directive to the line its <c>#</c> is on. Ordinary statements may run over
     /// several lines, but a directive is a comment as far as a production build is
     /// concerned, and a comment stops at the newline.
+    /// <para>
+    /// <paramref name="last"/> is where the directive ended: the token it last consumed, or —
+    /// for a <c>#assert</c>, whose <c>)</c> is still at the cursor — that <c>)</c>.
+    /// </para>
     /// </summary>
-    private void RequireOneLine(Token hash)
+    private void RequireOneLine(Token hash, Token last)
     {
         // TODO: add multy line directives ex:
         // #mock val
@@ -194,7 +235,6 @@ public sealed class Parser
         // or in the case of a view that will print a lot of text adding a new line with # would continue the print ex:
         // #view largeTextVal: "some really large text
         // # that continues on this line also"
-        var last = _tokens.LastConsumed!;
         if (last.Line != hash.Line)
             throw new ParseException(
                 $"{_tokens.SourcePath}({last.Line},{last.Column}): " +

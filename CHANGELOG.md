@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — seams for the test channel
+- The reading half of a test run split out of `TestRun` into `RecordReader`, with a `TestRecord` struct — kind, id, values — between them. `TestRun` is now only the reporting half: it matches records to directives and knows nothing about how one travelled. The encoding itself moved to `RecordProtocol`, the one place in the compiler that spells a separator, and both codegen and the reader ask it rather than writing `\x1e` themselves
+- Codegen's `WriteRecord` split from `Printf`. `#view` and `#assert` write records, `printLn` writes output, and the two are only accidentally the same `printf` call today — the emitted IR is byte for byte what it was. When the records move to a channel of their own, `printLn` is not touched
+- `CodeGenerator.Generate` takes the `BuildMode`. Nothing reads it yet: the directives are already gone from a production module by the time codegen runs, but the test channel's runtime declarations must appear in a test module and only there, and that is a decision this stage has to be able to make for itself
+- All four are the no-behaviour-change groundwork in [todo_test.md](todo_test.md) §0 for moving the records off stdout onto a framed socket
+
 ### Added — `if`, `else` and `else if`
 - `if <condition> <block>`, with an optional `else` — the language's first control flow. The condition must already be a `bool`: nothing converts implicitly, so a number is not a truth value and `if 1 { }` is `'if' cannot branch on a value of type 'i64'; expected 'bool'`. A comparison already yields a `bool`, which is what makes it the usual way to write one
 - **`else if` is not a form of its own.** `else` is followed by a block *or by another `if`*, and the second spelling is the whole of what `else if` is. It costs zero cases past the parser — every later stage just calls its existing statement walker — and it is what makes a trailing `else` belong to the nearest `if`: the chain is nested, not flat. The alternative, desugaring it into `else { if … }`, would invent a scope and a node at a position no `{` occupies

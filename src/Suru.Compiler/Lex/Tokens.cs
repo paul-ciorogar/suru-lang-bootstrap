@@ -44,22 +44,27 @@ internal sealed class Tokens(Lexer lexer)
     }
 
     /// <summary>
-    /// Discards the source text from the cursor to the end of the line without lexing it,
-    /// then loads the first token of the next line.
+    /// Consumes the token at the cursor together with the rest of its line, then loads the
+    /// first token of the next one. This is how a caller ends a construct at the newline
+    /// without the lexer ever seeing what follows: the discarded text is thrown away as
+    /// characters, not as tokens.
     /// <para>
-    /// This exists for the compiler-written annotation on a <c>#view</c> or <c>#assert</c>
-    /// line, which is output rather than source and need not be a legal token at all:
-    /// <c>fail, got 2</c> is not an expression, and a large <c>f64</c> prints as
-    /// <c>1e+20</c>, which the literal scanner rejects. Discarding is only possible while
-    /// nothing has been buffered past the cursor, since a buffered token has already been
-    /// lexed — an invariant of the call sites, not something a program can violate.
+    /// A directive is what needs it. The text after its terminator is output rather than
+    /// source — <c>fail, got 2</c> is not an expression, and a large <c>f64</c> prints as
+    /// <c>1e+20</c>, which the literal scanner rejects — so it cannot be lexed and then
+    /// ignored; it must never be lexed at all.
+    /// </para>
+    /// <para>
+    /// Discarding is only possible while nothing has been buffered past the cursor, since a
+    /// buffered token has already been lexed — an invariant of the call sites, not
+    /// something a program can violate.
     /// </para>
     /// </summary>
-    internal void SkipRestOfLine()
+    internal void DiscardRestOfLine()
     {
         if (_lookahead.Count > 0)
             throw new InvalidOperationException(
-                "cannot discard a line that has already been lexed into lookahead");
+                "cannot discard text that has already been lexed into lookahead");
 
         lexer.SkipRestOfLine();
         Next();

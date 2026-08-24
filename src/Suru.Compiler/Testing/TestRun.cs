@@ -3,20 +3,44 @@ using Suru.Compiler.Parse.Ast;
 namespace Suru.Compiler.Testing;
 
 /// <summary>
-/// Turns what a test build printed back into source annotations and diagnostics: it splits
-/// the <see cref="TestRecord"/> lines out of the program's own output, matches each one to
-/// the directive that emitted it, and writes the results into the file the directives came
-/// from.
+/// Turns what a test build reported back into source annotations and diagnostics: it
+/// matches each <see cref="TestRecord"/> to the directive that emitted it and writes the
+/// results into the file the directives came from.
+/// <para>
+/// The reporting half of a test run. Bytes become records in <see cref="RecordReader"/>;
+/// nothing here knows how a record travelled, which is what lets the channel change
+/// underneath it.
+/// </para>
 /// </summary>
 internal static class TestRun
 {
+    /// <summary>
+    /// Written back into a directive's line when it reported nothing at all. Not part of the
+    /// protocol — no record ever carries it — because it means the absence of a record: the
+    /// directive was compiled and the program never reached it.
+    /// </summary>
+    internal const string Undefined = "undefined";
+
     internal static TestResult Report(Module module, string sourcePath, string stdout, int exitCode)
+    {
+        var (records, output) = RecordReader.Read(stdout);
+        return Report(module, sourcePath, records, output, exitCode);
+    }
+
+    internal static TestResult Report(
+        Module module,
+        string sourcePath,
+        IReadOnlyList<TestRecord> records,
+        string output,
+        int exitCode)
     {
         var directives = new Dictionary<int, Directive>();
         CollectDirectives(module.Statements, directives);
 
-        var output = new List<string>();
-        var annotations = new Dictionary<int, string>();
+        // Keyed by position rather than by line, though a line carries one directive: the
+        // column is what finds the '#' once a record carries a position of its own, and the
+        // key costs nothing until then.
+        var annotations = new Dictionary<SourcePosition, string>();
         var failures = new List<string>();
         int passed = 0, views = 0;
 
@@ -26,32 +50,24 @@ internal static class TestRun
         // '#view-step-N' or an unmocked parameter when those exist.
         var pending = new HashSet<int>(directives.Keys);
         foreach (var directive in directives.Values)
-            annotations[directive.Position.Line] = TestRecord.Undefined;
+            annotations[directive.Position] = Undefined;
 
-        foreach (var raw in stdout.Split('\n'))
+        foreach (var record in records)
         {
-            if (!raw.StartsWith(TestRecord.Prefix, StringComparison.Ordinal))
-            {
-                output.Add(raw);
-                continue;
-            }
-
-            var fields = raw.TrimEnd('\r')[TestRecord.Prefix.Length..].Split(TestRecord.Separator);
-            if (fields.Length < 2 || !int.TryParse(fields[1], out var id)
-                || !directives.TryGetValue(id, out var directive))
+            if (!directives.TryGetValue(record.Id, out var directive))
                 continue;
 
-            if (fields is [TestRecord.View, _, var value] )
+            if (record is { Kind: TestRecord.View, Values: [var value] })
             {
-                annotations[directive.Position.Line] = value;
-                pending.Remove(id);
+                annotations[directive.Position] = value;
+                pending.Remove(record.Id);
                 views++;
             }
-            else if (fields is [TestRecord.Assert, _, var outcome, var actual, var expected])
+            else if (record is { Kind: TestRecord.Assert, Values: [var outcome, var actual, var expected] })
             {
                 var held = outcome == "1";
-                annotations[directive.Position.Line] = held ? "pass" : $"fail, got {actual}";
-                pending.Remove(id);
+                annotations[directive.Position] = held ? "pass" : $"fail, got {actual}";
+                pending.Remove(record.Id);
 
                 if (held)
                     passed++;
@@ -64,8 +80,7 @@ internal static class TestRun
 
         Annotate(sourcePath, annotations);
 
-        return TestResult.Ran(
-            string.Join('\n', output), exitCode, failures, passed, views, pending.Count);
+        return TestResult.Ran(output, exitCode, failures, passed, views, pending.Count);
     }
 
     private static void CollectDirectives(
@@ -105,23 +120,29 @@ internal static class TestRun
     /// <summary>
     /// Writes each annotation into its directive's line, reading and writing the file once.
     /// Line endings are preserved by splitting on '\n' and leaving any '\r' where it was.
+    /// <para>
+    /// A line carries one directive, so a line is rewritten once and no annotation has to
+    /// be placed around another.
+    /// </para>
     /// </summary>
-    private static void Annotate(string sourcePath, IReadOnlyDictionary<int, string> annotations)
+    private static void Annotate(
+        string sourcePath, IReadOnlyDictionary<SourcePosition, string> annotations)
     {
         if (annotations.Count == 0)
             return;
 
         var lines = File.ReadAllText(sourcePath).Split('\n');
 
-        foreach (var (number, text) in annotations)
+        foreach (var (position, text) in annotations)
         {
-            var index = number - 1;
+            var index = position.Line - 1;
             if (index < 0 || index >= lines.Length)
                 continue;
 
             var line = lines[index];
             var carriageReturn = line.EndsWith('\r') ? "\r" : "";
             var body = carriageReturn.Length > 0 ? line[..^1] : line;
+
             lines[index] = Annotated(body, text) + carriageReturn;
         }
 
@@ -129,8 +150,8 @@ internal static class TestRun
     }
 
     /// <summary>
-    /// Replaces everything after the directive's colon, or appends one if the line has never
-    /// been annotated. Idempotent: annotating an already-annotated line reproduces it.
+    /// Replaces everything after the directive's colon, or appends one if it has never been
+    /// annotated. Idempotent: annotating an already-annotated directive reproduces it.
     /// <para>
     /// The first colon after the <c>#</c> is always the right one, because no expression can
     /// contain a colon — it appears only in <c>let</c>, in an assignment and in a directive.

@@ -1,45 +1,29 @@
 namespace Suru.Compiler.Testing;
 
 /// <summary>
-/// The line protocol a test build's executable uses to report what its <c>#view</c> and
-/// <c>#assert</c> directives saw. Codegen writes these lines; <see cref="TestRun"/> reads
-/// them back.
+/// One thing a test build reported: which kind of directive spoke, which directive it was,
+/// and the values it saw already rendered as text.
 /// <para>
-/// Records ride on stdout beside the program's own output rather than on a second channel,
-/// which needs no extern beyond the <c>printf</c> codegen already declares. They are safe to
-/// tell apart by their prefix because Suru has no strings: a <c>printLn</c> can only ever
-/// emit a number or <c>true</c>/<c>false</c>, so a program cannot forge one. That stops being
-/// true the day string literals land, which is when this should move to
-/// <c>fprintf(stderr, …)</c>.
+/// This is the seam between reading and reporting. <see cref="RecordReader"/> turns bytes
+/// into these and knows the encoding; <see cref="TestRun"/> turns these into annotations
+/// and diagnostics and knows nothing about how they travelled.
 /// </para>
 /// </summary>
-internal static class TestRecord
+/// <param name="Kind"><see cref="View"/> or <see cref="Assert"/>; anything else is skipped.</param>
+/// <param name="Id">The directive that emitted it, assigned by the parser in source order.</param>
+/// <param name="Values">The fields after the id, in the order the record carried them.</param>
+internal readonly record struct TestRecord(string Kind, int Id, IReadOnlyList<string> Values)
 {
-    /// <summary>ASCII record separator — not producible by any Suru program today.</summary>
-    internal const char Separator = '\x1e';
-
-    internal const string Prefix = "\x1esuru\x1e";
-
     internal const string View = "view";
     internal const string Assert = "assert";
 
-    /// <summary>
-    /// Written back into a directive's line when it reported nothing at all. Not part of the
-    /// protocol — no record ever carries it — because it means the absence of a record: the
-    /// directive was compiled and the program never reached it.
-    /// </summary>
-    internal const string Undefined = "undefined";
-
-    /// <summary>Fields after the prefix: <c>view</c>, the directive's id, the rendered value.</summary>
-    internal const int ViewFieldCount = 3;
+    /// <summary>A <c>#view</c> reports one value: the rendered subject.</summary>
+    internal const int ViewValueCount = 1;
 
     /// <summary>
-    /// Fields after the prefix: <c>assert</c>, the id, the 0/1 outcome, and both rendered
-    /// values — the outcome is decided in the emitted code rather than by comparing the two
-    /// strings here, so <c>f64</c> equality is the one the program itself computed.
+    /// An <c>#assert</c> reports the 0/1 outcome and both rendered values — the outcome is
+    /// decided in the emitted code rather than by comparing the two strings here, so
+    /// <c>f64</c> equality is the one the program itself computed.
     /// </summary>
-    internal const int AssertFieldCount = 5;
-
-    // TODO: consider generating output tagged with the line and column it should be printed to 
-    // ex: for line 5 column 42 `5:42 <print output>`
+    internal const int AssertValueCount = 3;
 }

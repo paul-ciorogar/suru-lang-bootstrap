@@ -17,14 +17,19 @@ public class DirectiveTests
     [Fact]
     public void ProductionIgnoresEveryDirective()
     {
-        var module = Source.Parse("""
-            let x i64: 1
-            #mock x: 2
-            #view x:
-            #assert(x, 1): pass
-            """);
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) x i64
+                IntLiteral (1,12) 1
 
-        Assert.IsType<LetStatement>(Assert.Single(module.Statements));
+            """,
+            AstPrinter.Print(Source.Parse("""
+                let x i64: 1
+                #mock x: 2
+                #view x:
+                #assert(x, 1): pass
+                """)));
     }
 
     [Fact]
@@ -32,15 +37,23 @@ public class DirectiveTests
     {
         // The whole point of skipping in the lexer: syntax this compiler does not know
         // still cannot break a release build.
-        Assert.Empty(Source.Parse("#whatever <- this is not Suru at all").Statements);
+        Assert.Equal(
+            "Module test.suru\n",
+            AstPrinter.Print(Source.Parse("#whatever <- this is not Suru at all")));
     }
 
     [Fact]
     public void ProductionStopsIgnoringAtTheEndOfTheLine()
     {
-        var module = Source.Parse("#view x:\nprintLn(1)");
+        Assert.Equal(
+            """
+            Module test.suru
+              ExpressionStatement (2,1)
+                CallExpression (2,1) printLn
+                  IntLiteral (2,9) 1
 
-        Assert.IsType<ExpressionStatement>(Assert.Single(module.Statements));
+            """,
+            AstPrinter.Print(Source.Parse("#view x:\nprintLn(1)")));
     }
 
     // Parsing, in test mode.
@@ -48,48 +61,89 @@ public class DirectiveTests
     [Fact]
     public void ParsesMock()
     {
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) x i64
+                IntLiteral (1,12) 1
+              MockDirective (2,1) x
+                IntLiteral (2,10) 2
+
+            """,
+            Ast("let x i64: 1\n#mock x: 2"));
+    }
+
+    [Fact]
+    public void PointsAMockAtTheNameItAssignsTo()
+    {
+        // Not in the dump, and the only position a mock's diagnostics are reported at.
         var mock = ParseSingle<MockDirective>("let x i64: 1\n#mock x: 2");
 
-        Assert.Equal("x", mock.Name);
-        Assert.Equal(2L, Assert.IsType<IntLiteral>(mock.Value).Value);
-        Assert.Equal(1, mock.Position.Column);
         Assert.Equal(7, mock.NamePosition.Column);
     }
 
     [Fact]
     public void ParsesViewOfAnExpression()
     {
-        var view = ParseSingle<ViewDirective>("#view 1 + 2:");
+        Assert.Equal(
+            """
+            Module test.suru
+              ViewDirective (1,1) #0
+                BinaryExpression (1,7) +
+                  IntLiteral (1,7) 1
+                  IntLiteral (1,11) 2
 
-        Assert.IsType<BinaryExpression>(view.Subject);
+            """,
+            Ast("#view 1 + 2:"));
     }
 
     [Fact]
     public void ParsesAssert()
     {
-        var assert = ParseSingle<AssertDirective>("#assert(1, 2)");
+        Assert.Equal(
+            """
+            Module test.suru
+              AssertDirective (1,1) #0
+                IntLiteral (1,9) 1
+                IntLiteral (1,12) 2
 
-        Assert.Equal(1L, Assert.IsType<IntLiteral>(assert.Actual).Value);
-        Assert.Equal(2L, Assert.IsType<IntLiteral>(assert.Expected).Value);
+            """,
+            Ast("#assert(1, 2)"));
     }
 
     [Fact]
     public void NumbersReportingDirectivesInSourceOrder()
     {
-        var module = Source.Parse("#view 1:\n#assert(1, 1)\n#view 2:", BuildMode.Test);
+        Assert.Equal(
+            """
+            Module test.suru
+              ViewDirective (1,1) #0
+                IntLiteral (1,7) 1
+              AssertDirective (2,1) #1
+                IntLiteral (2,9) 1
+                IntLiteral (2,12) 1
+              ViewDirective (3,1) #2
+                IntLiteral (3,7) 2
 
-        Assert.Collection(module.Statements,
-            first => Assert.Equal(0, Assert.IsType<ViewDirective>(first).Id),
-            second => Assert.Equal(1, Assert.IsType<AssertDirective>(second).Id),
-            third => Assert.Equal(2, Assert.IsType<ViewDirective>(third).Id));
+            """,
+            Ast("#view 1:\n#assert(1, 1)\n#view 2:"));
     }
 
     [Fact]
     public void DirectiveNamesAreNotKeywords()
     {
-        var module = Source.Analyzed("let view i64: 1\nlet mock i64: 2\nlet assert i64: 3");
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) view i64
+                IntLiteral (1,15) 1
+              LetStatement (2,1) mock i64
+                IntLiteral (2,15) 2
+              LetStatement (3,1) assert i64
+                IntLiteral (3,17) 3
 
-        Assert.Equal(3, module.Statements.Count);
+            """,
+            AstPrinter.Print(Source.Analyzed("let view i64: 1\nlet mock i64: 2\nlet assert i64: 3")));
     }
 
     // Reading back a line the compiler has already annotated.
@@ -97,9 +151,14 @@ public class DirectiveTests
     [Fact]
     public void ReparsesAnAnnotatedView()
     {
-        var view = ParseSingle<ViewDirective>("#view 1: 42");
+        Assert.Equal(
+            """
+            Module test.suru
+              ViewDirective (1,1) #0
+                IntLiteral (1,7) 1
 
-        Assert.Equal(1L, Assert.IsType<IntLiteral>(view.Subject).Value);
+            """,
+            Ast("#view 1: 42"));
     }
 
     [Fact]
@@ -107,30 +166,70 @@ public class DirectiveTests
     {
         // '1e+20' is how printf renders a large f64, and the literal scanner rejects it;
         // 'fail, got 2' is not an expression. Both must be discarded, not parsed.
-        Assert.IsType<ViewDirective>(Assert.Single(Source.Parse("#view 1: 1e+20", BuildMode.Test).Statements));
-        Assert.IsType<AssertDirective>(
-            Assert.Single(Source.Parse("#assert(1, 2): fail, got 2", BuildMode.Test).Statements));
+        Assert.Equal(
+            """
+            Module test.suru
+              ViewDirective (1,1) #0
+                IntLiteral (1,7) 1
+
+            """,
+            Ast("#view 1: 1e+20"));
+
+        Assert.Equal(
+            """
+            Module test.suru
+              AssertDirective (1,1) #0
+                IntLiteral (1,9) 1
+                IntLiteral (1,12) 2
+
+            """,
+            Ast("#assert(1, 2): fail, got 2"));
     }
 
     [Fact]
     public void AnAnnotationEndsAtTheLine()
     {
-        var module = Source.Parse("#view 1: 42\nprintLn(9)", BuildMode.Test);
+        Assert.Equal(
+            """
+            Module test.suru
+              ViewDirective (1,1) #0
+                IntLiteral (1,7) 1
+              ExpressionStatement (2,1)
+                CallExpression (2,1) printLn
+                  IntLiteral (2,9) 9
 
-        Assert.Collection(module.Statements,
-            first => Assert.IsType<ViewDirective>(first),
-            second => Assert.IsType<ExpressionStatement>(second));
+            """,
+            Ast("#view 1: 42\nprintLn(9)"));
     }
 
     [Fact]
-    public void AColonOnTheNextLineIsNotAnAnnotation()
+    public void AnAssertOwnsTheRestOfItsLine()
     {
-        var module = Source.Parse("let x i64: 1\n#view x\nx: 2", BuildMode.Test);
+        // The ')' ends the directive, so what follows it is thrown away whether or not a run
+        // has annotated the line yet.
+        Assert.Equal(
+            """
+            Module test.suru
+              AssertDirective (1,1) #0
+                IntLiteral (1,9) 1
+                IntLiteral (1,12) 1
 
-        Assert.Collection(module.Statements,
-            first => Assert.IsType<LetStatement>(first),
-            second => Assert.IsType<ViewDirective>(second),
-            third => Assert.IsType<AssignmentStatement>(third));
+            """,
+            Ast("#assert(1, 1) #view 1:"));
+    }
+
+    [Fact]
+    public void AnAssertDiscardsTextThatIsNotEvenLexable()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              AssertDirective (1,1) #0
+                IntLiteral (1,9) 1
+                IntLiteral (1,12) 1
+
+            """,
+            Ast("#assert(1, 1) <- this is not Suru at all"));
     }
 
     // Parse diagnostics.
@@ -159,6 +258,43 @@ public class DirectiveTests
         Assert.Equal(
             $"{Source.Path}(2,3): a directive must be written on one line; '#' is on line 1",
             ParseError("#view 1\n+ 1"));
+    }
+
+    [Fact]
+    public void AViewOwnsTheRestOfItsLine()
+    {
+        // A directive ends at its terminator, so the second '#' here is text the first one
+        // discarded rather than a directive of its own.
+        Assert.Equal(
+            """
+            Module test.suru
+              LetStatement (1,1) a i64
+                IntLiteral (1,12) 1
+              ViewDirective (2,1) #0
+                IdentifierExpression (2,7) a
+
+            """,
+            Ast("let a i64: 1\n#view a: #view b:"));
+    }
+
+    [Fact]
+    public void RejectsAViewWithNoColon()
+    {
+        // The colon is where the run writes the value; without one the '#view' has nowhere
+        // to report to. The ':' on the next line belongs to the assignment.
+        Assert.Equal(
+            $"{Source.Path}(3,1): expected Colon, got Identifier",
+            ParseError("let x i64: 1\n#view x\nx: 2"));
+    }
+
+    [Fact]
+    public void RejectsAMockFollowedByAnythingElseOnTheLine()
+    {
+        // After a mock's colon Suru expects an expression and nothing else — a mock reports
+        // nothing, so it has no annotation for the rest of the line to be part of.
+        Assert.Equal(
+            $"{Source.Path}(2,12): a directive ends at the end of its line",
+            ParseError("let x i64: 1\n#mock x: 1 #view b:"));
     }
 
     // Semantic diagnostics.
@@ -208,35 +344,25 @@ public class DirectiveTests
     [Fact]
     public void DirectivesAreTypedLikeAnyOtherExpression()
     {
-        var module = Source.Analyzed("let x i64: 1\n#view x + 1:\n#assert(x, 1)", BuildMode.Test);
-
-        var view = Assert.IsType<ViewDirective>(module.Statements[1]);
-        Assert.Equal(SuruType.I64, view.Subject.Type);
-    }
-
-    // Dumps.
-
-    [Fact]
-    public void DumpsDirectivesWithTheirIds()
-    {
-        var module = Source.Analyzed("let x i64: 1\n#mock x: 2\n#view x:\n#assert(x, 2)", BuildMode.Test);
-
         Assert.Equal(
             """
             Module test.suru
               LetStatement (1,1) x i64
-                IntLiteral (1,12) 1
-              MockDirective (2,1) x
-                IntLiteral (2,10) 2
-              ViewDirective (3,1) #0
-                IdentifierExpression (3,7) x
-              AssertDirective (4,1) #1
-                IdentifierExpression (4,9) x
-                IntLiteral (4,12) 2
+                IntLiteral (1,12) 1 : i64
+              ViewDirective (2,1) #0
+                BinaryExpression (2,7) + : i64
+                  IdentifierExpression (2,7) x : i64
+                  IntLiteral (2,11) 1 : i64
+              AssertDirective (3,1) #1
+                IdentifierExpression (3,9) x : i64
+                IntLiteral (3,12) 1 : i64
 
             """,
-            AstPrinter.Print(module));
+            AstPrinter.Print(
+                Source.Analyzed("let x i64: 1\n#view x + 1:\n#assert(x, 1)", BuildMode.Test), withTypes: true));
     }
+
+    // Dumps.
 
     [Fact]
     public void DumpsNoHashTokenInAProductionBuild()
@@ -259,6 +385,9 @@ public class DirectiveTests
             "test.suru(2,7): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
             Assert.Single(Source.Analyze("if true {\n#view printLn(1):\n}", BuildMode.Test)));
     }
+
+    /// <summary>The parse tree of a test-mode build, as <see cref="AstPrinter"/> renders it.</summary>
+    private static string Ast(string text) => AstPrinter.Print(Source.Parse(text, BuildMode.Test));
 
     private static T ParseSingle<T>(string text) where T : Statement =>
         Assert.IsType<T>(Source.Parse(text, BuildMode.Test).Statements[^1]);

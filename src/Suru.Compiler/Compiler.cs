@@ -106,7 +106,7 @@ public class Compiler
         LLVMModuleRef llvmModule;
         try
         {
-            llvmModule = CodeGenerator.Generate(module);
+            llvmModule = CodeGenerator.Generate(module, mode);
         }
         catch (CodegenException ex)
         {

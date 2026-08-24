@@ -269,9 +269,9 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
     /// A last line without one just runs into EOF.
     /// <para>
     /// Three callers, all discarding text no stage will look at: a <c>//</c> comment, a
-    /// <c>#</c> directive in a production build, and the compiler-written annotation on a
-    /// <c>#view</c> or <c>#assert</c> line. The last is why this is reachable from the
-    /// parser: an annotation is output, not source, and need not lex at all.
+    /// <c>#</c> directive in a production build, and — through
+    /// <see cref="Tokens.DiscardRestOfLine"/> — the rest of a directive's line, past the
+    /// <c>:</c> of a <c>#view</c> or the <c>)</c> of a <c>#assert</c>.
     /// </para>
     /// </summary>
     internal void SkipRestOfLine()
