@@ -20,9 +20,9 @@ suru test  hello.suru   # prints 40, and annotates the file
 ```
 
 The `: 40` and the `: pass` above were written by the compiler. You write the left-hand
-side; **everything after the colon on a directive line belongs to the compiler.** Running
-`suru test` again overwrites the same place, so a file that has not changed is rewritten
-byte for byte.
+side; **everything after a directive's colon belongs to the compiler**, up to the end of
+the line. Running `suru test` again overwrites the same place, so a file that has not
+changed is rewritten byte for byte.
 
 ## What `#` means
 
@@ -58,6 +58,33 @@ next line does not apply to it:
 
 ```
 error: hello.suru(2,3): a directive must be written on one line; '#' is on line 1
+```
+
+And a line carries one directive, because **a directive ends at its terminator and owns the
+rest of the line**. The terminator is the `:` of a `#view` and the `)` of a `#assert`;
+everything after it is discarded up to the newline, without even being read as Suru. So both
+of these are one directive, and the trailing `#view b:` is text the next run overwrites:
+
+```suru
+#view a: #view b:
+#assert(1, 1) #view b:
+```
+
+That is also what lets a run read back what a previous run wrote: `fail, got 2` is not an
+expression, and a large `f64` prints as `1e+20`, which the number scanner would reject.
+Neither is ever lexed.
+
+`#mock` is the exception, because it has no annotation — it reports nothing, so nothing is
+ever written into its line. Its colon is the assignment's, what follows is an expression, and
+that expression ends the directive:
+
+```suru
+let x i64: 1
+#mock x: 1 #view b:
+```
+
+```
+error: hello.suru(2,12): a directive ends at the end of its line
 ```
 
 ## `#mock` — stub a value
@@ -120,6 +147,17 @@ error: hello.suru(1,7): unknown variable 'seed'
 ## `#view` — see a value
 
 `#view <expression>:` prints a value into its own source line.
+
+The colon is required. It is the place the value is written, so a `#view` without one has
+nowhere to report to:
+
+```suru
+#view 1
+```
+
+```
+error: hello.suru(2,1): expected Colon, got Eof
+```
 
 Write the directive and leave the line there:
 

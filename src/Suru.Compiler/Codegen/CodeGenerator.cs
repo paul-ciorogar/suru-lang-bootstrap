@@ -7,6 +7,16 @@ namespace Suru.Compiler.Codegen;
 public sealed class CodeGenerator
 {
     private readonly Module _module;
+
+    /// <summary>
+    /// Which build this is. Nothing reads it yet: the directives themselves are already
+    /// gone from a production module by the time codegen runs, since the lexer never handed
+    /// them over. It is here because the test channel's runtime declarations must appear in
+    /// a test module and only there, and that is a decision this stage has to be able to
+    /// make for itself.
+    /// </summary>
+    private readonly BuildMode _mode;
+
     private readonly LLVMModuleRef _llvmModule;
     private readonly LLVMBuilderRef _builder;
 
@@ -28,9 +38,10 @@ public sealed class CodeGenerator
     /// </summary>
     private readonly ScopeStack<(LLVMValueRef Slot, LLVMTypeRef Type)> _scopes = new();
 
-    private CodeGenerator(Module module)
+    private CodeGenerator(Module module, BuildMode mode)
     {
         _module = module;
+        _mode = mode;
         _llvmModule = LLVMModuleRef.CreateWithName("suru");
         _builder = LLVMBuilderRef.Create(_llvmModule.Context);
         _allocas = LLVMBuilderRef.Create(_llvmModule.Context);
@@ -41,9 +52,9 @@ public sealed class CodeGenerator
         _printfFn = _llvmModule.AddFunction("printf", _printfType);
     }
 
-    public static LLVMModuleRef Generate(Module module)
+    public static LLVMModuleRef Generate(Module module, BuildMode mode)
     {
-        var generator = new CodeGenerator(module);
+        var generator = new CodeGenerator(module, mode);
         return generator._Generate();
     }
 
@@ -304,8 +315,8 @@ public sealed class CodeGenerator
 
     private void EmitView(ViewDirective view)
     {
-        var (format, argument) = Render(EmitExpr(view.Subject), TypeOf(view.Subject));
-        Printf(Record(TestRecord.View, view.Id, format), argument);
+        WriteRecord(TestRecord.View, view.Id,
+            Render(EmitExpr(view.Subject), TypeOf(view.Subject)));
     }
 
     /// <summary>
@@ -331,9 +342,8 @@ public sealed class CodeGenerator
         var (format, actualArgument) = Render(actual, type);
         var (_, expectedArgument) = Render(expected, type);
 
-        Printf(
-            Record(TestRecord.Assert, assert.Id, "%d", format, format),
-            outcome, actualArgument, expectedArgument);
+        WriteRecord(TestRecord.Assert, assert.Id,
+            ("%d", outcome), (format, actualArgument), (format, expectedArgument));
     }
 
     /// <summary>
@@ -354,8 +364,22 @@ public sealed class CodeGenerator
         throw new CodegenException($"cannot print a value of type '{type}'");
     }
 
-    private static string Record(string kind, int id, params string[] formats) =>
-        TestRecord.Prefix + string.Join(TestRecord.Separator, [kind, id.ToString(), .. formats]) + "\n";
+    /// <summary>
+    /// Writes one test record: a kind, the directive's id, and a field per value, each with
+    /// the specifier <see cref="Render"/> chose for it.
+    /// <para>
+    /// Separate from <see cref="Printf"/> even though it is a <c>printf</c> today, because
+    /// the two are only accidentally the same call. A record goes to the harness and the
+    /// program's own output goes to whoever ran it; the day the records move off stdout,
+    /// this is the only place that changes and <c>printLn</c> is not touched.
+    /// </para>
+    /// </summary>
+    private void WriteRecord(
+        string kind, int id, params (string Format, LLVMValueRef Argument)[] fields)
+    {
+        var line = RecordProtocol.Line(kind, id, [.. fields.Select(field => field.Format)]);
+        Printf(line, [.. fields.Select(field => field.Argument)]);
+    }
 
     private static SuruType TypeOf(Expression expression) =>
         expression.Type
