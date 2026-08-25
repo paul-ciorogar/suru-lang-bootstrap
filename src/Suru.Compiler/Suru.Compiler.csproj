@@ -11,4 +11,13 @@
     <PackageReference Include="LLVMSharp" Version="20.1.2" />
   </ItemGroup>
 
+  <!--
+    The test channel's program side, handed to 'cc' on test builds. It ships as source rather
+    than as an object file: a second compile costs ~50 ms and nobody has to decide who builds
+    the .o, or for which target. RuntimeShim finds it beside the assembly.
+  -->
+  <ItemGroup>
+    <Content Include="..\..\runtime\suru_rt.c" Link="runtime\suru_rt.c" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

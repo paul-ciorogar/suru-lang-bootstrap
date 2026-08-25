@@ -37,6 +37,14 @@ public readonly record struct Frame(string Kind, IReadOnlyList<(string Key, stri
     public const string RunFinished = "run-finished";
 
     /// <summary>
+    /// The program had more to say than one frame could hold, and <b>dropped the payload rather
+    /// than truncating it</b> — carrying the <c>key</c> of the field that did not fit. A frame
+    /// short of its own declared length is the failure framing exists to prevent, and a reader
+    /// that met one could only stop; this one costs a frame and leaves the channel usable.
+    /// </summary>
+    public const string Overflow = "overflow";
+
+    /// <summary>
     /// The value of the first field with this key, or <c>null</c> when the frame does not carry
     /// one. A frame whose <c>kind</c> a reader does not recognise is skipped rather than
     /// rejected, so a missing field is an ordinary answer and not an error.
