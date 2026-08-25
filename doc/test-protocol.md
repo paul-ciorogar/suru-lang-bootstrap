@@ -7,13 +7,12 @@ it run. If you are looking for `#mock`, `#view` and `#assert`, that is [Testing]
 A test build reports what its directives saw. Those reports have to leave a running process and
 get back into your source file, and this is the format they travel in. It is specified here
 because it has **three implementations**: the writer and reader in
-`src/Suru.Compiler/Testing/`, and — once it lands — the C shim linked into test builds, which is
-written from this document rather than from the C# .
+`src/Suru.Compiler/Testing/`, and the C shim linked into test builds, which is written from this
+document rather than from the C# .
 
-> **Status.** The format is built and tested; nothing emits or reads one yet. Records still ride
-> on stdout behind a `\x1e` prefix while the shim, the socket and the driver are built around
-> this. The plan is [todo_test.md](../todo_test.md); the survey it came out of is
-> [rd_test.md](../rd_test.md).
+> **Status.** The format is built and tested, and the shim writes it. Nothing emits or reads a
+> frame in anger yet: records still ride on stdout behind a `\x1e` prefix while the socket and
+> the driver are built around this.
 
 ## A frame
 
@@ -66,6 +65,7 @@ Program → harness. Every frame carries `kind` plus the fields in its row.
 | `view` | `id`, `value` | what a `#view` saw |
 | `assert` | `id`, `outcome` (`pass`/`fail`), `actual`, `expected` | what an `#assert` decided |
 | `run-finished` | `run`, `exit` | the body ran to the end |
+| `overflow` | `key` | a frame did not fit, and its payload was dropped rather than truncated |
 
 `id` is the per-module number the parser assigns each `#view` and `#assert` in source order,
 which is how the driver finds the line to annotate.
@@ -78,6 +78,13 @@ decided by comparing two `printf`-rendered strings is not the equality the progr
 inferred from the *absence* of a record, which cannot distinguish "the branch was not taken"
 from "the process never got there". With this event, absence-after-finished is `undefined` and
 absence-without-finished is a crash.
+
+`overflow` is the shim admitting defeat. A frame accumulates in a fixed buffer, because
+`Content-Length` has to precede the body, and a buffer can be too small. The one thing the format
+cannot survive is a frame **shorter than its declared length** — a reader that met one would have
+no idea where the next frame began, and could only stop. So the payload is dropped and this is
+sent in its place: one frame, naming the field that did not fit, and a channel that still works
+afterwards.
 
 Harness → program — a request to run the body, so one linked binary can serve many test cases —
 is Phase B, and adds `kind`s rather than changing anything above.
@@ -112,6 +119,13 @@ It looks redundant and is not, for the reader:
 | [`FrameWriter`](../src/Suru.Compiler/Testing/FrameWriter.cs) | frame → bytes |
 | [`FrameReader`](../src/Suru.Compiler/Testing/FrameReader.cs) | bytes → frames, streaming; throws `FrameException` |
 | [`FrameTests`](../tests/Suru.Tests/FrameTests.cs) | the grammar above, asserted byte for byte |
+| [`runtime/suru_rt.c`](../runtime/suru_rt.c) | the third implementation: the writer that ships inside a test build |
+| [`RuntimeShim`](../src/Suru.Compiler/Testing/RuntimeShim.cs) | where that file is, so `cc` can be handed it |
+
+The shim is the reason this document exists. It writes frames in C — a constructor connects to
+`SURU_TEST_CHANNEL`, `suru_frame_begin` / `suru_field` / `suru_frame_end` accumulate and send one
+— and with no such variable in its environment every one of those is a no-op, so a test binary
+run by hand still runs and simply says nothing.
 
 `FrameReader` is a cursor rather than a parser over a buffer, because a socket read ends wherever
 the kernel says it does: chunks go in as they arrive, whole frames come out, and
