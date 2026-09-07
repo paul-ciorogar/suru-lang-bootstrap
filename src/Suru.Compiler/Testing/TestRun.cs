@@ -4,84 +4,157 @@ namespace Suru.Compiler.Testing;
 
 /// <summary>
 /// Turns what a test build reported back into source annotations and diagnostics: it
-/// matches each <see cref="TestRecord"/> to the directive that emitted it and writes the
+/// matches each <see cref="Frame"/> to the directive that emitted it and writes the
 /// results into the file the directives came from.
 /// <para>
-/// The reporting half of a test run. Bytes become records in <see cref="RecordReader"/>;
-/// nothing here knows how a record travelled, which is what lets the channel change
-/// underneath it.
+/// The reporting half of a test run. Bytes become frames in <see cref="FrameReader"/> and
+/// reach here through <see cref="TestChannel"/>; nothing here knows how a frame travelled,
+/// which is what lets the channel change underneath it.
 /// </para>
 /// </summary>
 internal static class TestRun
 {
     /// <summary>
-    /// Written back into a directive's line when it reported nothing at all. Not part of the
-    /// protocol — no record ever carries it — because it means the absence of a record: the
-    /// directive was compiled and the program never reached it.
+    /// Written back into a directive's line when the run finished without reaching it. Not part
+    /// of the protocol — no frame ever carries it — because it means the absence of a frame:
+    /// the directive was compiled and the program never got there.
     /// </summary>
     internal const string Undefined = "undefined";
 
-    internal static TestResult Report(Module module, string sourcePath, string stdout, int exitCode)
-    {
-        var (records, output) = RecordReader.Read(stdout);
-        return Report(module, sourcePath, records, output, exitCode);
-    }
+    /// <summary>
+    /// Written back instead when the run <i>did not</i> finish. A stale value from an earlier
+    /// run is a fresh-looking lie about a run that never reached the line, and
+    /// <see cref="Undefined"/> would be the same lie in the compiler's own words: it means
+    /// "reached the end, never hit this", which is precisely what did not happen. Blanking says
+    /// only that nothing is known, and re-annotating a blank line reproduces it.
+    /// </summary>
+    private const string Unknown = "";
 
-    internal static TestResult Report(
-        Module module,
-        string sourcePath,
-        IReadOnlyList<TestRecord> records,
-        string output,
-        int exitCode)
+    internal static TestResult Report(Module module, string sourcePath, ChannelRun run)
     {
         var directives = new Dictionary<int, Directive>();
         CollectDirectives(module.Statements, directives);
 
         // Keyed by position rather than by line, though a line carries one directive: the
-        // column is what finds the '#' once a record carries a position of its own, and the
+        // column is what finds the '#' once a frame carries a position of its own, and the
         // key costs nothing until then.
         var annotations = new Dictionary<SourcePosition, string>();
         var failures = new List<string>();
         int passed = 0, views = 0;
+        bool started = false, finished = false;
 
-        // Every directive starts out undefined, and a record overwrites it. That is the whole
-        // of what 'undefined' means here — the directive was compiled and never reported —
-        // so it needs no notion of a branch, and will be the same answer for an unreached
-        // '#view-step-N' or an unmocked parameter when those exist.
         var pending = new HashSet<int>(directives.Keys);
-        foreach (var directive in directives.Values)
-            annotations[directive.Position] = Undefined;
 
-        foreach (var record in records)
+        foreach (var frame in run.Frames)
         {
-            if (!directives.TryGetValue(record.Id, out var directive))
-                continue;
-
-            if (record is { Kind: TestRecord.View, Values: [var value] })
+            switch (frame.Kind)
             {
-                annotations[directive.Position] = value;
-                pending.Remove(record.Id);
+                case Frame.RunStarted:
+                    started = true;
+                    continue;
+                case Frame.RunFinished:
+                    finished = true;
+                    continue;
+                case Frame.Overflow:
+                    // The one thing a directive must never be annotated for: the program had a
+                    // value and could not send it. Writing 'undefined' here would be the
+                    // compiler disclaiming knowledge it was explicitly told exists.
+                    throw new TestChannelException(
+                        $"The test channel overflowed on the field '{frame["key"]}': " +
+                        "the value was dropped rather than sent short.");
+                case Frame.View:
+                case Frame.Assert:
+                    break;
+                default:
+                    // A kind this build does not know is skipped, per the protocol — which is
+                    // how the event set grows without a flag day. The reader yields it; whether
+                    // it means anything is this consumer's business.
+                    continue;
+            }
+
+            var directive = Directive(directives, frame);
+            var position = directive.Position;
+            pending.Remove(Id(frame));
+
+            if (frame.Kind == Frame.View)
+            {
+                annotations[position] = Field(frame, "value");
                 views++;
+                continue;
             }
-            else if (record is { Kind: TestRecord.Assert, Values: [var outcome, var actual, var expected] })
-            {
-                var held = outcome == "1";
-                annotations[directive.Position] = held ? "pass" : $"fail, got {actual}";
-                pending.Remove(record.Id);
 
-                if (held)
-                    passed++;
-                else
-                    failures.Add(
-                        $"{sourcePath}({directive.Position.Line},{directive.Position.Column}): " +
-                        $"assert failed: expected {expected}, got {actual}");
-            }
+            var outcome = Field(frame, "outcome");
+            var actual = Field(frame, "actual");
+            var expected = Field(frame, "expected");
+
+            // Two words, agreed between the emitted code and here. A third means one of the
+            // two is broken, and guessing which would hide it.
+            var held = outcome switch
+            {
+                "pass" => true,
+                "fail" => false,
+                _ => throw new TestChannelException(
+                    $"The test channel sent an assert with an outcome of '{outcome}', " +
+                    "which is neither 'pass' nor 'fail'."),
+            };
+
+            annotations[position] = held ? "pass" : $"fail, got {actual}";
+
+            if (held)
+                passed++;
+            else
+                failures.Add(
+                    $"{sourcePath}({position.Line},{position.Column}): " +
+                    $"assert failed: expected {expected}, got {actual}");
         }
+
+        if (!started && !finished)
+            throw new TestChannelException(
+                "The program connected to the test channel and never began its body.");
+
+        // A directive that reported nothing means two different things, and the run-finished
+        // event is what tells them apart. After a finish it is 'undefined' — the branch was not
+        // taken — and that needs no notion of a branch to say, so it will be the same answer
+        // for an unreached '#view-step-N' or an unmocked parameter when those exist. Without a
+        // finish the program died on the way, and nothing is known about the line at all.
+        foreach (var id in pending)
+            annotations[directives[id].Position] = finished ? Undefined : Unknown;
 
         Annotate(sourcePath, annotations);
 
-        return TestResult.Ran(output, exitCode, failures, passed, views, pending.Count);
+        return TestResult.Ran(
+            run.Output, run.ExitCode, failures, passed, views,
+            undefined: finished ? pending.Count : 0,
+            crashed: !finished,
+            unreported: finished ? 0 : pending.Count);
     }
+
+    /// <summary>
+    /// The directive a frame is about. A frame carries only an id, so one this does not find is
+    /// a frame with nothing to annotate — which would go quiet rather than wrong, and so is
+    /// worth saying out loud.
+    /// </summary>
+    private static Directive Directive(IReadOnlyDictionary<int, Directive> directives, Frame frame)
+    {
+        var id = Id(frame);
+
+        return directives.TryGetValue(id, out var directive)
+            ? directive
+            : throw new TestChannelException(
+                $"The test channel reported a '{frame.Kind}' for directive {id}, " +
+                "which is not in this program.");
+    }
+
+    private static int Id(Frame frame) =>
+        int.TryParse(Field(frame, "id"), out var id)
+            ? id
+            : throw new TestChannelException(
+                $"The test channel sent a '{frame.Kind}' whose id is not a number: '{frame["id"]}'.");
+
+    private static string Field(Frame frame, string key) =>
+        frame[key]
+            ?? throw new TestChannelException(
+                $"The test channel sent a '{frame.Kind}' with no '{key}' field.");
 
     private static void CollectDirectives(
         IReadOnlyList<Statement> statements, Dictionary<int, Directive> into)
@@ -156,12 +229,16 @@ internal static class TestRun
     /// The first colon after the <c>#</c> is always the right one, because no expression can
     /// contain a colon — it appears only in <c>let</c>, in an assignment and in a directive.
     /// </para>
+    /// <para>
+    /// Empty text leaves the colon bare rather than trailing a space after it, so a blanked
+    /// line reproduces itself the next time round exactly as an annotated one does.
+    /// </para>
     /// </summary>
     private static string Annotated(string line, string text)
     {
         var hash = line.IndexOf('#');
         var colon = hash < 0 ? -1 : line.IndexOf(':', hash);
         var head = colon >= 0 ? line[..(colon + 1)] : line.TrimEnd() + ":";
-        return $"{head} {text}";
+        return text.Length == 0 ? head : $"{head} {text}";
     }
 }

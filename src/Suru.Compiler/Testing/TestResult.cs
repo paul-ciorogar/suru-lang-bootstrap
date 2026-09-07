@@ -6,8 +6,8 @@ namespace Suru.Compiler.Testing;
 /// </summary>
 public sealed class TestResult
 {
-    /// <summary>Compiled, ran, and every assertion held.</summary>
-    public bool Success => Errors.Count == 0 && Failed == 0 && ExitCode == 0;
+    /// <summary>Compiled, ran to the end, and every assertion held.</summary>
+    public bool Success => Errors.Count == 0 && Failed == 0 && ExitCode == 0 && !Crashed;
 
     /// <summary>Compile errors, or a reason the program could not be run.</summary>
     public IReadOnlyList<string> Errors { get; private init; } = [];
@@ -29,7 +29,24 @@ public sealed class TestResult
     /// </summary>
     public int Undefined { get; private init; }
 
-    /// <summary>What the program itself printed, with the test records taken out.</summary>
+    /// <summary>
+    /// The program never reported that its body finished, so it died on the way. Kept apart
+    /// from a non-zero exit code, which is a program that ended and said so.
+    /// </summary>
+    public bool Crashed { get; private init; }
+
+    /// <summary>
+    /// Directives left unanswered by a crashed run, their lines blanked. Deliberately not
+    /// folded into <see cref="Undefined"/>: "the run did not take this branch" and "the run
+    /// died before we know" are different claims, and telling them apart is the whole reason
+    /// the program announces that it finished.
+    /// </summary>
+    public int Unreported { get; private init; }
+
+    /// <summary>
+    /// What the program itself printed. Verbatim — its output and its records travel on
+    /// different file descriptors, so there is nothing to take out.
+    /// </summary>
     public string Output { get; private init; } = "";
 
     public int ExitCode { get; private init; }
@@ -40,7 +57,7 @@ public sealed class TestResult
 
     internal static TestResult Ran(
         string output, int exitCode, IReadOnlyList<string> failures,
-        int passed, int views, int undefined) =>
+        int passed, int views, int undefined, bool crashed, int unreported) =>
         new()
         {
             Output = output,
@@ -50,5 +67,7 @@ public sealed class TestResult
             Failed = failures.Count,
             Views = views,
             Undefined = undefined,
+            Crashed = crashed,
+            Unreported = unreported,
         };
 }

@@ -33,7 +33,7 @@ public enum Dump
 /// <summary>Parses the comma separated stage list accepted by <c>--dump</c> and <c>SURU_DUMP</c>.</summary>
 public static class DumpSpec
 {
-    private static readonly (string Name, Dump Stage)[] Stages =
+    public static readonly (string Name, Dump Stage)[] Stages =
     [
         ("tokens", Dump.Tokens),
         ("ast", Dump.Ast),

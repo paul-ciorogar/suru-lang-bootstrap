@@ -10,9 +10,10 @@ because it has **three implementations**: the writer and reader in
 `src/Suru.Compiler/Testing/`, and the C shim linked into test builds, which is written from this
 document rather than from the C# .
 
-> **Status.** The format is built and tested, and the shim writes it. Nothing emits or reads a
-> frame in anger yet: records still ride on stdout behind a `\x1e` prefix while the socket and
-> the driver are built around this.
+> **Status.** This is what a test build writes and what `suru test` reads, and there is no
+> other path — a binary with no `SURU_TEST_CHANNEL` in its environment drops its records, and
+> the driver, which always sets it, treats a missing connection as a failed run. Phase B adds
+> the reply direction; nothing here changes to make room for it.
 
 ## A frame
 
@@ -121,6 +122,7 @@ It looks redundant and is not, for the reader:
 | [`FrameTests`](../tests/Suru.Tests/FrameTests.cs) | the grammar above, asserted byte for byte |
 | [`runtime/suru_rt.c`](../runtime/suru_rt.c) | the third implementation: the writer that ships inside a test build |
 | [`RuntimeShim`](../src/Suru.Compiler/Testing/RuntimeShim.cs) | where that file is, so `cc` can be handed it |
+| [`TestChannel`](../src/Suru.Compiler/Testing/TestChannel.cs) | the harness end: listen, start the child, read both its channels at once |
 
 The shim is the reason this document exists. It writes frames in C — a constructor connects to
 `SURU_TEST_CHANNEL`, `suru_frame_begin` / `suru_field` / `suru_frame_end` accumulate and send one
