@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Suru.Lib\Suru.Lib.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="LLVMSharp" Version="20.1.2" />
   </ItemGroup>
 

@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Suru.Compiler\Suru.Compiler.csproj" />
+    <ProjectReference Include="..\..\src\Suru.Lib\Suru.Lib.csproj" />
   </ItemGroup>
 
 </Project>

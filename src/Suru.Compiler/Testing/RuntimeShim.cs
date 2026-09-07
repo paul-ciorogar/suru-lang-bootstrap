@@ -32,6 +32,15 @@ public static class RuntimeShim
     public const string MissingMessage =
         "Test runtime not found: '" + RelativePath + "' is missing from the compiler's installation";
 
+    /// <summary>
+    /// The environment variable that hands the shim its socket path — the .NET side's one
+    /// spelling of <c>SURU_CHANNEL_ENV</c> in <c>runtime/suru_rt.c</c>. It lives here rather
+    /// than on <see cref="FrameProtocol"/> because it is about how the shim is <i>reached</i>,
+    /// not about how a frame is spelled. A binary that finds no such variable drops its
+    /// records, so the driver always sets it.
+    /// </summary>
+    public const string ChannelVariable = "SURU_TEST_CHANNEL";
+
     /// <summary>The shim's path, or <c>null</c> when it did not ship.</summary>
     public static string? Locate()
     {

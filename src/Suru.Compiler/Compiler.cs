@@ -42,7 +42,11 @@ public class Compiler
     /// <c>#assert</c> line with its result.
     /// </para>
     /// </summary>
-    public TestResult Test(string buildDir)
+    public TestResult Test(string buildDir) => Test(buildDir, TestOptions.Default);
+
+    /// <inheritdoc cref="Test(string)"/>
+    /// <param name="options">The two deadlines the run answers to.</param>
+    public TestResult Test(string buildDir, TestOptions options)
     {
         var (result, module) = Build(buildDir, BuildMode.Test);
         if (!result.Success || module is null)
@@ -50,8 +54,14 @@ public class Compiler
 
         try
         {
-            var (stdout, exitCode) = Run(result.OutputPath!);
-            return TestRun.Report(module, _sourcePath, stdout, exitCode);
+            var run = TestChannel.Run(result.OutputPath!, options);
+            return TestRun.Report(module, _sourcePath, run);
+        }
+        catch (Exception ex) when (ex is TestChannelException or FrameException)
+        {
+            // Passed through verbatim: these sentences are written to be read, and a
+            // 'Could not run …:' prefix would only get in the way of one.
+            return TestResult.Fail(ex.Message);
         }
         catch (Exception ex)
         {
@@ -136,32 +146,23 @@ public class Compiler
             return (CompilationResult.Fail($"Codegen failed: {ex.Message}"), module);
         }
 
-        // 5. Link → native executable
+        // 5. Link → native executable, plus the test channel's runtime in test mode.
+        // Located here rather than inside Link so a shim that did not ship is reported as the
+        // broken installation it is, instead of arriving wrapped in 'Link failed:' quoting cc.
+        string? runtimePath = null;
+        if (mode == BuildMode.Test)
+        {
+            runtimePath = RuntimeShim.Locate();
+            if (runtimePath is null)
+                return (CompilationResult.Fail(RuntimeShim.MissingMessage), module);
+        }
+
         var executablePath = Path.Combine(buildDir, baseName);
-        var linkError = Link(objectPath, executablePath);
+        var linkError = Link(objectPath, executablePath, runtimePath);
         if (linkError is not null)
             return (CompilationResult.Fail($"Link failed: {linkError}"), module);
 
         return (CompilationResult.Ok(executablePath), module);
-    }
-
-    /// <summary>
-    /// Runs a test build, capturing stdout — which carries the program's own output and the
-    /// records its directives printed, interleaved.
-    /// </summary>
-    private static (string Stdout, int ExitCode) Run(string executablePath)
-    {
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = executablePath,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        })!;
-
-        var stdout = process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-
-        return (stdout, process.ExitCode);
     }
 
     private static void EmitObjectFile(LLVMModuleRef module, string outputPath)
@@ -185,12 +186,19 @@ public class Compiler
             throw new Exception(emitError);
     }
 
-    private static string? Link(string objectPath, string executablePath)
+    /// <summary>
+    /// Links the object file, and with it the test channel's runtime when there is one. The
+    /// shim is handed to <c>cc</c> as source rather than as a prebuilt object: a second compile
+    /// costs about 50 ms.
+    /// </summary>
+    private static string? Link(string objectPath, string executablePath, string? runtimePath)
     {
+        var runtime = runtimePath is null ? "" : $" \"{runtimePath}\"";
+
         using var process = Process.Start(new ProcessStartInfo
         {
             FileName = "cc",
-            Arguments = $"\"{objectPath}\" -o \"{executablePath}\"",
+            Arguments = $"\"{objectPath}\"{runtime} -o \"{executablePath}\"",
             RedirectStandardError = true,
             UseShellExecute = false,
         })!;

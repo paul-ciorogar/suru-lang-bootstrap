@@ -9,13 +9,18 @@ public sealed class CodeGenerator
     private readonly Module _module;
 
     /// <summary>
-    /// Which build this is. Nothing reads it yet: the directives themselves are already
-    /// gone from a production module by the time codegen runs, since the lexer never handed
-    /// them over. It is here because the test channel's runtime declarations must appear in
-    /// a test module and only there, and that is a decision this stage has to be able to
-    /// make for itself.
+    /// Which build this is. The directives themselves are already gone from a production
+    /// module by the time codegen runs, since the lexer never handed them over — but the test
+    /// channel's runtime declarations must appear in a test module and only there, and that is
+    /// a decision this stage has to be able to make for itself.
     /// </summary>
     private readonly BuildMode _mode;
+
+    /// <summary>
+    /// The value <c>main</c> returns, and the <c>exit</c> a <c>run-finished</c> frame carries.
+    /// One constant so the two cannot drift the day a program can fail.
+    /// </summary>
+    private const int MainExitCode = 0;
 
     private readonly LLVMModuleRef _llvmModule;
     private readonly LLVMBuilderRef _builder;
@@ -29,6 +34,18 @@ public sealed class CodeGenerator
 
     private readonly LLVMTypeRef _printfType;
     private readonly LLVMValueRef _printfFn;
+
+    /// <summary>
+    /// The test channel's runtime, declared in <see cref="BuildMode.Test"/> and left null in a
+    /// production module — which is the whole reason this stage is told its mode. The shim's
+    /// own definitions live in <c>runtime/suru_rt.c</c>, linked in by the same decision.
+    /// </summary>
+    private readonly LLVMTypeRef _frameType;
+    private readonly LLVMValueRef _frameBeginFn;
+    private readonly LLVMValueRef _frameEndFn;
+    private readonly LLVMTypeRef _fieldType;
+    private readonly LLVMValueRef _fieldFn;
+
     private readonly Dictionary<string, LLVMValueRef> _strings = [];
 
     /// <summary>
@@ -46,10 +63,23 @@ public sealed class CodeGenerator
         _builder = LLVMBuilderRef.Create(_llvmModule.Context);
         _allocas = LLVMBuilderRef.Create(_llvmModule.Context);
 
-        // Declare printf: i32 (ptr, ...)
+        // Declare printf: i32 (ptr, ...) — printLn's, in both modes.
         var ptrType = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
         _printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType], true);
         _printfFn = _llvmModule.AddFunction("printf", _printfType);
+
+        if (mode == BuildMode.Test)
+        {
+            // void suru_frame_begin(void) / void suru_frame_end(void)
+            _frameType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, []);
+            _frameBeginFn = _llvmModule.AddFunction("suru_frame_begin", _frameType);
+            _frameEndFn = _llvmModule.AddFunction("suru_frame_end", _frameType);
+
+            // void suru_field(const char *key, const char *format, ...) — printf-shaped on
+            // purpose, so it takes the same format strings printLn already uses.
+            _fieldType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [ptrType, ptrType], true);
+            _fieldFn = _llvmModule.AddFunction("suru_field", _fieldType);
+        }
     }
 
     public static LLVMModuleRef Generate(Module module, BuildMode mode)
@@ -74,10 +104,21 @@ public sealed class CodeGenerator
         _allocas.PositionAtEnd(entry);
         _builder.PositionAtEnd(body);
 
+        // Announced at the top of 'body' rather than 'entry', which holds nothing but allocas.
+        if (_mode == BuildMode.Test)
+            WriteFrame(Frame.RunStarted, ("run", "%d", Int32(0)));
+
         foreach (var statement in _module.Statements)
             EmitStatement(statement);
 
-        _builder.BuildRet(LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false));
+        // Emitted in whichever block the builder ended in — after a trailing 'if' that is
+        // 'if.end', the one block on the path that reaches the return. That is the point of
+        // it: its absence is how the driver tells a run that died from a run that simply
+        // never reached a directive.
+        if (_mode == BuildMode.Test)
+            WriteFrame(Frame.RunFinished, ("run", "%d", Int32(0)), ("exit", "%d", Int32(MainExitCode)));
+
+        _builder.BuildRet(Int32(MainExitCode));
 
         // Terminated last, once every slot is in.
         _allocas.BuildBr(body);
@@ -315,8 +356,11 @@ public sealed class CodeGenerator
 
     private void EmitView(ViewDirective view)
     {
-        WriteRecord(TestRecord.View, view.Id,
-            Render(EmitExpr(view.Subject), TypeOf(view.Subject)));
+        var (format, argument) = Render(EmitExpr(view.Subject), TypeOf(view.Subject));
+
+        WriteFrame(Frame.View,
+            ("id", "%d", Int32(view.Id)),
+            ("value", format, argument));
     }
 
     /// <summary>
@@ -336,14 +380,18 @@ public sealed class CodeGenerator
             ? _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, actual, expected)
             : _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, actual, expected);
 
-        // printf's varargs promote to int; an i1 would be read as four bytes of stack.
-        var outcome = _builder.BuildZExt(equal, LLVMTypeRef.Int32);
+        // The wire spells an outcome 'pass' or 'fail', so the word is picked at runtime the
+        // same way Render picks 'true' or 'false' for a bool.
+        var outcome = _builder.BuildSelect(equal, String("pass"), String("fail"));
 
         var (format, actualArgument) = Render(actual, type);
         var (_, expectedArgument) = Render(expected, type);
 
-        WriteRecord(TestRecord.Assert, assert.Id,
-            ("%d", outcome), (format, actualArgument), (format, expectedArgument));
+        WriteFrame(Frame.Assert,
+            ("id", "%d", Int32(assert.Id)),
+            ("outcome", "%s", outcome),
+            ("actual", format, actualArgument),
+            ("expected", format, expectedArgument));
     }
 
     /// <summary>
@@ -365,21 +413,45 @@ public sealed class CodeGenerator
     }
 
     /// <summary>
-    /// Writes one test record: a kind, the directive's id, and a field per value, each with
-    /// the specifier <see cref="Render"/> chose for it.
+    /// Writes one frame down the test channel: <c>begin</c>, a field per entry, <c>end</c>.
     /// <para>
-    /// Separate from <see cref="Printf"/> even though it is a <c>printf</c> today, because
-    /// the two are only accidentally the same call. A record goes to the harness and the
-    /// program's own output goes to whoever ran it; the day the records move off stdout,
-    /// this is the only place that changes and <c>printLn</c> is not touched.
+    /// The <c>kind</c> field is written here rather than by the shim, which has no idea what
+    /// a kind is — unlike <see cref="FrameWriter"/>, whose callers do not have to say. It goes
+    /// through the same <c>%s</c> path as any other value, so a kind is never a format string.
+    /// </para>
+    /// <para>
+    /// Separate from <see cref="Printf"/>, which is <c>printLn</c>'s alone: a frame goes to the
+    /// harness and the program's own output goes to whoever ran it, and the two now travel on
+    /// different file descriptors entirely.
     /// </para>
     /// </summary>
-    private void WriteRecord(
-        string kind, int id, params (string Format, LLVMValueRef Argument)[] fields)
+    private void WriteFrame(
+        string kind, params (string Key, string Format, LLVMValueRef Argument)[] fields)
     {
-        var line = RecordProtocol.Line(kind, id, [.. fields.Select(field => field.Format)]);
-        Printf(line, [.. fields.Select(field => field.Argument)]);
+        if (_mode != BuildMode.Test)
+            throw new CodegenException($"a '{kind}' frame has no place in a production build");
+
+        // The empty argument list is typed explicitly for the same reason Printf's is: a
+        // collection expression cannot choose between BuildCall2's array and span overloads.
+        LLVMValueRef[] none = [];
+
+        _builder.BuildCall2(_frameType, _frameBeginFn, none, "");
+
+        Field(Frame.KindKey, "%s", String(kind));
+        foreach (var (key, format, argument) in fields)
+            Field(key, format, argument);
+
+        _builder.BuildCall2(_frameType, _frameEndFn, none, "");
     }
+
+    private void Field(string key, string format, LLVMValueRef value)
+    {
+        LLVMValueRef[] arguments = [String(key), String(format), value];
+        _builder.BuildCall2(_fieldType, _fieldFn, arguments, "");
+    }
+
+    private static LLVMValueRef Int32(int value) =>
+        LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)value, false);
 
     private static SuruType TypeOf(Expression expression) =>
         expression.Type

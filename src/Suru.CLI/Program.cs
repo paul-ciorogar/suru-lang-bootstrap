@@ -1,142 +1,181 @@
-using Suru.Compiler;
+using Suru.CLI;
 using Suru.Compiler.Debug;
+using Suru.Compiler.Testing;
 
-const string DumpFlag = "--dump";
-const string DumpEnvironmentVariable = "SURU_DUMP";
+var spec = Spec.Parse(args);
+var command = Command.From(spec);
 
-var usage = $"""
-    Usage: suru <command> [options] <file.suru>
+return command.Execute();
 
-    Commands:
-      build             compile to a native executable; '#' directives are ignored
-      test              compile with the '#' directives live, run the result, and
-                        write each '#view' and '#assert' result into the source
-
-    Options:
-      --dump=<stages>   write the named compiler stages to stderr
-      --dump-<stage>    equivalent shorthand for a single stage
-      --dump            all stages
-
-    Stages: {DumpSpec.Names}
-
-    {DumpEnvironmentVariable} holds the same stage list and applies to every run.
-    """;
-
-var command = args.Length > 0 ? args[0] : "";
-if (command is not ("build" or "test"))
+internal class Spec
 {
-    Console.Error.WriteLine(usage);
-    return 1;
-}
+    public CommandType Command = CommandType.None;
+    public string? ErrorMsg = null;
+    public Dump Dump = Dump.None;
+    public TestOptions Timeouts = TestOptions.Default;
+    public bool Help = false;
+    public string Source = "";
 
-var dump = Dump.None;
+    private const string _dumpEnvironmentVariable = "SURU_DUMP";
+    private const string DumpFlag = "--dump";
+    private const string DumpEnvironmentVariable = "SURU_DUMP";
+    private const string TimeoutFlag = "--timeout";
+    private const string ConnectTimeoutFlag = "--connect-timeout";
+    private const string HelpFlag = "--help";
+    private const string HelpSmallFlag = "-h";
 
-// Dumps are off unless asked for, by flag or by environment variable — the same
-// switch has to be reachable from a release build with no rebuild.
-if (Environment.GetEnvironmentVariable(DumpEnvironmentVariable) is { Length: > 0 } environmentSpec)
-{
-    if (!DumpSpec.TryParse(environmentSpec, out var environmentStages, out var environmentError))
+
+    public Spec() { }
+
+    internal static Spec Parse(string[] args)
     {
-        Console.Error.WriteLine($"error: {DumpEnvironmentVariable}: {environmentError}");
-        return 1;
-    }
-    dump |= environmentStages;
-}
-
-string? sourceArgument = null;
-
-foreach (var arg in args.Skip(1))
-{
-    if (arg is "-h" or "--help")
-    {
-        Console.WriteLine(usage);
-        return 0;
+        var spec = new Spec();
+        spec = ParseCommand(args, spec);
+        spec = ParseEnvironmentVariables(spec);
+        spec = ParseArgs(args, spec);
+        
+        return spec;
     }
 
-    if (arg.StartsWith(DumpFlag, StringComparison.Ordinal))
+    private static Spec ParseArgs(string[] args, Spec spec)
     {
-        // Accepts --dump, --dump=tokens,ast and --dump-tokens alike.
-        var spec = arg[DumpFlag.Length..].TrimStart('=', '-');
-        if (spec.Length == 0)
-            spec = "all";
 
-        if (!DumpSpec.TryParse(spec, out var stages, out var error))
+        foreach (var (flag, value) in args.Skip(1).Select(SplitFlag))
         {
-            Console.Error.WriteLine($"error: {error}");
-            return 1;
+            if (spec.HasError()) return spec;
+
+            if (flag is HelpFlag or HelpSmallFlag)
+            {
+                spec.Help = true;
+                return spec;
+            }
+
+            if (flag is TimeoutFlag or ConnectTimeoutFlag)
+            {
+                spec = ParseTimeout(flag, value, spec);
+                continue;
+            }
+
+            if (flag.StartsWith(DumpFlag, StringComparison.Ordinal))
+            {
+                spec = ParseDump(flag, value, spec);
+                continue;
+            }
+
+            if (flag.StartsWith('-'))
+            {
+                spec.ErrorMsg = $"unknown option '{flag}'";
+                return spec;
+            }
+
+            spec.Source = flag;
+
         }
-        dump |= stages;
-        continue;
+        
+        return spec;
     }
 
-    if (arg.StartsWith('-'))
+    private static Spec ParseDump(string flag, string value, Spec spec)
     {
-        Console.Error.WriteLine($"error: unknown option '{arg}'");
-        Console.Error.WriteLine(usage);
-        return 1;
+        if (spec.HasError()) return spec;
+
+        // Accepts --dump, --dump=tokens,ast and --dump-tokens alike.
+        if (value.Length == 0)
+        {
+            value = flag[DumpFlag.Length..].TrimStart('=', '-');
+        }
+
+        if (value.Length == 0)
+        {
+            value = "all";
+        }
+
+        return ParseDumpStages(value, spec);
     }
 
-    if (sourceArgument is not null)
+    private static Spec ParseTimeout(string flag, string value, Spec spec)
     {
-        Console.Error.WriteLine("error: expected a single source file");
-        return 1;
+        // Rejected on 'build' rather than accepted and ignored: a flag that silently
+        // stops working is worse than one that was never there.
+        if (spec.Command != CommandType.Test)
+        {
+            spec.ErrorMsg = $"{flag} applies to 'suru test'";
+            return spec;
+        }
+
+        if (!int.TryParse(value, out var milliseconds) || milliseconds <= 0)
+        {
+            spec.ErrorMsg = $"{flag} expects a positive number of milliseconds";
+            return spec;
+        }
+
+        var span = TimeSpan.FromMilliseconds(milliseconds);
+        spec.Timeouts = flag == TimeoutFlag
+            ? spec.Timeouts with { Run = span }
+            : spec.Timeouts with { Connect = span };
+
+        return spec;
     }
-    sourceArgument = arg;
+
+    // Split on '=' before matching, so '--timeout' cannot be read as a prefix of
+    // '--connect-timeout' or the other way about, whichever is tested first.
+    private static (string Flag, string Value) SplitFlag(string arg)
+    {
+        var separatorIndex = arg.IndexOf('=');
+        var flag = separatorIndex < 0 ? arg : arg[..separatorIndex];
+        var value = separatorIndex < 0 ? "" : arg[(separatorIndex + 1)..];
+        return (flag, value);
+    }
+
+    // Dumps are off unless asked for, by flag or by environment variable — the same
+    // switch has to be reachable from a release build with no rebuild.
+    private static Spec ParseEnvironmentVariables(Spec spec)
+    {
+        if (spec.HasError()) return spec;
+
+        var environmentSpec = Environment.GetEnvironmentVariable(_dumpEnvironmentVariable);
+        if (environmentSpec == null || environmentSpec.Length == 0) return spec;
+
+        return ParseDumpStages(environmentSpec, spec);
+    }
+
+    private static Spec ParseDumpStages(string value, Spec spec)
+    {
+        var parts = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var part in parts)
+        {
+            var name = part.ToLowerInvariant();
+            var match = Array.Find(DumpSpec.Stages, stage => stage.Name == name);
+            if (match.Stage == Dump.None)
+            {
+                spec.ErrorMsg = $"{_dumpEnvironmentVariable}: unknown dump stage '{part}'; expected one of: {DumpSpec.Names}";
+                return spec;
+            }
+            spec.Dump |= match.Stage;
+        }
+
+        return spec;
+    }
+
+    private static Spec ParseCommand(string[] args, Spec spec)
+    {
+        var commandText = args.Length > 0 ? args[0] : "";
+        spec.Command = commandText switch
+        {
+            "build" => CommandType.Build,
+            "test" => CommandType.Test,
+            _ => CommandType.None
+        };
+        return spec;
+    }
+
+    public bool HasError()
+    {
+        return ErrorMsg != null;
+    }
 }
 
-if (sourceArgument is null)
+internal enum CommandType
 {
-    Console.Error.WriteLine(usage);
-    return 1;
-}
-
-var sourcePath = Path.GetFullPath(sourceArgument);
-var buildDir = Path.Combine(Path.GetDirectoryName(sourcePath)!, "build");
-
-// Dumps go to stderr so stdout stays usable for the build result.
-var compiler = new Compiler(sourcePath, new DumpOptions(dump, Console.Error));
-
-if (command == "test")
-    return Test();
-
-var result = compiler.Compile(buildDir);
-
-if (!result.Success)
-{
-    foreach (var error in result.Errors)
-        Console.Error.WriteLine($"error: {error}");
-    return 1;
-}
-
-Console.WriteLine($"Built: {result.OutputPath}");
-return 0;
-
-int Test()
-{
-    var run = compiler.Test(buildDir);
-
-    if (run.Errors.Count > 0)
-    {
-        foreach (var error in run.Errors)
-            Console.Error.WriteLine($"error: {error}");
-        return 1;
-    }
-
-    // The program's own output first, verbatim, so a test run reads like an ordinary run.
-    Console.Write(run.Output);
-
-    foreach (var failure in run.Failures)
-        Console.Error.WriteLine($"error: {failure}");
-
-    // Views are reported by count: their values went into the source file, which is where
-    // they are meant to be read.
-    var views = run.Views == 1 ? "1 view" : $"{run.Views} views";
-    Console.Error.WriteLine(
-        $"{run.Passed} passed, {run.Failed} failed, {run.Undefined} undefined, " +
-        $"{views} written to {sourcePath}");
-
-    if (run.ExitCode != 0)
-        Console.Error.WriteLine($"error: the program exited with {run.ExitCode}");
-
-    return run.Success ? 0 : 1;
+    None, Build, Test
 }
