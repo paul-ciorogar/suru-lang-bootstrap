@@ -1,4 +1,4 @@
-namespace Suru.Tests;
+namespace Suru.Tests.Integration;
 
 /// <summary>
 /// The end-to-end check for blocks: eight nested scopes each shadow 'x', so the output

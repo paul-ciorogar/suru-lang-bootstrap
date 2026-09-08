@@ -1,7 +1,7 @@
 using System.Text;
 using Suru.Compiler.Testing;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Testing;
 
 /// <summary>
 /// The wire the test channel will carry, both ways round: what <see cref="FrameWriter"/>

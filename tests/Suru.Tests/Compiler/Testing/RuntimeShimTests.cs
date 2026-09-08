@@ -1,6 +1,6 @@
 using Suru.Compiler.Testing;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Testing;
 
 /// <summary>
 /// That the C shim shipped. Not that it works — nothing calls it yet, and the C is first

@@ -53,19 +53,21 @@ Failure convention: every stage funnels into [CompilationResult](src/Suru.Compil
 
 Two layers. **Prefer the unit layer** — reach for a fixture only when the case genuinely needs a file on disk, codegen, or a real executable.
 
-**Unit tests over source text** ([LexerTests](tests/Suru.Tests/LexerTests.cs), [ParserTests](tests/Suru.Tests/ParserTests.cs), [SemanticTests](tests/Suru.Tests/SemanticTests.cs)) run the front end in-process with no LLVM and no `cc`. They go through [Source](tests/Suru.Tests/Source.cs):
+The test project mirrors `src/`: [Compiler/](tests/Suru.Tests/Compiler/) holds the tests for `Suru.Compiler` in the same subfolders its sources live in (`Lex/`, `Parse/`, `Semantic/`, `Debug/`, `Testing/`, with the ones for loose files like `ScopeStack` at its root), [Lib/](tests/Suru.Tests/Lib/) the tests for `Suru.Lib`, and [Integration/](tests/Suru.Tests/Integration/) the ones that compile, link and run a real binary, since those belong to no single source file. Namespaces follow the folders (`Suru.Tests.Compiler.Lex`, `Suru.Tests.Integration`, …). The shared helpers — [Source](tests/Suru.Tests/Source.cs), [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs), [Executable](tests/Suru.Tests/Executable.cs) — stay at the root in `Suru.Tests`, which every nested namespace encloses, so they need no `using`.
+
+**Unit tests over source text** ([LexerTests](tests/Suru.Tests/Compiler/Lex/LexerTests.cs), [ParserTests](tests/Suru.Tests/Compiler/Parse/ParserTests.cs), [SemanticTests](tests/Suru.Tests/Compiler/Semantic/SemanticTests.cs)) run the front end in-process with no LLVM and no `cc`. They go through [Source](tests/Suru.Tests/Source.cs):
 
 - `Source.Parse(text)` → `Module`, `Source.Analyze(text)` → error list, `Source.Analyzed(text)` → `Module` asserted error-free (for checking `Expression.Type`), `Source.SingleExpression(module)` unwraps the lone statement.
 - The source path is always the constant `Source.Path` (`"test.suru"`), so diagnostics can be asserted with `Assert.Equal` on the whole string.
 - The lexer is exercised through the parser — `Lexer.NextToken()` and `Tokens` are `internal` and there is no `InternalsVisibleTo`.
 - **Assert on a whole dump, not on node types.** A test about AST shape compares `AstPrinter.Print(module)` (or `withTypes: true` for resolved types) against a raw string literal of the expected tree; a test about tokens uses `TokenPrinter.Print(text, Source.Path)`. One `Assert.Equal` then says everything about position, nesting, order and type at once, reads like the tree it checks, and fails with a diff instead of "expected IntLiteral". Prefer that to a chain of `Assert.IsType`/`Assert.Collection`/`Assert.Single` unwrapping, and reach for a hand-written assertion only for what the printers do not render (e.g. `MockDirective.NamePosition`).
 
-**Integration tests** compile real `.suru` fixtures and assert on the executable's stdout ([PrintTests](tests/Suru.Tests/PrintTests.cs)):
+**Integration tests** compile real `.suru` fixtures and assert on the executable's stdout ([PrintTests](tests/Suru.Tests/Integration/PrintTests.cs)):
 
 - [CompiledFixtures](tests/Suru.Tests/CompiledFixtures.cs) is an xUnit `ICollectionFixture` shared via the `"Integration"` collection. It compiles each fixture once into a temp dir keyed by GUID and deletes it on dispose. `GetExecutable(name)` expects success; `GetErrors(name)` expects failure.
 - Fixtures live at `tests/fixtures/<name>/main.suru`, located by walking up from `AppContext.BaseDirectory`, so a new fixture needs no csproj change.
 - `GetTestRun(name)` runs a fixture through `suru test`. It **copies the fixture into the temp build root first**, because a test run rewrites the source it is given; it runs twice, so the second run has to re-parse what the first one wrote.
-- To add a case: create the fixture directory, then a test class marked `[Collection("Integration")]` taking `CompiledFixtures` in its constructor.
+- To add a case: create the fixture directory, then a test class in `Integration/` marked `[Collection("Integration")]` taking `CompiledFixtures` in its constructor. (The xUnit collection name is global, so [TestModeTests](tests/Suru.Tests/Compiler/Testing/TestModeTests.cs) joins the same collection from `Compiler/Testing/`, where the feature it tests lives.)
 
 ## Conventions
 

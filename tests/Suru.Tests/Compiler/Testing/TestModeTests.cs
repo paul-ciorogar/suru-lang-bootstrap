@@ -1,4 +1,4 @@
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Testing;
 
 /// <summary>
 /// The <c>#</c> directives end to end: the same fixture compiled both ways, run, and its

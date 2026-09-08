@@ -1,4 +1,4 @@
-namespace Suru.Tests;
+namespace Suru.Tests.Integration;
 
 /// <summary>
 /// The end-to-end check for bindings and operators: the fixture is compiled,

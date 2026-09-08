@@ -1,6 +1,6 @@
 using Suru.Lib;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Lib;
 
 public class ResultTests
 {

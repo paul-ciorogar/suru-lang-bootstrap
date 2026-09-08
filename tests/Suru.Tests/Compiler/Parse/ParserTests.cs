@@ -2,7 +2,7 @@ using Suru.Compiler.Debug;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Parse;
 
 public class ParserTests
 {

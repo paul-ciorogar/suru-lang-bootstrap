@@ -1,4 +1,4 @@
-namespace Suru.Tests;
+namespace Suru.Tests.Integration;
 
 /// <summary>
 /// The end-to-end check for branches: the fixture prints 1 to 10 in order, and only in order

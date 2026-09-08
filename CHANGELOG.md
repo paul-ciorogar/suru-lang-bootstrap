@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the test project mirrors `src/`
+- `tests/Suru.Tests` was a flat directory of eighteen files; it now has a folder per project, and inside the compiler's, a folder per source folder. `Compiler/` holds `Lex/`, `Parse/`, `Semantic/`, `Debug/` and `Testing/` — the same names `src/Suru.Compiler` uses, with `ScopeStackTests` at its root where `ScopeStack.cs` sits at the project root. `Lib/` holds the `Suru.Lib` tests, and `Integration/` the ones that compile, link and run a real binary, which belong to no single source file. Namespaces follow the folders
+- The shared helpers — `Source`, `CompiledFixtures`, `Executable` — stay at the root in `Suru.Tests`. Every nested namespace encloses it, so nothing needed a new `using`: the move is folders and `namespace` lines and nothing else, and all 292 tests pass unchanged
+- `TestModeTests` is the one file placed by what it tests rather than by how it runs: it drives real binaries but it is the `Testing/` feature's end-to-end case, so it sits there and joins the `"Integration"` collection from across the namespace, which xUnit names globally
+
 ### Added — `Suru.Lib`
 - A fifth project, `src/Suru.Lib`, for code with no stage of the pipeline to belong to. It depends on nothing — not LLVM, not the compiler — and both `Suru.Compiler` and `Suru.CLI` reference it, which is the whole reason it is not a folder inside `Suru.Compiler`: the CLI should be able to use a shared type without the compiler being the thing that defines it
 - `Result<T, S>`, an interface over `Ok<T, S>` and `Error<T, S>`. `Map` / `MapError` change one side and carry the other through untouched; `AndThen` is `Map` for a step that can fail too, and is what keeps a chain flat rather than nesting a result inside a result. `Result.Ok` / `Result.Error` are static entry points purely so both type arguments infer

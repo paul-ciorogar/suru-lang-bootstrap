@@ -1,4 +1,4 @@
-namespace Suru.Tests;
+namespace Suru.Tests.Integration;
 
 [Collection("Integration")]
 public class PrintTests

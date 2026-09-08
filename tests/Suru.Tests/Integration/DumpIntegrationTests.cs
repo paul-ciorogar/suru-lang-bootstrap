@@ -1,7 +1,7 @@
 using Suru.Compiler.Debug;
 using SuruCompiler = Suru.Compiler.Compiler;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Integration;
 
 /// <summary>
 /// The LLVM dump is the one stage that cannot be checked without LLVM, so it
