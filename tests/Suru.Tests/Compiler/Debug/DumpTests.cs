@@ -1,6 +1,6 @@
 using Suru.Compiler.Debug;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Debug;
 
 /// <summary>
 /// Stage dumps are a debugging interface, so their exact text is the contract:

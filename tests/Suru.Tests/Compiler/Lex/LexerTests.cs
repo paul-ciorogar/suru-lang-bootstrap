@@ -3,7 +3,7 @@ using Suru.Compiler.Lex;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Lex;
 
 /// <summary>
 /// The lexer is pull-based and <c>NextToken</c> is internal, so it is exercised

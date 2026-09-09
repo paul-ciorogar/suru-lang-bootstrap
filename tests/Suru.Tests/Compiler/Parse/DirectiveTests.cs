@@ -3,7 +3,7 @@ using Suru.Compiler.Debug;
 using Suru.Compiler.Parse;
 using Suru.Compiler.Parse.Ast;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Parse;
 
 /// <summary>
 /// The <c>#</c> test directives through the front end: what a production build does with

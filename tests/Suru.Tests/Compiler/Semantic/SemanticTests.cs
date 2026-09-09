@@ -1,7 +1,7 @@
 using Suru.Compiler;
 using Suru.Compiler.Parse.Ast;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler.Semantic;
 
 public class SemanticTests
 {

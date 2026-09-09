@@ -119,7 +119,7 @@ It looks redundant and is not, for the reader:
 | [`FrameProtocol`](../src/Suru.Compiler/Testing/FrameProtocol.cs) | the header, the delimiters — the one place both halves ask |
 | [`FrameWriter`](../src/Suru.Compiler/Testing/FrameWriter.cs) | frame → bytes |
 | [`FrameReader`](../src/Suru.Compiler/Testing/FrameReader.cs) | bytes → frames, streaming; throws `FrameException` |
-| [`FrameTests`](../tests/Suru.Tests/FrameTests.cs) | the grammar above, asserted byte for byte |
+| [`FrameTests`](../tests/Suru.Tests/Compiler/Testing/FrameTests.cs) | the grammar above, asserted byte for byte |
 | [`runtime/suru_rt.c`](../runtime/suru_rt.c) | the third implementation: the writer that ships inside a test build |
 | [`RuntimeShim`](../src/Suru.Compiler/Testing/RuntimeShim.cs) | where that file is, so `cc` can be handed it |
 | [`TestChannel`](../src/Suru.Compiler/Testing/TestChannel.cs) | the harness end: listen, start the child, read both its channels at once |

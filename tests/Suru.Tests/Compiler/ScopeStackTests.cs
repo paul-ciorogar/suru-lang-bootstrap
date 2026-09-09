@@ -1,6 +1,6 @@
 using Suru.Compiler;
 
-namespace Suru.Tests;
+namespace Suru.Tests.Compiler;
 
 /// <summary>
 /// The structure behind block scope, shared by semantic analysis and codegen. Tested
