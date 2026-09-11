@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the CLI parses arguments into a `Result`
+- `Spec.Parse` returned a `Spec` carrying an `ErrorMsg`; it now returns `Result<Spec, ArgsError>` — the first caller of `Suru.Lib`'s `Result`. A failed parse produces no `Spec` at all, so there is no half-filled one for a later step to read, and `HasError()`/`ErrorMsg` are gone along with the four `if (spec.HasError()) return spec;` guards that opened the parse steps: `AndThen` carries a failure through untouched
+- The argument loop is a fold rather than a sequence of early returns — each argument is another `AndThen` over the same chain, and one `Match` at the top names both reasons to stop reading (the parse failed, or `--help` already decided the run). `Command.From` `Match`es the result: a spec becomes the command it names, an `ArgsError` becomes the `UssageCommand` that reports it. Help stays on the success side — asking for usage is not a failure to parse. Every message and exit code is unchanged
+- `DumpSpec` moved from `Suru.Compiler/Debug/Dump.cs` to `src/Suru.CLI/DumpSpec.cs`: the `Dump` flags are the compiler's because the stages are, but the names a command line spells them with are not. The compiler no longer parses any part of a command line — it is handed a `Dump` and never learns there was a text form. `TryParse(string, out Dump, out string?)` is now `Parse(string) → Result<Dump, ArgsError>`, which `Spec` folds in with `MapError`
+- `Spec`, `ArgsError` and `CommandType` moved out of `Program.cs` into `Spec.cs`, so the test project can mirror them by file and `Program.cs` is the one line it claims to be
+
+### Added — the CLI has tests
+- `tests/Suru.Tests/CLI/` — the fourth folder mirroring `src/`, and the first tests the CLI has had. `SpecTests` reads command lines and asserts on the spec or on the one sentence the parse failed with, `CommandTests` on what `Command.From` chooses and what the usage command prints, and `DumpSpecTests` moved here with the type it covers. The types they reach are `public` rather than reached through an `InternalsVisibleTo`, the same call `RuntimeShim` and `FrameReader` already made
+- `SURU_DUMP` is process-wide, so every `SpecTests` case runs with it cleared and the ones that care set it themselves. They are one class for that reason: xUnit runs the tests within a class one at a time, so no two can hold the variable at once
+
+### Fixed — a bad `--dump` blamed `SURU_DUMP`
+- `--dump=nope` reported `SURU_DUMP: unknown dump stage 'nope'`, naming a variable the user had not set and never mentioning the flag they had. The message now names whichever of the two supplied the value
+
+### Removed — dead and duplicated code
+- `Spec.ParseDumpStages` reimplemented `DumpSpec`'s stage-list parsing line for line, leaving the real one with tests and no caller. `Spec` calls it now and adds only the part that is its own: which source the value came from
+- `Command` held six flag-name constants of which three were unused, the other three duplicating `Spec`'s private copies — a usage text that could drift from the parser that reads it. The constants live on `Spec` alone, and the usage text interpolates those. `Command.cs` also no longer imports `LLVMSharp`, which it never used; `Spec`'s explicit parameterless constructor and `UssageCommand`'s public one are gone
+- `Result<T, S>.TryGetError` is gone from the interface and both implementations. It was the `out`-parameter twin of `TryGetValue`, and at its only call site it read as a failure check bolted onto a chain that already had one — `Match` says the same thing with both sides named. `TryGetValue` stays: unwrapping the *value* is what C# code actually reaches for
+
 ### Changed — the test project mirrors `src/`
 - `tests/Suru.Tests` was a flat directory of eighteen files; it now has a folder per project, and inside the compiler's, a folder per source folder. `Compiler/` holds `Lex/`, `Parse/`, `Semantic/`, `Debug/` and `Testing/` — the same names `src/Suru.Compiler` uses, with `ScopeStackTests` at its root where `ScopeStack.cs` sits at the project root. `Lib/` holds the `Suru.Lib` tests, and `Integration/` the ones that compile, link and run a real binary, which belong to no single source file. Namespaces follow the folders
 - The shared helpers — `Source`, `CompiledFixtures`, `Executable` — stay at the root in `Suru.Tests`. Every nested namespace encloses it, so nothing needed a new `using`: the move is folders and `namespace` lines and nothing else, and all 292 tests pass unchanged

@@ -1,26 +1,18 @@
-using LLVMSharp;
 using Suru.Compiler.Debug;
 using Suru.Compiler.Testing;
+using Suru.Lib;
 
 namespace Suru.CLI;
 
 // A marker: what a command *is* comes from parsing, what it *does* is the method the
 // entry point's switch picks out by type.
-internal interface ICommand
+public interface ICommand
 {
     int Execute();
 }
 
-internal static class Command
+public static class Command
 {
-    public const string DumpFlag = "--dump";
-    public const string DumpEnvironmentVariable = "SURU_DUMP";
-    public const string TimeoutFlag = "--timeout";
-    public const string ConnectTimeoutFlag = "--connect-timeout";
-    public const string HelpFlag = "--help";
-    public const string HelpSmallFlag = "-h";
-
-
     // Dumps go to stderr so stdout stays usable for the build result.
     internal static Suru.Compiler.Compiler CompilerFor(string sourcePath, Dump dump) =>
         new(sourcePath, new DumpOptions(dump, Console.Error));
@@ -28,10 +20,14 @@ internal static class Command
     internal static string BuildDirectoryFor(string sourcePath) =>
         Path.Combine(Path.GetDirectoryName(sourcePath)!, "build");
 
-    internal static ICommand From(Spec spec)
+    // The one place the two outcomes of parsing meet: a spec becomes the command it names,
+    // an error becomes the command that reports it.
+    public static ICommand From(Result<Spec, ArgsError> parsed) =>
+        parsed.Match<ICommand>(From, error => UssageCommand.Error(error.Message));
+
+    private static ICommand From(Spec spec)
     {
         if (spec.Help) return UssageCommand.Help();
-        if (spec.HasError()) return UssageCommand.Error(spec.ErrorMsg ?? "");
         return spec.Command switch
         {
             CommandType.Build => new BuildCommand(spec.Source, spec.Dump),
@@ -41,7 +37,7 @@ internal static class Command
     }
 }
 
-internal sealed class BuildCommand(string sourcePath, Dump dump) : ICommand
+public sealed class BuildCommand(string sourcePath, Dump dump) : ICommand
 {
     public int Execute()
     {
@@ -60,7 +56,7 @@ internal sealed class BuildCommand(string sourcePath, Dump dump) : ICommand
     }
 }
 
-internal sealed class TestCommand(string sourcePath, Dump dump, TestOptions timeouts) : ICommand
+public sealed class TestCommand(string sourcePath, Dump dump, TestOptions timeouts) : ICommand
 {
     public int Execute()
     {
@@ -101,7 +97,7 @@ internal sealed class TestCommand(string sourcePath, Dump dump, TestOptions time
     }
 }
 
-internal sealed class UssageCommand : ICommand
+public sealed class UssageCommand : ICommand
 {
     private readonly string? _error = null;
     private readonly bool _withUsage = false;
@@ -112,7 +108,7 @@ internal sealed class UssageCommand : ICommand
         _withUsage = true;
     }
 
-    public UssageCommand(string error, int exitCode)
+    private UssageCommand(string error, int exitCode)
     {
         _error = error;
         _exitCode = exitCode;
@@ -121,8 +117,8 @@ internal sealed class UssageCommand : ICommand
     // Asked for: it goes to stdout and the run succeeded.
     public static UssageCommand Help() => new();
 
-    // Fallen into: it goes to stderr. A message specific enough to act on stands on its
-    // own; without one, the usage text is the message.
+    // Fallen into: it goes to stderr, and without the usage text — a message specific
+    // enough to act on stands on its own, and burying it under thirty lines hides it.
     public static UssageCommand Error(string error)
     {
         return new(error, exitCode: 1);
@@ -154,9 +150,9 @@ internal sealed class UssageCommand : ICommand
       --dump            all stages
 
     Options for 'test':
-      {Command.TimeoutFlag}=<ms>    how long the program may run once it has reached the
+      {Spec.TimeoutFlag}=<ms>    how long the program may run once it has reached the
                         test channel, before it is killed (default {TestOptions.Default.Run.TotalMilliseconds:0})
-      {Command.ConnectTimeoutFlag}=<ms>
+      {Spec.ConnectTimeoutFlag}=<ms>
                         how long the program has to reach the test channel at all
                         (default {TestOptions.Default.Connect.TotalMilliseconds:0})
 
@@ -165,6 +161,6 @@ internal sealed class UssageCommand : ICommand
 
     Stages: {DumpSpec.Names}
 
-    {Command.DumpEnvironmentVariable} holds the same stage list and applies to every run.
+    {Spec.DumpEnvironmentVariable} holds the same stage list and applies to every run.
     """;
 }

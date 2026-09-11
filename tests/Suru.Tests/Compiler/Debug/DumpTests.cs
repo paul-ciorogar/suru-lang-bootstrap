@@ -212,31 +212,6 @@ public class DumpTests
             dump);
     }
 
-    [Theory]
-    [InlineData("tokens", Dump.Tokens)]
-    [InlineData("ast", Dump.Ast)]
-    [InlineData("typed-ast", Dump.TypedAst)]
-    [InlineData("llvm", Dump.Llvm)]
-    [InlineData("all", Dump.All)]
-    [InlineData("tokens,llvm", Dump.Tokens | Dump.Llvm)]
-    [InlineData(" tokens , ast ", Dump.Tokens | Dump.Ast)]
-    [InlineData("TOKENS", Dump.Tokens)]
-    public void ParsesStageLists(string spec, Dump expected)
-    {
-        Assert.True(DumpSpec.TryParse(spec, out var dump, out _));
-
-        Assert.Equal(expected, dump);
-    }
-
-    [Fact]
-    public void RejectsAnUnknownStageRatherThanIgnoringIt()
-    {
-        Assert.False(DumpSpec.TryParse("tokens,nope", out var dump, out var error));
-
-        Assert.Equal(Dump.None, dump);
-        Assert.Equal("unknown dump stage 'nope'; expected one of: tokens, ast, typed-ast, llvm, all", error);
-    }
-
     [Fact]
     public void WritesEnabledSectionsUnderATitle()
     {

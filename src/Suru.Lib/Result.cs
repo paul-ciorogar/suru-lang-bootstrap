@@ -40,9 +40,6 @@ public interface Result<T, S>
 
     /// <summary>Idiomatic C# unwrap: <c>if (result.TryGetValue(out var value))</c>.</summary>
     bool TryGetValue([MaybeNullWhen(false)] out T value);
-
-    /// <summary>Idiomatic C# unwrap of the other side: <c>if (result.TryGetError(out var error))</c>.</summary>
-    bool TryGetError([MaybeNullWhen(false)] out S error);
 }
 
 /// <summary>Entry points that infer both type arguments, so a caller writes neither.</summary>
@@ -78,12 +75,6 @@ public sealed record Ok<T, S>(T Value) : Result<T, S>
         value = Value;
         return true;
     }
-
-    public bool TryGetError([MaybeNullWhen(false)] out S error)
-    {
-        error = default;
-        return false;
-    }
 }
 
 public sealed record Error<T, S>(S Failure) : Result<T, S>
@@ -110,11 +101,5 @@ public sealed record Error<T, S>(S Failure) : Result<T, S>
     {
         value = default;
         return false;
-    }
-
-    public bool TryGetError([MaybeNullWhen(false)] out S error)
-    {
-        error = Failure;
-        return true;
     }
 }

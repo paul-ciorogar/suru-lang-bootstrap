@@ -114,14 +114,4 @@ public class ResultTests
         Assert.False(Result.Error<int, string>("boom").TryGetValue(out var missing));
         Assert.Equal(0, missing);
     }
-
-    [Fact]
-    public void TryGetErrorUnwrapsOnlyAnError()
-    {
-        Assert.True(Result.Error<int, string>("boom").TryGetError(out var error));
-        Assert.Equal("boom", error);
-
-        Assert.False(Result.Ok<int, string>(1).TryGetError(out var missing));
-        Assert.Null(missing);
-    }
 }
