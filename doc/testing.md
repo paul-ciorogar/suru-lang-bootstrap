@@ -261,15 +261,57 @@ assertion in a branch this run did not take is honest, not broken. Counting it a
 be the dishonest option, which is why it has a figure of its own rather than being folded into
 one of the other two.
 
+## Directives inside a loop
+
+A directive in a [`while`](control-flow.md) body runs on every pass, so it reports more than
+once — but its line holds one answer, and it counts once in the summary however many times it
+ran.
+
+```suru
+let i i64: 0
+while i < 3 {
+  i: i + 1
+  #view i: 3
+  #assert(i, 1): fail, got 2
+}
+```
+
+```
+hello.suru(5,3): assert failed: expected 1, got 2
+0 passed, 1 failed, 0 undefined, 1 view written to hello.suru
+```
+
+The two directives answer differently on purpose:
+
+- **`#view` shows the last value it saw.** A view shows *a* value, and after three passes the
+  one the line ends up holding is the one from the third.
+- **`#assert` is sticky: one that ever failed reads `fail`**, keeping the value from the pass
+  that failed — the second here, the first pass having held. Taking the last pass instead would
+  let an assertion that failed halfway through be erased by one that happened to hold at the
+  end, and an assertion that did not hold is not one that held.
+
+A loop whose condition is false on arrival runs its body no times, so the directives inside it
+are `undefined` — the same answer, from the same mechanism, as a branch that was not taken.
+
+One thing to know before putting a `#view` in a hot loop: the program reports *every* pass over
+the channel, and all but the last is then discarded. Thousands of iterations cost thousands of
+messages for one number.
+
 ## Not yet supported
 
 There is no way yet to name a group of directives and switch between them, so a file carries
 one set at a time. `#spec` and `#save` are designed for that and wait on user-defined
 functions, which is the unit a test case really belongs to.
 
+A failing `#assert` does **not** stop the program. It records the failure and the run carries
+on, so a loop whose assertion fails on its first pass still runs to the end. Fail-fast — an
+assertion that stops the loop and the rest of the run — is the intended behaviour and is not
+built yet; the sticky rule above is what it will agree with when it is, since under fail-fast
+the first failure is the only one.
+
 `#view-step-N <expression>:` — a `#view` that keeps a counter of its own and shows the value
-from the Nth time execution reached it — is designed and waits on loops, since there is
-nothing yet to reach a line more than once.
+from the Nth time execution reached it — is designed and not yet built. It is what the section
+above is really missing: a loop's `#view` can show the last pass, and nothing else.
 
 `undefined` exists so far only as the annotation above: a directive that did not report. The
 rest of it — `undefined` as a *value* that absorbs whatever it takes part in, so
@@ -277,4 +319,4 @@ rest of it — `undefined` as a *value* that absorbs whatever it takes part in, 
 looks like an answer — waits on user-defined functions, since an input nobody mocked presumes a
 parameter.
 
-Both are described in [todo.md](../todo.md).
+All of these are described in [RD/todo.md](RD/todo.md).

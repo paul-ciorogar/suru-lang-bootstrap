@@ -39,8 +39,13 @@ internal static class TestRun
         // column is what finds the '#' once a frame carries a position of its own, and the
         // key costs nothing until then.
         var annotations = new Dictionary<SourcePosition, string>();
-        var failures = new List<string>();
-        int passed = 0, views = 0;
+
+        // Keyed by directive id rather than counted as frames arrive, because a loop is the
+        // first construct that can report the same directive more than once: counting frames
+        // would report a ten-iteration loop as ten passes with ten identical diagnostics.
+        var viewed = new HashSet<int>();
+        var outcomes = new Dictionary<int, bool>();
+        var failureText = new Dictionary<int, string>();
         bool started = false, finished = false;
 
         var pending = new HashSet<int>(directives.Keys);
@@ -74,12 +79,15 @@ internal static class TestRun
 
             var directive = Directive(directives, frame);
             var position = directive.Position;
-            pending.Remove(Id(frame));
+            var id = Id(frame);
+            pending.Remove(id);
 
             if (frame.Kind == Frame.View)
             {
+                // Last hit wins: a '#view' shows a value, and in a loop the last one is the
+                // value the line ends up holding.
                 annotations[position] = Field(frame, "value");
-                views++;
+                viewed.Add(id);
                 continue;
             }
 
@@ -98,14 +106,29 @@ internal static class TestRun
                     "which is neither 'pass' nor 'fail'."),
             };
 
-            annotations[position] = held ? "pass" : $"fail, got {actual}";
+            // An assertion is sticky, where a '#view' is last-hit-wins: one that ever failed
+            // reads 'fail', keeping the first failing iteration's value. Last-hit-wins here
+            // would erase a failure on iteration 3 that happened to pass on iteration 10, and
+            // an assertion that did not hold is not one that held.
+            //
+            // It is also the forward-compatible answer. The intended end state is fail-fast — a
+            // failed assertion stops the loop and the rest of the run — under which the first
+            // failure is the only one, and sticky and fail-fast agree on every program.
+            outcomes[id] = outcomes.GetValueOrDefault(id, true) && held;
 
             if (held)
-                passed++;
+            {
+                if (!failureText.ContainsKey(id))
+                    annotations[position] = "pass";
+            }
             else
-                failures.Add(
-                    $"{sourcePath}({position.Line},{position.Column}): " +
-                    $"assert failed: expected {expected}, got {actual}");
+            {
+                if (failureText.TryAdd(
+                        id,
+                        $"{sourcePath}({position.Line},{position.Column}): " +
+                        $"assert failed: expected {expected}, got {actual}"))
+                    annotations[position] = $"fail, got {actual}";
+            }
         }
 
         if (!started && !finished)
@@ -122,8 +145,16 @@ internal static class TestRun
 
         Annotate(sourcePath, annotations);
 
+        // Ordered by id, which is source order — the parser numbers directives as it meets
+        // them. For straight-line and branching code that is also arrival order, so this
+        // reproduces what appending as frames arrived produced; a loop is the only thing that
+        // can revisit a directive, and reporting those in source order is the readable answer.
+        var failures = failureText.OrderBy(entry => entry.Key).Select(entry => entry.Value).ToList();
+
         return TestResult.Ran(
-            run.Output, run.ExitCode, failures, passed, views,
+            run.Output, run.ExitCode, failures,
+            passed: outcomes.Values.Count(held => held),
+            views: viewed.Count,
             undefined: finished ? pending.Count : 0,
             crashed: !finished,
             unreported: finished ? 0 : pending.Count);
@@ -186,6 +217,9 @@ internal static class TestRun
                 CollectDirectives(branch.Then, into);
                 if (branch.Else is not null)
                     CollectDirectives(branch.Else, into);
+                break;
+            case WhileStatement loop:
+                CollectDirectives(loop.Body, into);
                 break;
         }
     }

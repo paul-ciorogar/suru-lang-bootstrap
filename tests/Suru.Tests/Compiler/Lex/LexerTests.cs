@@ -275,7 +275,10 @@ public class LexerTests
     [Theory]
     [InlineData("iffy")]
     [InlineData("elsewhere")]
-    public void IfAndElseAreKeywordsAndNotIdentifiers(string name)
+    [InlineData("whiles")]
+    [InlineData("breakage")]
+    [InlineData("continued")]
+    public void ControlFlowWordsAreKeywordsAndNotIdentifiers(string name)
     {
         // Each starts with a keyword but is a single identifier.
         var identifier = Assert.IsType<IdentifierExpression>(Source.SingleExpression(Source.Parse(name)));
@@ -283,14 +286,18 @@ public class LexerTests
         Assert.Equal(name, identifier.Name);
     }
 
-    [Fact]
-    public void IfIsNotUsableAsAName()
+    [Theory]
+    [InlineData("if", "If")]
+    [InlineData("while", "While")]
+    [InlineData("break", "Break")]
+    [InlineData("continue", "Continue")]
+    public void ControlFlowWordsAreNotUsableAsNames(string word, string kind)
     {
         // Unlike 'view' and 'mock', which the parser recognises after a '#', these are real
         // keywords and are out of the namespace.
-        var exception = Assert.Throws<ParseException>(() => Source.Parse("let if i64: 1"));
+        var exception = Assert.Throws<ParseException>(() => Source.Parse($"let {word} i64: 1"));
 
-        Assert.Equal("test.suru(1,5): expected Identifier, got If", exception.Message);
+        Assert.Equal($"test.suru(1,5): expected Identifier, got {kind}", exception.Message);
     }
 
     [Fact]

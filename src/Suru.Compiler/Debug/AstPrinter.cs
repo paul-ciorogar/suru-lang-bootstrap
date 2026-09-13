@@ -43,6 +43,10 @@ public static class AstPrinter
                 AppendExpression(output, assignment.Value, depth + 1, withTypes);
                 break;
             case BlockStatement block:
+                // TODO(scope-kinds): render the block's kind here once it has one, so the whole
+                // parser test layer asserts on it without a hand-written assertion. Render only
+                // a kind other than Plain — that keeps every existing expected tree unchanged,
+                // and the new detail appears exactly on the blocks the change is about.
                 AppendNode(output, depth, "BlockStatement", block.Position);
                 foreach (var inner in block.Statements)
                     AppendStatement(output, inner, depth + 1, withTypes);
@@ -56,6 +60,20 @@ public static class AstPrinter
                 AppendStatement(output, branch.Then, depth + 1, withTypes);
                 if (branch.Else is not null)
                     AppendStatement(output, branch.Else, depth + 1, withTypes);
+                break;
+            // Condition then body, the same unlabelled-children shape as an 'if'.
+            case WhileStatement loop:
+                AppendNode(output, depth, "WhileStatement", loop.Position);
+                AppendExpression(output, loop.Condition, depth + 1, withTypes);
+                AppendStatement(output, loop.Body, depth + 1, withTypes);
+                break;
+            // Leaves: neither carries an operand, and which loop it leaves is nesting, which
+            // the tree already shows.
+            case BreakStatement:
+                AppendNode(output, depth, "BreakStatement", statement.Position);
+                break;
+            case ContinueStatement:
+                AppendNode(output, depth, "ContinueStatement", statement.Position);
                 break;
             case MockDirective mock:
                 AppendNode(output, depth, "MockDirective", mock.Position, mock.Name);

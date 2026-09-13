@@ -5,7 +5,7 @@ typing and no garbage collection.
 
 **This documents the language as the bootstrap compiler implements it today, and nothing
 more.** That language is very small: a program binds values to names, computes with
-operators, branches, and prints. There are no user-defined functions, no loops and no
+operators, branches, loops, and prints. There are no user-defined functions and no
 strings yet. Every page here describes something you can compile and run right now; a
 feature gets a page when it lands, not when it is designed.
 

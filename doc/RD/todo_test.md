@@ -304,10 +304,12 @@ Provable entirely in unit tests: no LLVM, no `cc`, no process.
 - [ ] **Fixtures for the new failures** *(~1.5h)* — a program that hangs (run deadline, killed,
       diagnostic); a program that exits mid-run (no run-finished, crash reported, directives
       before the exit still annotated).
-      **Neither can be a `.suru` fixture.** Suru has no loop and no way to block, so no program
-      it can express hangs, and nothing in it can exit mid-run — a divide by zero is the closest
-      and it traps on x86 while yielding 0 on ARM64, i.e. a fixture that passes on one machine.
-      So these want small **C children** driven against `TestChannel` directly, compiled at test
+      **The hang can now be a `.suru` fixture.** `while` landed, so `while true { }` is a program
+      Suru can express that never ends, and the run deadline finally has something to fire on.
+      The rest still cannot: nothing in the language exits mid-run — a divide by zero is the
+      closest and it traps on x86 while yielding 0 on ARM64, i.e. a fixture that passes on one
+      machine — and nothing can send a garbage frame or flood stdout on purpose.
+      So the others want small **C children** driven against `TestChannel` directly, compiled at test
       time against `runtime/suru_rt.c` (which `RuntimeShim.Locate` already finds) — also the
       first thing that exercises the shim at all. Worth building: hangs; never connects;
       connects then stalls; exits mid-run; sends garbage; and **floods stdout while framing**,

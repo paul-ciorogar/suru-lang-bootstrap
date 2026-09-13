@@ -35,6 +35,9 @@ public sealed class LetStatement(
 public sealed class BlockStatement(SourcePosition position, IReadOnlyList<Statement> statements)
     : Statement(position)
 {
+    // TODO(scope-kinds): add a 'Kind' here (Plain | Loop, taken as a constructor argument), so
+    // the scope a block enters can say what kind of scope it is. See the design note on
+    // 'ScopeStack', and have 'AstPrinter' render it so the parser tests assert on it for free.
     public IReadOnlyList<Statement> Statements { get; } = statements;
 }
 
@@ -55,6 +58,32 @@ public sealed class IfStatement(
     public BlockStatement Then { get; } = then;
     public Statement? Else { get; } = otherwise;
 }
+
+/// <summary>
+/// <c>while &lt;condition&gt; { ... }</c>. The condition is re-evaluated before every iteration,
+/// and the body is a <see cref="BlockStatement"/>, so it is a scope for the same reason an
+/// <c>if</c> arm is one and needs no rule of its own.
+/// </summary>
+public sealed class WhileStatement(
+    SourcePosition position, Expression condition, BlockStatement body) : Statement(position)
+{
+    public Expression Condition { get; } = condition;
+    public BlockStatement Body { get; } = body;
+}
+
+/// <summary>
+/// <c>break</c> — leaves the innermost enclosing loop. It carries nothing but its position,
+/// which is where the diagnostic for one written outside a loop points. There are no labels,
+/// so which loop it leaves is decided by nesting alone.
+/// </summary>
+public sealed class BreakStatement(SourcePosition position) : Statement(position);
+
+/// <summary>
+/// <c>continue</c> — abandons this iteration and re-tests the innermost enclosing loop's
+/// condition. Carries only its position, and picks its loop by nesting, exactly as
+/// <see cref="BreakStatement"/> does.
+/// </summary>
+public sealed class ContinueStatement(SourcePosition position) : Statement(position);
 
 /// <summary><c>&lt;name&gt;: &lt;value&gt;</c>, storing into an existing binding.</summary>
 public sealed class AssignmentStatement(SourcePosition position, string name, Expression value)

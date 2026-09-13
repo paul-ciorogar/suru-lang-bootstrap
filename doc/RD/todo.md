@@ -198,6 +198,40 @@ right-hand side.
 
 ---
 
+## Not yet: fail-fast assertions
+
+A failing `#assert` records its failure and the program carries on. That is fine in
+straight-line code, where a directive reports once, and it is the wrong shape inside a loop,
+where it means a broken assertion is re-tested on every pass and the run finishes anyway.
+
+**Intended:** a failing `#assert` stops the loop and the rest of the program, the way a failing
+assertion in most test frameworks ends the case. The first failure is then the only one, and the
+annotation, the diagnostic and the summary are all describing the same event.
+
+**Built instead, as the interim:** an assertion is *sticky*. One that ever failed reads `fail`
+and keeps the value from the first pass that failed, counts once, and produces one diagnostic.
+That is deliberately the answer fail-fast will also give — under fail-fast there is no second
+failure to disagree about — so switching to it changes no program's output. The alternative,
+last-hit-wins, would have to be un-chosen later, and would meanwhile let a pass on iteration 10
+erase a failure on iteration 3.
+
+**This part is designed, not built.** The open questions:
+
+- **What stops?** The loop, or the whole run? Stopping the run is simpler and matches "the case
+  failed". Stopping only the loop invents a notion of "the current case" that nothing else in the
+  language has yet.
+- **How does the harness learn it stopped?** `run-finished` is what separates `undefined` from a
+  crashed run, so a run stopped by an assertion must still send one — with something on it saying
+  it stopped early, or the directives after the failure would be blanked as a crash rather than
+  written `undefined`. That is a new field, not a new event.
+- **What is the exit code?** Non-zero already, for a failed assertion. A run that stopped early
+  should not become indistinguishable from one that crashed.
+- **Does `#view` stop too?** No — a `#view` cannot fail. But a `#view` *after* the failing assert
+  never reports, and `undefined` is the honest annotation for it, which falls out of the existing
+  mechanism at no cost.
+
+---
+
 ## Not yet: `#view-step-N` and `undefined`
 
 `#view` shows a value once. A value inside a loop is not one value, it is one per
@@ -216,13 +250,18 @@ everything after the colon.
 
 ```suru
 let total i64: 0
-loop item in items {
+while more {
   total: total + item
   #view-step-1 total: 3
   #view-step-2 total: 7
   #view-step-3 total: undefined      // the line was only reached twice
 }
 ```
+
+> **The loop it waits on now exists.** `while`, `break` and `continue` landed, and a `#view` in a
+> loop body annotates the **last** pass — which is the only thing it can do without a counter,
+> and is exactly the gap `#view-step-N` fills. Nothing below waits on the language any more; what
+> is left is the open questions at the end of this section, and building it.
 
 Counting hits rather than iterations is what makes the directive local. It needs no notion
 of "the enclosing loop", so it behaves identically inside a nested loop, inside a branch
@@ -279,11 +318,11 @@ Rules:
   counting it as a pass would make an under-mocked test silently green, which is the one
   outcome worse than a red one.
 
-**This part is designed, not built.** It waits on loops — there is no loop for `-step-N` to
-count — and on functions, since no parameter can go unmocked without one. The open questions:
+**This part is designed, not built.** `#view-step-N` no longer waits on anything: `while` landed
+and there is a loop for it to count. `undefined` *as a value* still waits on functions, since no
+parameter can go unmocked without one. The open questions:
 
-- **1-based counting.** Chosen for reading, against the compiler's own 0-based directive
-  ids. It has to be documented loudly or it will be guessed wrong.
+
 - **Where does the counter live?** One `alloca` per `#view-step-N` directive, next to the
   ones bindings already get, incremented and compared on every hit. That is the obvious
   shape and it is test-mode-only code, so its cost is not a concern; what needs deciding is

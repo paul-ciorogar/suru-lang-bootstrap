@@ -108,4 +108,58 @@ public class TestModeTests
         Assert.Contains("let area i64: width * height\n", run.Source);
         Assert.Contains("printLn(area)\n", run.Source);
     }
+
+    [Fact]
+    public void AViewInALoopShowsTheLastHit()
+    {
+        // The loop runs four times and the line holds one value: the one it ended on.
+        var source = _fixtures.GetTestRun("directives-in-loop").Source;
+
+        Assert.Contains("  #view total: 10\n", source);
+    }
+
+    [Fact]
+    public void AnAssertInALoopIsStickyAndKeepsTheValueThatFailed()
+    {
+        // It failed on the first pass, held on the second, and failed again on the third and
+        // fourth. Last-hit-wins would have been honest only by accident; what it must not do
+        // is let a pass erase a failure.
+        var source = _fixtures.GetTestRun("directives-in-loop").Source;
+
+        Assert.Contains("  #assert(i, 2): fail, got 1\n", source);
+        Assert.Contains("  #assert(i < 5, true): pass\n", source);
+    }
+
+    [Fact]
+    public void ADirectiveInALoopIsCountedOnceHoweverOftenItReports()
+    {
+        // The whole reason the tallies are keyed by directive: counting frames would make this
+        // 4 passed, 3 failed and 5 views, and would print the same diagnostic three times.
+        var result = _fixtures.GetTestRun("directives-in-loop").Result;
+
+        Assert.Equal(1, result.Passed);
+        Assert.Equal(1, result.Failed);
+        Assert.Equal(2, result.Views);
+        Assert.Single(result.Failures);
+    }
+
+    [Fact]
+    public void WritesUndefinedForADirectiveInALoopThatNeverRuns()
+    {
+        // The same answer an untaken branch gets, from the same mechanism: no frame arrived,
+        // and the run finished, so the line was compiled and never reached.
+        var run = _fixtures.GetTestRun("directives-in-loop");
+
+        Assert.Contains("  #view total: undefined\n", run.Source);
+        Assert.Contains("  #assert(total, 10): undefined\n", run.Source);
+        Assert.Equal(2, run.Result.Undefined);
+    }
+
+    [Fact]
+    public void AnnotatingALoopsDirectivesIsIdempotent()
+    {
+        var run = _fixtures.GetTestRun("directives-in-loop");
+
+        Assert.Equal(run.Source, run.SourceAfterRerun);
+    }
 }

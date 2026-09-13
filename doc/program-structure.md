@@ -124,5 +124,5 @@ error: hello.suru(1,12): unexpected character '@'
 
 ## Not yet supported
 
-User-defined functions, loops, imports, and multi-file programs. Each will get
+User-defined functions, imports, and multi-file programs. Each will get
 its own page here when it lands.

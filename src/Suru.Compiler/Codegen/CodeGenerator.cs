@@ -55,6 +55,17 @@ public sealed class CodeGenerator
     /// </summary>
     private readonly ScopeStack<(LLVMValueRef Slot, LLVMTypeRef Type)> _scopes = new();
 
+    /// <summary>
+    /// Where a <c>break</c> and a <c>continue</c> go, innermost loop on top. A stack rather than
+    /// a field because loops nest, and neither statement takes a label: the innermost enclosing
+    /// loop is the only one either can name.
+    /// </summary>
+    // TODO(scope-kinds): delete this stack. The pair becomes the loop scope's own payload in
+    // '_scopes' — the second type parameter the design note on 'ScopeStack' describes — so this
+    // stage stops keeping a second copy of a nesting it is already tracking, and the search that
+    // finds a 'break' its target is the same walk that finds an identifier its slot.
+    private readonly Stack<(LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break)> _loops = new();
+
     private CodeGenerator(Module module, BuildMode mode)
     {
         _module = module;
@@ -108,13 +119,16 @@ public sealed class CodeGenerator
         if (_mode == BuildMode.Test)
             WriteFrame(Frame.RunStarted, ("run", "%d", Int32(0)));
 
-        foreach (var statement in _module.Statements)
-            EmitStatement(statement);
+        EmitStatements(_module.Statements);
 
         // Emitted in whichever block the builder ended in — after a trailing 'if' that is
-        // 'if.end', the one block on the path that reaches the return. That is the point of
-        // it: its absence is how the driver tells a run that died from a run that simply
-        // never reached a directive.
+        // 'if.end', after a trailing 'while' that is 'while.end', the one block on the path
+        // that reaches the return. That is the point of it: its absence is how the driver
+        // tells a run that died from a run that simply never reached a directive.
+        //
+        // Unguarded, unlike the branches inside a construct: only 'break' and 'continue' can
+        // leave a block terminated, and semantic analysis has already rejected either one
+        // outside a loop. So the top level is never the terminated block.
         if (_mode == BuildMode.Test)
             WriteFrame(Frame.RunFinished, ("run", "%d", Int32(0)), ("exit", "%d", Int32(MainExitCode)));
 
@@ -145,13 +159,24 @@ public sealed class CodeGenerator
             case BlockStatement block:
                 // Still purely lexical: no branch and no new basic block, only a scope. An
                 // arm gets its blocks from the 'if', not from the block that is its body.
+                // TODO(scope-kinds): this case handles only the blocks that are not a loop body,
+                // because a loop scope's payload is the two basic blocks and those do not exist
+                // until 'EmitWhile' has made them. See the TODO there.
                 _scopes.EnterNew();
-                foreach (var inner in block.Statements)
-                    EmitStatement(inner);
+                EmitStatements(block.Statements);
                 _scopes.Exit();
                 break;
             case IfStatement branch:
                 EmitIf(branch);
+                break;
+            case WhileStatement loop:
+                EmitWhile(loop);
+                break;
+            case BreakStatement:
+                _builder.BuildBr(Loop("break").Break);
+                break;
+            case ContinueStatement:
+                _builder.BuildBr(Loop("continue").Continue);
                 break;
             case MockDirective mock:
                 // Emitted exactly as the assignment it is; only reaching codegen at all is
@@ -208,10 +233,13 @@ public sealed class CodeGenerator
     /// both shapes and is named for continuing rather than for merging.
     /// </para>
     /// <para>
-    /// Both arms are branched to the end unconditionally, because nothing can leave one early:
-    /// there is no <c>return</c>, no <c>break</c> and no diverging call. So <c>if.end</c>
-    /// always has a predecessor and neither arm can already be terminated. That is the
-    /// assumption to revisit the day a statement can leave a block.
+    /// An arm <i>can</i> leave early — a <c>break</c> or <c>continue</c> inside one terminates
+    /// its block — so the branch to the end goes through <see cref="BranchTo"/> rather than
+    /// being built unconditionally. When both arms leave, <c>if.end</c> has no predecessors at
+    /// all, which is valid IR here only because there are no phi nodes to leave without an
+    /// incoming edge: every variable is an alloca in <c>entry</c>, which dominates the whole
+    /// function. That is the assumption to revisit the day an expression needs a phi, as a
+    /// short-circuiting <c>and</c> would.
     /// </para>
     /// </summary>
     private void EmitIf(IfStatement branch)
@@ -235,7 +263,7 @@ public sealed class CodeGenerator
 
         _builder.PositionAtEnd(thenBlock);
         EmitStatement(branch.Then);
-        _builder.BuildBr(endBlock);
+        BranchTo(endBlock);
 
         // 'else if' arrives here as an IfStatement and needs no case of its own: it appends
         // its own blocks, leaves the builder at its own end, and the branch below terminates
@@ -244,11 +272,118 @@ public sealed class CodeGenerator
         {
             _builder.PositionAtEnd(elseBlock);
             EmitStatement(otherwise);
-            _builder.BuildBr(endBlock);
+            BranchTo(endBlock);
         }
 
         _builder.PositionAtEnd(endBlock);
     }
+
+    /// <summary>
+    /// <c>while &lt;condition&gt; { ... }</c>: a header that tests, a body that branches back to
+    /// it, and an end to continue at. The body is emitted as the ordinary block it is, so its
+    /// scope — and a shadowing binding's own slot — costs nothing here.
+    /// <para>
+    /// <b>The condition is emitted inside <c>while.cond</c>, not before the loop.</b> Not
+    /// because an expression could have a side effect (none can, which is what
+    /// <see cref="EmitBinary"/> leans on) but because <c>i &lt; 10</c> compiles to a load from
+    /// <c>i</c>'s slot. Emitted once ahead of the branch it would be a snapshot taken at loop
+    /// entry, and the loop would never end.
+    /// </para>
+    /// <para>
+    /// The enclosing function is read <i>before</i> the condition, where <see cref="EmitIf"/>
+    /// reads it after — the condition needs a block to live in, so there is no choice. Both are
+    /// right: what emission can move is the insert <i>block</i>, never the enclosing function.
+    /// </para>
+    /// <para>
+    /// This is where hoisting allocas to <c>entry</c> stops being tidiness and becomes a
+    /// requirement: a <c>let</c> in the body allocates one slot however many times the loop
+    /// runs, and the store is what repeats.
+    /// </para>
+    /// </summary>
+    private void EmitWhile(WhileStatement loop)
+    {
+        var function = _builder.InsertBlock.Parent;
+
+        // Appended in source order so the IR reads in it, the same as an 'if'.
+        var condBlock = function.AppendBasicBlock("while.cond");
+        var bodyBlock = function.AppendBasicBlock("while.body");
+        var endBlock = function.AppendBasicBlock("while.end");
+
+        BranchTo(condBlock);
+
+        _builder.PositionAtEnd(condBlock);
+        var condition = EmitExpr(loop.Condition);
+
+        // Built wherever emitting the condition ended up, which is 'while.cond' today and need
+        // not be the day a condition takes blocks of its own.
+        _builder.BuildCondBr(condition, bodyBlock, endBlock);
+
+        // TODO(scope-kinds): these four lines become the loop scope itself — 'EnterNew' here
+        // carrying '(condBlock, endBlock)' as its payload, 'Exit' where the pop is, and
+        // 'EmitStatements(loop.Body.Statements)' in place of the 'EmitStatement' between them.
+        // 'Body' is statically a 'BlockStatement', so entering its scope here rather than letting
+        // the generic case do it is type-safe, and it buys the invariant that whoever enters a
+        // scope supplies its data: no half-initialised scope and no pending field for the exits.
+        // The three lines of duplication with the block case are the price of that invariant.
+
+        // 'condBlock' is the header as created, not a re-read of the insert block: a 'continue'
+        // has to re-test the whole condition, so it targets where the condition starts.
+        _loops.Push((Continue: condBlock, Break: endBlock));
+
+        _builder.PositionAtEnd(bodyBlock);
+        EmitStatement(loop.Body);
+        BranchTo(condBlock);
+
+        _loops.Pop();
+
+        _builder.PositionAtEnd(endBlock);
+    }
+
+    /// <summary>
+    /// Emits statements in order, stopping at the first one that leaves the block terminated.
+    /// What follows a <c>break</c> is unreachable, and appending it after the terminator is what
+    /// would make the module fail verification. It is still <i>analyzed</i> — semantic analysis
+    /// walks every statement — so unreachable code still reports its own errors; it is only
+    /// never emitted.
+    /// </summary>
+    private void EmitStatements(IReadOnlyList<Statement> statements)
+    {
+        foreach (var statement in statements)
+        {
+            if (Terminated)
+                return;
+            EmitStatement(statement);
+        }
+    }
+
+    /// <summary>
+    /// Branches to <paramref name="target"/> unless the current block already ends in a
+    /// terminator — which it does when the statement just emitted was a <c>break</c> or a
+    /// <c>continue</c>. A second terminator in one block is invalid IR, and the branch it
+    /// replaces would be unreachable anyway.
+    /// </summary>
+    private void BranchTo(LLVMBasicBlockRef target)
+    {
+        if (!Terminated)
+            _builder.BuildBr(target);
+    }
+
+    /// <summary>Whether the block the builder sits in already ends in a terminator.</summary>
+    private bool Terminated => _builder.InsertBlock.Terminator.Handle != IntPtr.Zero;
+
+    /// <summary>
+    /// The innermost enclosing loop's two exits. An empty stack means semantic analysis let a
+    /// <c>break</c> through from outside a loop, which is a compiler bug rather than a program
+    /// error — reported as one, the way <see cref="Variable"/> reports an unresolved name.
+    /// </summary>
+    // TODO(scope-kinds): becomes the scope stack's outward search for the nearest Loop scope, and
+    // then reads as the exact counterpart of 'Variable' one method down — the same walk over the
+    // same structure, one resolving a 'break' and the other a name. The throw stays: it is still
+    // a compiler bug, only now it means the search found nothing.
+    private (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break) Loop(string keyword) =>
+        _loops.Count > 0
+            ? _loops.Peek()
+            : throw new CodegenException($"'{keyword}' outside a loop reached codegen");
 
     /// <summary>
     /// The slot goes in the entry block and the store stays where the binding sits: a frame
@@ -392,6 +527,13 @@ public sealed class CodeGenerator
             ("outcome", "%s", outcome),
             ("actual", format, actualArgument),
             ("expected", format, expectedArgument));
+
+        // TODO: fail-fast. A failing assertion should stop the run here rather than fall
+        // through — see "Not yet supported" in doc/testing.md. That means branching on
+        // 'equal' after the frame is written: the failing edge sends 'run-finished' and
+        // returns from main, so a loop whose assertion fails on its first pass reports
+        // once and ends. The sticky rule TestRun applies agrees with it already, since
+        // under fail-fast the first failure is the only one.
     }
 
     /// <summary>

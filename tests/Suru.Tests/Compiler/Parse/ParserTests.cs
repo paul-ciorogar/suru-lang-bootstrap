@@ -576,6 +576,122 @@ public class ParserTests
             AstPrinter.Print(Source.Parse("if a {\n}\nelse {\n}")));
     }
 
+    [Fact]
+    public void ParsesAWhile()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              WhileStatement (1,1)
+                BinaryExpression (1,7) <
+                  IdentifierExpression (1,7) i
+                  IntLiteral (1,11) 10
+                BlockStatement (1,14)
+                  ExpressionStatement (1,16)
+                    CallExpression (1,16) printLn
+                      IdentifierExpression (1,24) i
+
+            """,
+            AstPrinter.Print(Source.Parse("while i < 10 { printLn(i) }")));
+    }
+
+    [Fact]
+    public void ParsesBreakAndContinueAsLeaves()
+    {
+        // Neither takes an operand, and which loop it leaves is nesting — which the tree
+        // already shows, so there is nothing else to print.
+        Assert.Equal(
+            """
+            Module test.suru
+              WhileStatement (1,1)
+                BoolLiteral (1,7) true
+                BlockStatement (1,12)
+                  ContinueStatement (1,14)
+                  BreakStatement (1,23)
+
+            """,
+            AstPrinter.Print(Source.Parse("while true { continue break }")));
+    }
+
+    [Fact]
+    public void ParsesABreakInsideAnIfInsideAWhile()
+    {
+        // An 'if' is not a loop, so the 'break' belongs to the 'while' two levels out. The
+        // tree is the only thing that says so.
+        Assert.Equal(
+            """
+            Module test.suru
+              WhileStatement (1,1)
+                BoolLiteral (1,7) true
+                BlockStatement (1,12)
+                  IfStatement (1,14)
+                    IdentifierExpression (1,17) x
+                    BlockStatement (1,19)
+                      BreakStatement (1,21)
+
+            """,
+            AstPrinter.Print(Source.Parse("while true { if x { break } }")));
+    }
+
+    [Fact]
+    public void ParsesNestedWhiles()
+    {
+        Assert.Equal(
+            """
+            Module test.suru
+              WhileStatement (1,1)
+                IdentifierExpression (1,7) a
+                BlockStatement (1,9)
+                  WhileStatement (1,11)
+                    IdentifierExpression (1,17) b
+                    BlockStatement (1,19)
+                      BreakStatement (1,21)
+
+            """,
+            AstPrinter.Print(Source.Parse("while a { while b { break } }")));
+    }
+
+    [Fact]
+    public void AWhileBodyMustBeABlock()
+    {
+        var exception = Assert.Throws<ParseException>(() => Source.Parse("while true printLn(1)"));
+
+        Assert.Equal("test.suru(1,12): expected LeftBrace, got Identifier", exception.Message);
+    }
+
+    [Fact]
+    public void AWhileConditionContinuesOntoTheNextLineOnAnOperator()
+    {
+        // The same rule an 'if' condition follows: the condition is an ordinary expression.
+        Assert.Equal(
+            """
+            Module test.suru
+              WhileStatement (1,1)
+                BinaryExpression (1,7) >
+                  IdentifierExpression (1,7) x
+                  IntLiteral (2,3) 0
+                BlockStatement (2,5)
+
+            """,
+            AstPrinter.Print(Source.Parse("while x\n> 0 {\n}")));
+    }
+
+    [Fact]
+    public void BreakAndContinueParseOutsideALoopAndAreRejectedLater()
+    {
+        // The parser has no notion of being inside a loop; whether there is one to leave is
+        // semantic analysis's question, which is what lets it report every such statement in
+        // one run rather than throwing on the first.
+        Assert.Equal(
+            """
+            Module test.suru
+              BreakStatement (1,1)
+              ContinueStatement (2,1)
+
+            """,
+            AstPrinter.Print(Source.Parse("break\ncontinue")));
+    }
+
     private static BinaryExpression ParseSingleBinary(string text) =>
         Assert.IsType<BinaryExpression>(Source.SingleExpression(Source.Parse(text)));
 

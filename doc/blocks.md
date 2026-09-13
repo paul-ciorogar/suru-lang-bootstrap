@@ -149,5 +149,5 @@ error: hello.suru(3,1): expected RightBrace, got Eof
 ## Not yet supported
 
 A block is a statement, not an expression — it produces no value, so it cannot appear
-where one is expected. The only thing that takes a block as a body is
-[`if`](control-flow.md); loops and user-defined functions are still to come.
+where one is expected. The things that take a block as a body are [`if`](control-flow.md)
+and [`while`](control-flow.md); user-defined functions are still to come.

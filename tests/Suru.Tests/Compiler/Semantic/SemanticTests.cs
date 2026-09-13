@@ -327,6 +327,75 @@ public class SemanticTests
             error => Assert.Equal("test.suru(4,1): unknown function 'bar'", error));
     }
 
+    [Theory]
+    [InlineData("while 1 { }", "i64")]
+    [InlineData("while 1.5 { }", "f64")]
+    [InlineData("while printLn(1) { }", "void")]
+    public void ReportsANonBooleanLoopCondition(string text, string typeName)
+    {
+        // The same rule an 'if' condition follows, down to sharing the check — only the verb
+        // differs, because a loop does not branch.
+        Assert.Equal(
+            $"test.suru(1,7): 'while' cannot loop on a value of type '{typeName}'; expected 'bool'",
+            Assert.Single(Source.Analyze(text)));
+    }
+
+    [Fact]
+    public void SaysNothingMoreWhenTheLoopConditionAlreadyFailed()
+    {
+        Assert.Equal("test.suru(1,7): unknown variable 'missing'",
+            Assert.Single(Source.Analyze("while missing { }")));
+    }
+
+    [Theory]
+    [InlineData("break", "test.suru(1,1): 'break' can only appear inside a loop")]
+    [InlineData("continue", "test.suru(1,1): 'continue' can only appear inside a loop")]
+    [InlineData("{ break }", "test.suru(1,3): 'break' can only appear inside a loop")]
+    [InlineData("if true { continue }", "test.suru(1,11): 'continue' can only appear inside a loop")]
+    public void ReportsBreakAndContinueOutsideALoop(string text, string expected)
+    {
+        // A block is not a loop and neither is an 'if', so neither gives one somewhere to go.
+        Assert.Equal(expected, Assert.Single(Source.Analyze(text)));
+    }
+
+    [Theory]
+    [InlineData("while true { break }")]
+    [InlineData("while true { continue }")]
+    [InlineData("while true { if true { break } }")]
+    [InlineData("while true { { continue } }")]
+    [InlineData("while true { while true { break } break }")]
+    public void AcceptsBreakAndContinueInsideALoop(string text)
+    {
+        // An 'if' or a block between the statement and its loop changes nothing: the loop is
+        // picked by nesting, and nothing but a loop interrupts that.
+        Assert.Empty(Source.Analyze(text));
+    }
+
+    [Fact]
+    public void ALoopBodyIsItsOwnScope()
+    {
+        Assert.Equal("test.suru(4,9): unknown variable 'x'",
+            Assert.Single(Source.Analyze("while true {\nlet x i64: 1\n}\nprintLn(x)")));
+    }
+
+    [Fact]
+    public void AnalyzesUnreachableStatementsAfterABreak()
+    {
+        // Codegen drops what follows a 'break', but analysis does not: a statement that would
+        // never run is still a statement, and being unreachable is no reason to stop reporting
+        // that it does not typecheck.
+        Assert.Equal("test.suru(3,1): unknown function 'foo'",
+            Assert.Single(Source.Analyze("while true {\nbreak\nfoo()\n}")));
+    }
+
+    [Fact]
+    public void ANestedLoopRestoresTheOuterOneOnTheWayOut()
+    {
+        // The depth is a count, not a flag: the 'break' after the inner loop's '}' is still
+        // inside the outer one.
+        Assert.Empty(Source.Analyze("while true { while true { } break }"));
+    }
+
     [Fact]
     public void ErrorsAreReportedWithTheSourcePathAndPosition()
     {

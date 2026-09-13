@@ -41,6 +41,12 @@ public sealed class Parser
             return ParseLet();
         if (token.Kind == TokenKind.If)
             return ParseIf();
+        if (token.Kind == TokenKind.While)
+            return ParseWhile();
+        if (token.Kind == TokenKind.Break)
+            return new BreakStatement(PositionOf(Expect(TokenKind.Break)));
+        if (token.Kind == TokenKind.Continue)
+            return new ContinueStatement(PositionOf(Expect(TokenKind.Continue)));
         // An identifier starts an assignment only when a ':' follows; otherwise it
         // is the start of an expression — a call, or a use of the name.
         if (token.Kind == TokenKind.Identifier && _tokens.Peek().Kind == TokenKind.Colon)
@@ -53,6 +59,10 @@ public sealed class Parser
     /// <c>Eof</c> too, so an unterminated block ends as 'expected RightBrace, got Eof'
     /// rather than spinning.
     /// </summary>
+    // TODO(scope-kinds): take the block's kind as a parameter and pass it to 'BlockStatement',
+    // defaulting to Plain. Only 'ParseWhile' passes anything else — the parser is the one stage
+    // that knows why it is building a block, which is why the kind is decided here rather than
+    // re-derived downstream. See the design note on 'ScopeStack'.
     private BlockStatement ParseBlock()
     {
         var open = Expect(TokenKind.LeftBrace);
@@ -93,6 +103,28 @@ public sealed class Parser
         }
 
         return new IfStatement(PositionOf(keyword), condition, then, otherwise);
+    }
+
+    /// <summary>
+    /// <c>while &lt;condition&gt; { ... }</c>. Structurally an <see cref="ParseIf"/> with no
+    /// second arm, and it inherits both of that method's reasons: the body is always braced, so
+    /// there is no single-statement form, and the condition needs no terminator because
+    /// <c>{</c> is not a binary operator and the fold in <see cref="ParseExpression"/> stops at
+    /// it on its own.
+    /// <para>
+    /// Only <see cref="Tokens.Current"/> is consulted, never <see cref="Tokens.Peek"/>, for the
+    /// reason <see cref="ParseIf"/> gives: a directive inside the body relies on
+    /// <see cref="Tokens.DiscardRestOfLine"/>, which refuses to run with anything buffered.
+    /// </para>
+    /// </summary>
+    private WhileStatement ParseWhile()
+    {
+        var keyword = Expect(TokenKind.While);
+        var condition = ParseExpression();
+        // TODO(scope-kinds): the one call that asks for a kind other than Plain — this block is
+        // the loop's scope, which is what a 'break' inside it searches outward for.
+        var body = ParseBlock();
+        return new WhileStatement(PositionOf(keyword), condition, body);
     }
 
     private Statement ParseLet()

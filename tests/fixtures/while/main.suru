@@ -1,0 +1,73 @@
+// The first program that runs a block more than once, and the first one that can leave a
+// block early. Every case prints the values it actually reached, in order: a missing number
+// is an iteration that was skipped, an extra one is an edge that went to the wrong block, and
+// a run that never ends is a condition that was tested once instead of every time round.
+
+// Counting, with a 'continue' that skips one value and a 'break' that ends the loop before
+// its condition would have.
+let i i64: 0
+while i < 10 {
+  i: i + 1
+  if i = 3 { continue }               // 3 is never printed
+  if i = 6 { break }                  // 6 is never printed, and 7..10 never happen
+  printLn(i)
+}
+printLn(i)                            // 6 — the counter outlives the loop it was stepped in
+
+// Nested loops. The inner 'break' leaves only the inner loop, so the outer one keeps going —
+// which is the whole of what "innermost enclosing loop" means, and the only thing the loop
+// stack can get wrong.
+let row i64: 0
+while row < 3 {
+  row: row + 1
+  // One slot, however many times the outer loop runs: the alloca is hoisted to the frame and
+  // it is this store that repeats.
+  let col i64: 0
+  while col < 5 {
+    col: col + 1
+    if col > row { break }
+    printLn(col)
+  }
+  printLn(row)
+}
+
+// A condition false on arrival runs the body zero times.
+let never i64: 0
+while never > 0 {
+  printLn(0)
+  never: never + 1
+}
+printLn(never)                        // 0 — the body never ran
+
+// A 'bool' binding is a condition like any other, and the body can end the loop by assigning
+// it rather than by counting.
+let going bool: true
+let steps i64: 0
+while going {
+  steps: steps + 1
+  if steps = 4 { going: false }
+}
+printLn(steps)
+
+// The condition follows the ordinary line-continuation rule, exactly as an 'if' does.
+let left i64: 2
+while left
+  > 0 {
+  left: left - 1
+}
+printLn(left)
+
+// An empty body is legal: this one ends on its first test and emits nothing but the branch.
+while false { }
+
+// A loop inside a branch inside a loop — 'break' and 'continue' see through the 'if' to the
+// loop, since an 'if' is not one.
+let n i64: 0
+while n < 4 {
+  n: n + 1
+  if n > 1 {
+    if n = 3 { continue }
+    printLn(n)
+  }
+}
+printLn(n)

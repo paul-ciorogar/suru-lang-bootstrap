@@ -1,0 +1,31 @@
+// A loop is the first thing that can make one directive report more than once, which is what
+// the tallies here are about: every directive below counts once, however many frames it sent.
+
+let i i64: 0
+let total i64: 0
+
+while i < 4 {
+  i: i + 1
+  total: total + i
+
+  // Last hit wins: a '#view' shows a value, and after four passes that is the fourth.
+  #view total: 10
+
+  // Held every time round, and counted once rather than four times.
+  #assert(i < 5, true): pass
+
+  // Failed on the first pass and held on the second. Sticky: a directive that ever failed
+  // reads 'fail', keeping the value from the pass that failed, and counts as one failure.
+  #assert(i, 2): fail, got 1
+}
+
+#view i: 4
+
+// A loop that never runs leaves what is inside it undefined, exactly as an untaken branch does
+// — the mechanism is the absence of a frame and knows nothing about either.
+while false {
+  #view total: undefined
+  #assert(total, 10): undefined
+}
+
+printLn(total)

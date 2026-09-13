@@ -30,6 +30,22 @@ public sealed class SemanticAnalyzer
     /// <summary>The bindings in scope. A block enters a scope and exits it again.</summary>
     private readonly ScopeStack<SuruType> _scopes = new();
 
+    /// <summary>
+    /// How many loops enclose the statement being analyzed, which is all it takes to tell a
+    /// <c>break</c> that has somewhere to go from one that does not. A count rather than a flag,
+    /// so a loop inside a loop restores the outer one on the way out.
+    /// <para>
+    /// The day user-defined functions exist this must be saved and restored across a function
+    /// body: a <c>break</c> written in a function called from inside a loop does not belong to
+    /// that loop, and a plain field would say it did.
+    /// </para>
+    /// </summary>
+    // TODO(scope-kinds): delete this field. A second structure tracking a nesting the scope
+    // stack is already tracking is the problem — and the paragraph above is the symptom: the
+    // function-body rule it warns about is something a reader must remember, where an outward
+    // search that stops at a function scope cannot get it wrong. See the note on 'ScopeStack'.
+    private int _loopDepth;
+
     private SemanticAnalyzer(Module module)
     {
         _module = module;
@@ -67,6 +83,8 @@ public sealed class SemanticAnalyzer
                 break;
             case BlockStatement block:
                 // Errors are collected rather than thrown, so the exit always runs.
+                // TODO(scope-kinds): '_scopes.EnterNew(block.Kind)'. This case stays the only
+                // place semantics enters a scope, since the kind rides in on the node.
                 _scopes.EnterNew();
                 foreach (var inner in block.Statements)
                     AnalyzeStatement(inner);
@@ -74,6 +92,15 @@ public sealed class SemanticAnalyzer
                 break;
             case IfStatement branch:
                 AnalyzeIf(branch);
+                break;
+            case WhileStatement loop:
+                AnalyzeWhile(loop);
+                break;
+            case BreakStatement:
+                RequireInLoop(statement.Position, "break");
+                break;
+            case ContinueStatement:
+                RequireInLoop(statement.Position, "continue");
                 break;
             case MockDirective mock:
                 // A mock is an assignment, down to the diagnostics it produces.
@@ -92,22 +119,65 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// The condition must already be a <c>bool</c> — nothing converts implicitly, so a number is
-    /// not a truth value. Each arm is analyzed as the ordinary statement it is, which is where
-    /// its scope comes from and why <c>else if</c> needs nothing of its own here.
+    /// Each arm is analyzed as the ordinary statement it is, which is where its scope comes from
+    /// and why <c>else if</c> needs nothing of its own here.
     /// </summary>
     private void AnalyzeIf(IfStatement branch)
     {
-        var condition = AnalyzeExpression(branch.Condition);
-
-        // A null type means the condition already reported its own error.
-        if (condition is not null && condition != SuruType.Bool)
-            Error(branch.Condition.Position,
-                $"'if' cannot branch on a value of type '{condition}'; expected '{SuruType.Bool}'");
+        RequireBoolCondition("if", "branch on", branch.Condition);
 
         AnalyzeStatement(branch.Then);
         if (branch.Else is not null)
             AnalyzeStatement(branch.Else);
+    }
+
+    /// <summary>
+    /// The body is analyzed as the ordinary block it is, so its scope costs nothing here — the
+    /// only thing a loop adds is that a <c>break</c> or <c>continue</c> inside it now has
+    /// somewhere to go.
+    /// </summary>
+    private void AnalyzeWhile(WhileStatement loop)
+    {
+        RequireBoolCondition("while", "loop on", loop.Condition);
+
+        // TODO(scope-kinds): the two bracketing lines go, leaving just the 'AnalyzeStatement'.
+        // The body block already carries the loop kind by then, so analyzing a loop becomes
+        // nothing but checking its condition — which is what the summary above already claims.
+        //
+        // Errors are collected rather than thrown, so the decrement always runs — the same
+        // reason the block case needs no try/finally around its scope.
+        _loopDepth++;
+        AnalyzeStatement(loop.Body);
+        _loopDepth--;
+    }
+
+    /// <summary>
+    /// A condition must already be a <c>bool</c> — nothing converts implicitly, so a number is
+    /// not a truth value. Shared by <c>if</c> and <c>while</c> so the two cannot drift apart in
+    /// what they accept, which is the reason <see cref="AnalyzeStore"/> is shared too. Only
+    /// <paramref name="verb"/> differs, because "branch on" is wrong for a loop.
+    /// </summary>
+    private void RequireBoolCondition(string keyword, string verb, Expression condition)
+    {
+        var type = AnalyzeExpression(condition);
+
+        // A null type means the condition already reported its own error.
+        if (type is not null && type != SuruType.Bool)
+            Error(condition.Position,
+                $"'{keyword}' cannot {verb} a value of type '{type}'; expected '{SuruType.Bool}'");
+    }
+
+    /// <summary>
+    /// <c>break</c> and <c>continue</c> pick their loop by nesting, so being inside one at all is
+    /// the whole of what there is to check.
+    /// </summary>
+    // TODO(scope-kinds): the condition becomes the scope stack's outward search for an enclosing
+    // Loop scope. The diagnostic and everything asserting on it stay exactly as they are — this
+    // is a change of mechanism, not of behaviour, and the tests should not move.
+    private void RequireInLoop(SourcePosition position, string keyword)
+    {
+        if (_loopDepth == 0)
+            Error(position, $"'{keyword}' can only appear inside a loop");
     }
 
     private void AnalyzeLet(LetStatement let)
