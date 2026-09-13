@@ -52,19 +52,17 @@ public sealed class CodeGenerator
     /// The stack slot behind each binding, with the type to load it back through. Scoped
     /// the same way the analyzer scopes types, so a shadowing binding gets its own slot
     /// and the outer one comes back when the block ends.
+    /// <para>
+    /// A loop scope carries where a <c>break</c> and a <c>continue</c> go as its payload, so this
+    /// stage keeps no second copy of a nesting it is already tracking: the search that finds a
+    /// <c>break</c> its target is the same walk that finds an identifier its slot. Neither
+    /// statement takes a label, so the innermost enclosing loop is the only one either can name —
+    /// which is what the innermost-first walk already means.
+    /// </para>
     /// </summary>
-    private readonly ScopeStack<(LLVMValueRef Slot, LLVMTypeRef Type)> _scopes = new();
-
-    /// <summary>
-    /// Where a <c>break</c> and a <c>continue</c> go, innermost loop on top. A stack rather than
-    /// a field because loops nest, and neither statement takes a label: the innermost enclosing
-    /// loop is the only one either can name.
-    /// </summary>
-    // TODO(scope-kinds): delete this stack. The pair becomes the loop scope's own payload in
-    // '_scopes' — the second type parameter the design note on 'ScopeStack' describes — so this
-    // stage stops keeping a second copy of a nesting it is already tracking, and the search that
-    // finds a 'break' its target is the same walk that finds an identifier its slot.
-    private readonly Stack<(LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break)> _loops = new();
+    private readonly ScopeStack<
+        (LLVMValueRef Slot, LLVMTypeRef Type),
+        (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break)> _scopes = new();
 
     private CodeGenerator(Module module, BuildMode mode)
     {
@@ -159,10 +157,11 @@ public sealed class CodeGenerator
             case BlockStatement block:
                 // Still purely lexical: no branch and no new basic block, only a scope. An
                 // arm gets its blocks from the 'if', not from the block that is its body.
-                // TODO(scope-kinds): this case handles only the blocks that are not a loop body,
-                // because a loop scope's payload is the two basic blocks and those do not exist
-                // until 'EmitWhile' has made them. See the TODO there.
-                _scopes.EnterNew();
+                //
+                // This case handles every block that is not a loop body, because a loop scope's
+                // payload is the two basic blocks and those do not exist until 'EmitWhile' has
+                // made them — so that one enters its own scope. See the note there.
+                _scopes.EnterNew(block.Kind);
                 EmitStatements(block.Statements);
                 _scopes.Exit();
                 break;
@@ -318,23 +317,21 @@ public sealed class CodeGenerator
         // not be the day a condition takes blocks of its own.
         _builder.BuildCondBr(condition, bodyBlock, endBlock);
 
-        // TODO(scope-kinds): these four lines become the loop scope itself — 'EnterNew' here
-        // carrying '(condBlock, endBlock)' as its payload, 'Exit' where the pop is, and
-        // 'EmitStatements(loop.Body.Statements)' in place of the 'EmitStatement' between them.
-        // 'Body' is statically a 'BlockStatement', so entering its scope here rather than letting
-        // the generic case do it is type-safe, and it buys the invariant that whoever enters a
-        // scope supplies its data: no half-initialised scope and no pending field for the exits.
-        // The three lines of duplication with the block case are the price of that invariant.
-
+        // The body's scope is entered here rather than by the generic block case, because its
+        // payload is the two basic blocks and those did not exist until a moment ago. 'Body' is
+        // statically a 'BlockStatement', so doing it here is type-safe, and it buys the invariant
+        // that whoever enters a scope supplies its data: no half-initialised scope and no pending
+        // field for the exit. The three lines of duplication with the block case are the price.
+        //
         // 'condBlock' is the header as created, not a re-read of the insert block: a 'continue'
         // has to re-test the whole condition, so it targets where the condition starts.
-        _loops.Push((Continue: condBlock, Break: endBlock));
+        _scopes.EnterNew(loop.Body.Kind, (Continue: condBlock, Break: endBlock));
 
         _builder.PositionAtEnd(bodyBlock);
-        EmitStatement(loop.Body);
+        EmitStatements(loop.Body.Statements);
         BranchTo(condBlock);
 
-        _loops.Pop();
+        _scopes.Exit();
 
         _builder.PositionAtEnd(endBlock);
     }
@@ -372,17 +369,14 @@ public sealed class CodeGenerator
     private bool Terminated => _builder.InsertBlock.Terminator.Handle != IntPtr.Zero;
 
     /// <summary>
-    /// The innermost enclosing loop's two exits. An empty stack means semantic analysis let a
-    /// <c>break</c> through from outside a loop, which is a compiler bug rather than a program
-    /// error — reported as one, the way <see cref="Variable"/> reports an unresolved name.
+    /// The innermost enclosing loop's two exits — the exact counterpart of <see cref="Variable"/>
+    /// one method down: the same walk over the same structure, one resolving a <c>break</c> and
+    /// the other a name. Finding nothing means semantic analysis let a <c>break</c> through from
+    /// outside a loop, which is a compiler bug rather than a program error and is reported as one.
     /// </summary>
-    // TODO(scope-kinds): becomes the scope stack's outward search for the nearest Loop scope, and
-    // then reads as the exact counterpart of 'Variable' one method down — the same walk over the
-    // same structure, one resolving a 'break' and the other a name. The throw stays: it is still
-    // a compiler bug, only now it means the search found nothing.
     private (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break) Loop(string keyword) =>
-        _loops.Count > 0
-            ? _loops.Peek()
+        _scopes.TryFindEnclosing(ScopeKind.Loop, out var loop)
+            ? loop
             : throw new CodegenException($"'{keyword}' outside a loop reached codegen");
 
     /// <summary>

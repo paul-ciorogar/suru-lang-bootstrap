@@ -43,11 +43,11 @@ public static class AstPrinter
                 AppendExpression(output, assignment.Value, depth + 1, withTypes);
                 break;
             case BlockStatement block:
-                // TODO(scope-kinds): render the block's kind here once it has one, so the whole
-                // parser test layer asserts on it without a hand-written assertion. Render only
-                // a kind other than Plain — that keeps every existing expected tree unchanged,
-                // and the new detail appears exactly on the blocks the change is about.
-                AppendNode(output, depth, "BlockStatement", block.Position);
+                // Only a kind other than Plain is rendered: the whole parser test layer then
+                // asserts on the kind without a hand-written assertion, and the detail appears
+                // exactly on the blocks it distinguishes rather than on every block there is.
+                AppendNode(output, depth, "BlockStatement", block.Position,
+                    block.Kind == ScopeKind.Plain ? "" : block.Kind.ToString().ToLowerInvariant());
                 foreach (var inner in block.Statements)
                     AppendStatement(output, inner, depth + 1, withTypes);
                 break;

@@ -586,7 +586,7 @@ public class ParserTests
                 BinaryExpression (1,7) <
                   IdentifierExpression (1,7) i
                   IntLiteral (1,11) 10
-                BlockStatement (1,14)
+                BlockStatement (1,14) loop
                   ExpressionStatement (1,16)
                     CallExpression (1,16) printLn
                       IdentifierExpression (1,24) i
@@ -605,7 +605,7 @@ public class ParserTests
             Module test.suru
               WhileStatement (1,1)
                 BoolLiteral (1,7) true
-                BlockStatement (1,12)
+                BlockStatement (1,12) loop
                   ContinueStatement (1,14)
                   BreakStatement (1,23)
 
@@ -623,7 +623,7 @@ public class ParserTests
             Module test.suru
               WhileStatement (1,1)
                 BoolLiteral (1,7) true
-                BlockStatement (1,12)
+                BlockStatement (1,12) loop
                   IfStatement (1,14)
                     IdentifierExpression (1,17) x
                     BlockStatement (1,19)
@@ -641,10 +641,10 @@ public class ParserTests
             Module test.suru
               WhileStatement (1,1)
                 IdentifierExpression (1,7) a
-                BlockStatement (1,9)
+                BlockStatement (1,9) loop
                   WhileStatement (1,11)
                     IdentifierExpression (1,17) b
-                    BlockStatement (1,19)
+                    BlockStatement (1,19) loop
                       BreakStatement (1,21)
 
             """,
@@ -670,7 +670,7 @@ public class ParserTests
                 BinaryExpression (1,7) >
                   IdentifierExpression (1,7) x
                   IntLiteral (2,3) 0
-                BlockStatement (2,5)
+                BlockStatement (2,5) loop
 
             """,
             AstPrinter.Print(Source.Parse("while x\n> 0 {\n}")));

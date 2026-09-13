@@ -32,12 +32,20 @@ public sealed class LetStatement(
 /// <c>{ ... }</c>. A scope: bindings made inside it are visible only until the <c>}</c>,
 /// and one may shadow an outer binding of the same name.
 /// </summary>
-public sealed class BlockStatement(SourcePosition position, IReadOnlyList<Statement> statements)
-    : Statement(position)
+public sealed class BlockStatement(
+    SourcePosition position,
+    IReadOnlyList<Statement> statements,
+    ScopeKind kind = ScopeKind.Plain) : Statement(position)
 {
-    // TODO(scope-kinds): add a 'Kind' here (Plain | Loop, taken as a constructor argument), so
-    // the scope a block enters can say what kind of scope it is. See the design note on
-    // 'ScopeStack', and have 'AstPrinter' render it so the parser tests assert on it for free.
+    /// <summary>
+    /// What kind of scope this block opens. Set by the parser, which is the only stage that knows
+    /// <i>why</i> it is building a block — a loop body and the block that happens to be an
+    /// <c>if</c> arm are the same syntax, and only the parser can still tell them apart. Every
+    /// stage downstream reads it off the node rather than re-deriving it, which is what keeps the
+    /// two of them from drifting.
+    /// </summary>
+    public ScopeKind Kind { get; } = kind;
+
     public IReadOnlyList<Statement> Statements { get; } = statements;
 }
 

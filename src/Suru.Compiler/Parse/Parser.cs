@@ -59,18 +59,18 @@ public sealed class Parser
     /// <c>Eof</c> too, so an unterminated block ends as 'expected RightBrace, got Eof'
     /// rather than spinning.
     /// </summary>
-    // TODO(scope-kinds): take the block's kind as a parameter and pass it to 'BlockStatement',
-    // defaulting to Plain. Only 'ParseWhile' passes anything else — the parser is the one stage
-    // that knows why it is building a block, which is why the kind is decided here rather than
-    // re-derived downstream. See the design note on 'ScopeStack'.
-    private BlockStatement ParseBlock()
+    /// <remarks>
+    /// The kind is decided here rather than re-derived downstream: the parser is the one stage
+    /// that knows why it is building a block. See the design note on <see cref="ScopeStack{T, S}"/>.
+    /// </remarks>
+    private BlockStatement ParseBlock(ScopeKind kind = ScopeKind.Plain)
     {
         var open = Expect(TokenKind.LeftBrace);
         var stmts = new List<Statement>();
         while (_tokens.Current().Kind is not TokenKind.RightBrace and not TokenKind.Eof)
             stmts.Add(ParseStatement());
         _ = Expect(TokenKind.RightBrace);
-        return new BlockStatement(PositionOf(open), stmts);
+        return new BlockStatement(PositionOf(open), stmts, kind);
     }
 
     /// <summary>
@@ -121,9 +121,9 @@ public sealed class Parser
     {
         var keyword = Expect(TokenKind.While);
         var condition = ParseExpression();
-        // TODO(scope-kinds): the one call that asks for a kind other than Plain — this block is
-        // the loop's scope, which is what a 'break' inside it searches outward for.
-        var body = ParseBlock();
+        // The one call that asks for a kind other than Plain: this block is the loop's scope,
+        // which is what a 'break' inside it searches outward for.
+        var body = ParseBlock(ScopeKind.Loop);
         return new WhileStatement(PositionOf(keyword), condition, body);
     }
 
