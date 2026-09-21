@@ -12,6 +12,8 @@ public enum TokenKind
     While,
     Break,
     Continue,
+    Fn,
+    Return,
     And,
     Or,
     Not,

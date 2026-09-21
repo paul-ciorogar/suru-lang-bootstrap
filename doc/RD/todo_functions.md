@@ -102,11 +102,11 @@ Introduce `ScopeKind.Function` **now, unused**, together with the rewritten desi
 
 ## Task 2 — lexer
 
-- [ ] **[TokenKind.cs](../../src/Suru.Compiler/Lex/TokenKind.cs)** — `Fn`, `Return`, placed with the statement keywords. **[Lexer.cs:82-96](../../src/Suru.Compiler/Lex/Lexer.cs#L82-L96)** — two arms in `ReadIdentifierOrKeyword`.
+- [x] **Done.** `Fn` and `Return` in [TokenKind.cs](../../src/Suru.Compiler/Lex/TokenKind.cs) after `Continue`, two arms in `ReadIdentifierOrKeyword`. No behaviour change — nothing downstream reads either kind yet, so an `fn` program still fails to parse, only with a different message.
 
 `void` does **not** become a keyword. It stays an ordinary `Identifier` like `i64`, so the parser never decides where it is writable — the analyzer does.
 
-Tests: `TokenPrinter.Print` shows the new kinds; `fnord`/`returns` still lex as `Identifier`.
+Tests, all in `Compiler/Lex/LexerTests`: `LexesTheFunctionKeywords` is a whole-dump `TokenPrinter.Print` of `fn f(a i64) i64 { return a }` plus a `void`-returning one, which is the only place the new kinds are visible until task 3; `fnord`/`returns` joined the `ControlFlowWordsAreKeywordsAndNotIdentifiers` theory, and `fn`/`return` joined `ControlFlowWordsAreNotUsableAsNames`. No existing expected literal moved.
 
 ---
 
@@ -172,10 +172,12 @@ At the end of this task the analyzer ignores `FunctionDeclaration`, so an `fn` p
 
 **`void` writable in one position.** Keep `NamedTypes` ([SemanticAnalyzer.cs:20-25](../../src/Suru.Compiler/Semantic/SemanticAnalyzer.cs#L20-L25)) exactly as it is and split the lookup in two:
 
-- `ResolveBindingType(name, pos)` — the existing `NamedTypes` lookup; used by `let` and by every parameter.
-- `ResolveReturnType(name, pos)` — `void`, or `ResolveBindingType`. The only caller is signature collection.
+- `ResolveBindingType(name, pos)` — rejects the name `void` **before** the existing `NamedTypes` lookup, then that lookup; used by `let` and by every parameter.
+- `ResolveReturnType(name, pos)` — `void`, or `ResolveBindingType`. The only caller is signature collection, and it never consults the new check.
 
-So `let x void: …` and `fn f(a void) i64` both keep reporting `unknown type 'void'`, with no message of their own.
+So `let x void: …` and `fn f(a void) i64` both report **`nothing can be bound to 'void'`** at the type name, and they share it without either writing one — `ResolveBindingType` is the single lookup both go through. Not `unknown type 'void'`: `void` is a type the compiler knows perfectly well ([SuruType.Void](../../src/Suru.Compiler/SuruType.cs#L13) has existed since `printLn`), and what is wrong is binding to it, not the name.
+
+This is the **one** edit [SemanticTests](../../tests/Suru.Tests/Compiler/Semantic/SemanticTests.cs) takes in this task, and naming it is the point: `ReportsVoidAsAnUnknownType` becomes `ReportsVoidAsUnbindable`, with the new string and an updated comment. It stays a single-error assertion — a failed resolve still suppresses the `cannot bind a value of type 'void'` cascade below it. Every other test in the file is untouched and remains the regression guard.
 
 **Per-statement-list signature pre-pass.** Every signature in a list is collected before any statement in it is analyzed — that is the whole of what makes recursion, mutual recursion and forward references work, and why it is a pass rather than a lazy lookup. It runs at scope entry: for the module's list, and for each `Function`-kind block.
 
@@ -195,7 +197,7 @@ Register the signature **even when a type name failed**, so calls report their o
 
 **`AnalyzeFunction`** — the body block enters the `Function` scope; **parameters are declared in that same scope**, so a `let` naming a parameter is `'a' is already declared` rather than a shadow. (Simpler than a second nested scope, and shadowing a parameter inside its own body reads as a mistake.) Track the enclosing declaration in a field so `return` knows its type; restore it on exit. No `_loopDepth` to save — the barrier handles it.
 
-**`ResolveCall`** generalizes: `printLn` keeps its existing path *verbatim*, including the exact arity string `'printLn' expects 1 argument, got 2`; otherwise `TryLookupFunction`, then arity, then a per-argument type check. `SemanticTests` must pass **unedited** — it is the regression guard.
+**`ResolveCall`** generalizes: `printLn` keeps its existing path *verbatim*, including the exact arity string `'printLn' expects 1 argument, got 2`; otherwise `TryLookupFunction`, then arity, then a per-argument type check. `SemanticTests` must pass with **no edit but the `void` one above** — it is the regression guard.
 
 **New diagnostics** (all in the existing `path(line,col): message` form):
 
@@ -209,6 +211,7 @@ Register the signature **even when a type name failed**, so calls report their o
 - `'f' must return a value of type 'i64'`  (bare `return` in a non-void function)
 - `cannot return a value of type 'f64' from 'f' of type 'i64'`  (echoes `AnalyzeLet`'s phrasing)
 - `'f' must return a value of type 'i64' on every path`
+- `nothing can be bound to 'void'` — a `let` or a parameter written `void`; **replaces** the `unknown type 'void'` this position reports today
 
 **Diagnostics that need no new code** — verify with tests only:
 

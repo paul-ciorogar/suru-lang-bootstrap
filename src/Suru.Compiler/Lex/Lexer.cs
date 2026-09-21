@@ -89,6 +89,10 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
             "while" => TokenKind.While,
             "break" => TokenKind.Break,
             "continue" => TokenKind.Continue,
+            "fn" => TokenKind.Fn,
+            // 'void' is deliberately absent: it stays an ordinary identifier like 'i64', so
+            // the stage that decides where it may be written is the analyzer, not the parser.
+            "return" => TokenKind.Return,
             "and" => TokenKind.And,
             "or" => TokenKind.Or,
             "not" => TokenKind.Not,

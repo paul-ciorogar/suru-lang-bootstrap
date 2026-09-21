@@ -272,12 +272,49 @@ public class LexerTests
         Assert.Equal("ands", identifier.Name);
     }
 
+    [Fact]
+    public void LexesTheFunctionKeywords()
+    {
+        // The parser has no 'fn' case yet, so the token stream is the only place these show
+        // up. Note 'void': it is an ordinary Identifier, exactly like 'i64', so nothing the
+        // lexer or the parser does decides where it may be written.
+        var dump = TokenPrinter.Print("fn f(a i64) i64 { return a }\nfn g() void { return }", Source.Path);
+
+        Assert.Equal(
+            """
+            (1,1)     Fn fn
+            (1,4)     Identifier f
+            (1,5)     LeftParen
+            (1,6)     Identifier a
+            (1,8)     Identifier i64
+            (1,11)    RightParen
+            (1,13)    Identifier i64
+            (1,17)    LeftBrace
+            (1,19)    Return return
+            (1,26)    Identifier a
+            (1,28)    RightBrace
+            (2,1)     Fn fn
+            (2,4)     Identifier g
+            (2,5)     LeftParen
+            (2,6)     RightParen
+            (2,8)     Identifier void
+            (2,13)    LeftBrace
+            (2,15)    Return return
+            (2,22)    RightBrace
+            (2,23)    Eof
+
+            """,
+            dump);
+    }
+
     [Theory]
     [InlineData("iffy")]
     [InlineData("elsewhere")]
     [InlineData("whiles")]
     [InlineData("breakage")]
     [InlineData("continued")]
+    [InlineData("fnord")]
+    [InlineData("returns")]
     public void ControlFlowWordsAreKeywordsAndNotIdentifiers(string name)
     {
         // Each starts with a keyword but is a single identifier.
@@ -291,6 +328,8 @@ public class LexerTests
     [InlineData("while", "While")]
     [InlineData("break", "Break")]
     [InlineData("continue", "Continue")]
+    [InlineData("fn", "Fn")]
+    [InlineData("return", "Return")]
     public void ControlFlowWordsAreNotUsableAsNames(string word, string kind)
     {
         // Unlike 'view' and 'mock', which the parser recognises after a '#', these are real
