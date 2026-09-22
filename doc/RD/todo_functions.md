@@ -112,7 +112,14 @@ Tests, all in `Compiler/Lex/LexerTests`: `LexesTheFunctionKeywords` is a whole-d
 
 ## Task 3 — AST and parser
 
-- [ ] **`FunctionDeclaration : Statement`** (new file under `Parse/Ast/`) — it *is* a statement, because placement is a semantic rule and it must be parseable anywhere a statement can go. Carries `Name`, `IReadOnlyList<Parameter> Parameters`, `ReturnTypeName` + `ReturnTypePosition`, `BlockStatement Body`, and a mutable `SuruType? ReturnType { get; internal set; }`.
+- [x] **Done.** Two deviations, both small:
+
+- **`Parameter` also carries `Position`** — the name's. Task 4's duplicate-parameter `'a' is already declared` has to point at the name, and the dump needs a position per node; `TypePosition` alone is where an unknown type points.
+- **The intermediate state is `unsupported statement 'FunctionDeclaration'`**, not `unknown function`: the analyzer's existing `default` arm reports it (and `'ReturnStatement'` for a `return`). `unknown function` is what a *call* to one says.
+
+`AstPrinter` renders parameters as `Parameter` children ahead of the body, and gives the declaration and each parameter the same ` : T` / ` : ?` suffix an expression gets under `withTypes`. `StartsAnExpression` is the token set `ParseUnary`/`ParsePrimary` accept first. Tests: `Compiler/Parse/FunctionTests` (new), one test-mode case in `DirectiveTests` pinning the no-`Peek` discipline, one unresolved-types dump in `DumpTests`. No existing literal moved.
+
+**`FunctionDeclaration : Statement`** (new file under `Parse/Ast/`) — it *is* a statement, because placement is a semantic rule and it must be parseable anywhere a statement can go. Carries `Name`, `IReadOnlyList<Parameter> Parameters`, `ReturnTypeName` + `ReturnTypePosition`, `BlockStatement Body`, and a mutable `SuruType? ReturnType { get; internal set; }`.
 
 **`Parameter`** — `Name`, `TypeName`, `TypePosition`, mutable `SuruType? Type`. Mirrors `LetStatement` ([Statement.cs:18](../../src/Suru.Compiler/Parse/Ast/Statement.cs#L18)) exactly: types have no node hierarchy in this compiler and resolution stays a dictionary lookup in the analyzer. Mutable annotation matches the existing `Expression.Type` convention — codegen needs a resolved type and there is no initialiser to carry one.
 

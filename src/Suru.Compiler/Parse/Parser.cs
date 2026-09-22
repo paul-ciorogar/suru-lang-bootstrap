@@ -43,6 +43,10 @@ public sealed class Parser
             return ParseIf();
         if (token.Kind == TokenKind.While)
             return ParseWhile();
+        if (token.Kind == TokenKind.Fn)
+            return ParseFunction();
+        if (token.Kind == TokenKind.Return)
+            return ParseReturn();
         if (token.Kind == TokenKind.Break)
             return new BreakStatement(PositionOf(Expect(TokenKind.Break)));
         if (token.Kind == TokenKind.Continue)
@@ -121,11 +125,90 @@ public sealed class Parser
     {
         var keyword = Expect(TokenKind.While);
         var condition = ParseExpression();
-        // The one call that asks for a kind other than Plain: this block is the loop's scope,
-        // which is what a 'break' inside it searches outward for.
+        // This block is the loop's scope, which is what a 'break' inside it searches outward for.
         var body = ParseBlock(ScopeKind.Loop);
         return new WhileStatement(PositionOf(keyword), condition, body);
     }
+
+    /// <summary>
+    /// <c>fn &lt;name&gt;(&lt;parameters&gt;) &lt;return type&gt; { ... }</c>. The return type
+    /// is always written and is read as a plain identifier — <c>void</c> included — so where
+    /// <c>void</c> may appear is left to the analyzer. So is where a declaration may appear: this
+    /// is reached from <see cref="ParseStatement"/>, which is to say from anywhere.
+    /// <para>
+    /// Only <see cref="Expect"/> and <see cref="Tokens.Current"/> are used, never
+    /// <see cref="Tokens.Peek"/>, for the reason <see cref="ParseIf"/> gives: a directive as the
+    /// body's first statement relies on <see cref="Tokens.DiscardRestOfLine"/>, which refuses to
+    /// run with anything buffered.
+    /// </para>
+    /// </summary>
+    private FunctionDeclaration ParseFunction()
+    {
+        var keyword = Expect(TokenKind.Fn);
+        var name = Expect(TokenKind.Identifier);
+        _ = Expect(TokenKind.LeftParen);
+        var parameters = ParseParameters();
+        _ = Expect(TokenKind.RightParen);
+        var returnType = Expect(TokenKind.Identifier);
+        // The body is the function's scope: the barrier that hides the enclosing variables and
+        // stops a 'break' from finding a loop outside the function.
+        var body = ParseBlock(ScopeKind.Function);
+        return new FunctionDeclaration(
+            PositionOf(keyword), name.Text, parameters, returnType.Text, PositionOf(returnType), body);
+    }
+
+    /// <summary>
+    /// Comma-separated, zero allowed, no trailing comma — <see cref="ParseArguments"/> line for
+    /// line. Uses no <see cref="Tokens.Peek"/>, for the reason <see cref="ParseFunction"/> gives.
+    /// </summary>
+    private List<Parameter> ParseParameters()
+    {
+        var parameters = new List<Parameter>();
+        if (_tokens.Current().Kind == TokenKind.RightParen)
+            return parameters;
+        parameters.Add(ParseParameter());
+        while (_tokens.Current().Kind == TokenKind.Comma)
+        {
+            _tokens.Next();
+            parameters.Add(ParseParameter());
+        }
+        return parameters;
+    }
+
+    private Parameter ParseParameter()
+    {
+        var name = Expect(TokenKind.Identifier);
+        var type = Expect(TokenKind.Identifier);
+        return new Parameter(PositionOf(name), name.Text, type.Text, PositionOf(type));
+    }
+
+    /// <summary>
+    /// <c>return</c>, optionally followed by a value. Whether it is the analyzer's business is
+    /// not decided here: a <c>return</c> outside a function parses, and is reported later.
+    /// <para>
+    /// Uses no <see cref="Tokens.Peek"/>, for the reason <see cref="ParseFunction"/> gives — a
+    /// directive on the line after a bare <c>return</c> must still find nothing buffered.
+    /// </para>
+    /// </summary>
+    private Statement ParseReturn()
+    {
+        var keyword = Expect(TokenKind.Return);
+        // The same-line rule: a value belongs to this 'return' only if it starts on its line.
+        // The one place a newline is significant, because without it the next statement would
+        // silently become the returned value. A value that began here still continues onto a
+        // following line that starts with an operator, exactly as any expression does.
+        var next = _tokens.Current();
+        var value = next.Line == keyword.Line && StartsAnExpression(next.Kind)
+            ? ParseExpression()
+            : null;
+        return new ReturnStatement(PositionOf(keyword), value);
+    }
+
+    /// <summary>The tokens <see cref="ParseUnary"/> and <see cref="ParsePrimary"/> accept first.</summary>
+    private static bool StartsAnExpression(TokenKind kind) => kind is
+        TokenKind.Identifier or TokenKind.IntLiteral or TokenKind.FloatLiteral or
+        TokenKind.True or TokenKind.False or TokenKind.LeftParen or
+        TokenKind.Minus or TokenKind.Not;
 
     private Statement ParseLet()
     {

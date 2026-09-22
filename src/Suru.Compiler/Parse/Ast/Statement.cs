@@ -93,6 +93,16 @@ public sealed class BreakStatement(SourcePosition position) : Statement(position
 /// </summary>
 public sealed class ContinueStatement(SourcePosition position) : Statement(position);
 
+/// <summary>
+/// <c>return</c>, with a value or without one. A value belongs to the <c>return</c> only if it
+/// begins on the <c>return</c>'s own line — see <c>Parser.ParseReturn</c> — so
+/// <see cref="Value"/> is null for a bare <c>return</c> followed by a statement on the next line.
+/// </summary>
+public sealed class ReturnStatement(SourcePosition position, Expression? value) : Statement(position)
+{
+    public Expression? Value { get; } = value;
+}
+
 /// <summary><c>&lt;name&gt;: &lt;value&gt;</c>, storing into an existing binding.</summary>
 public sealed class AssignmentStatement(SourcePosition position, string name, Expression value)
     : Statement(position)

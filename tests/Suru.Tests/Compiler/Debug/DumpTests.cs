@@ -94,6 +94,25 @@ public class DumpTests
     }
 
     [Fact]
+    public void UnresolvedFunctionAndParameterTypesAreMarked()
+    {
+        // A declaration and its parameters carry a resolved type the way an expression does.
+        var dump = AstPrinter.Print(Source.Parse("fn f(a i64) i64 { return a }"), withTypes: true);
+
+        Assert.Equal(
+            """
+            Module test.suru
+              FunctionDeclaration (1,1) f i64 : ?
+                Parameter (1,6) a i64 : ?
+                BlockStatement (1,17) function
+                  ReturnStatement (1,19)
+                    IdentifierExpression (1,26) a : ?
+
+            """,
+            dump);
+    }
+
+    [Fact]
     public void DumpsBindingsOperatorsAndVariableUses()
     {
         var dump = AstPrinter.Print(

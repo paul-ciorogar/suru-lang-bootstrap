@@ -386,6 +386,26 @@ public class DirectiveTests
             Assert.Single(Source.Analyze("if true {\n#view printLn(1):\n}", BuildMode.Test)));
     }
 
+    [Fact]
+    public void ADirectiveParsesAsAFunctionBodysFirstStatementAndAfterABareReturn()
+    {
+        // Both places are reached with the cursor just past a token the function or 'return'
+        // parse consumed; a Peek there would leave a token buffered and make the discard throw.
+        Assert.Equal(
+            """
+            Module test.suru
+              FunctionDeclaration (1,1) f void
+                BlockStatement (1,13) function
+                  ViewDirective (2,1) #0
+                    IntLiteral (2,7) 1
+                  ReturnStatement (3,1)
+                  ViewDirective (4,1) #1
+                    IntLiteral (4,7) 2
+
+            """,
+            Ast("fn f() void {\n#view 1: 1\nreturn\n#view 2: 2\n}"));
+    }
+
     /// <summary>The parse tree of a test-mode build, as <see cref="AstPrinter"/> renders it.</summary>
     private static string Ast(string text) => AstPrinter.Print(Source.Parse(text, BuildMode.Test));
 

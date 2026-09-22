@@ -15,6 +15,9 @@ namespace Suru.Compiler.Debug;
 /// </summary>
 public static class AstPrinter
 {
+    // TODO: refactor this to create an instance of AstPrinter
+    // var printer = new AstPrinter(module);
+    // return printer.ToString() or printer.ToStringWithTypes();
     public static string Print(Module module, bool withTypes = false)
     {
         var output = new StringBuilder();
@@ -75,6 +78,23 @@ public static class AstPrinter
             case ContinueStatement:
                 AppendNode(output, depth, "ContinueStatement", statement.Position);
                 break;
+            // Parameters as children ahead of the body, which renders through the block case
+            // above and so carries its 'function' kind. The declaration and each parameter take
+            // a resolved type the way an expression does, so both dumps still diff line for line.
+            case FunctionDeclaration function:
+                AppendNode(output, depth, "FunctionDeclaration", function.Position,
+                    $"{function.Name} {function.ReturnTypeName}", TypeSuffix(function.ReturnType, withTypes));
+                foreach (var parameter in function.Parameters)
+                    AppendNode(output, depth + 1, "Parameter", parameter.Position,
+                        $"{parameter.Name} {parameter.TypeName}", TypeSuffix(parameter.Type, withTypes));
+                AppendStatement(output, function.Body, depth + 1, withTypes);
+                break;
+            // A bare 'return' is a leaf; one with a value has it as its only child.
+            case ReturnStatement ret:
+                AppendNode(output, depth, "ReturnStatement", ret.Position);
+                if (ret.Value is not null)
+                    AppendExpression(output, ret.Value, depth + 1, withTypes);
+                break;
             case MockDirective mock:
                 AppendNode(output, depth, "MockDirective", mock.Position, mock.Name);
                 AppendExpression(output, mock.Value, depth + 1, withTypes);
@@ -96,7 +116,7 @@ public static class AstPrinter
 
     private static void AppendExpression(StringBuilder output, Expression expression, int depth, bool withTypes)
     {
-        var type = withTypes ? $" : {expression.Type?.ToString() ?? "?"}" : "";
+        var type = TypeSuffix(expression.Type, withTypes);
 
         switch (expression)
         {
@@ -140,6 +160,9 @@ public static class AstPrinter
             output.Append(' ').Append(detail);
         output.Append(type).Append('\n');
     }
+
+    private static string TypeSuffix(SuruType? type, bool withTypes) =>
+        withTypes ? $" : {type?.ToString() ?? "?"}" : "";
 
     private static string Text(long value) => value.ToString(CultureInfo.InvariantCulture);
 
