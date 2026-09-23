@@ -149,12 +149,14 @@ public class SemanticTests
     }
 
     [Fact]
-    public void ReportsVoidAsAnUnknownType()
+    public void ReportsVoidAsUnbindable()
     {
-        // 'void' is the type of a printLn call, not something a program can write down.
+        // Not 'unknown type': 'void' is the type of a printLn call and the compiler knows it
+        // perfectly well. What is wrong is binding to it — which is why a function may write
+        // 'void' as its return type and nothing else may write it at all.
         var error = Assert.Single(Source.Analyze("let nothing void: printLn(1)"));
 
-        Assert.Equal("test.suru(1,13): unknown type 'void'", error);
+        Assert.Equal("test.suru(1,13): nothing can be bound to 'void'", error);
     }
 
     [Fact]

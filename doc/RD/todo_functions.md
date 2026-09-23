@@ -23,7 +23,7 @@ These are the plan's premises, not open questions.
 | **Syntax** | `fn name(a i64, b i64) i64 { ... }` — return type always written, `void` included |
 | **Return** | `return <expr>`, and bare `return` in a `void` function |
 | **Value follows a `return`?** | **Same-line rule**: only if it begins on the `return`'s own line. This is the language's first newline-sensitive statement rule; it is worth it because the token-set alternative silently reparses the next statement as the returned value |
-| **Where `fn` may appear** | File top level, and directly in another function's body. **Not** in an `if` arm, `while` body, or bare block |
+| **Where `fn` may appear** | Anywhere that runs exactly once when reached: a file, a function body, a bare block. **Not** in an `if` arm or a `while` body — *amended in task 4; bare blocks were originally excluded too* |
 | **Enforced by** | The **semantic analyzer**, not the parser — so a misplaced `fn` is collected alongside every other error rather than throwing at the first one |
 | **Function-name scope** | Lexical. A nested `fn` is visible only inside the body it sits in |
 | **Namespace** | One, shared with variables. `let f i64: 1` + `fn f() void {}` collide with the existing `'f' is already declared`. `printLn` is reserved |
@@ -173,7 +173,15 @@ At the end of this task the analyzer ignores `FunctionDeclaration`, so an `fn` p
 
 ## Task 4 — semantics
 
-- [ ] **`Binding`** (new, `Semantic/`) — `VariableBinding(SuruType Type)` with `SurvivesFunctionBoundary => false`, and `FunctionBinding(FunctionSignature Signature)` with `=> true`.
+- [x] **Done.** Three deviations:
+
+- **A `fn` in a bare `{ }` block is allowed**, not rejected. The rule is about control flow: a file, a function body and a bare block all run exactly once when reached, so a declaration in one is a fact, while an `if` arm and a `while` body may or may not be. Telling an arm from a bare block needed a new **`ScopeKind.Branch`**, set by the parser on both arms of an `if` — the "until something asks them apart" case the enum's own note anticipated. This is the one place task 4 touched parser tests: every `if`-arm dump line gained ` branch`. The diagnostic is therefore `a function cannot be declared inside an 'if' or a 'while'`, not the placement wording below.
+- **Two diagnostics the plan did not list**, because one namespace makes both programs writable: `'f' is a function and cannot be used as a value` (an identifier, an assignment or a `#mock` naming a function) and `'f' is not a function` (a call naming a variable). Reusing `unknown variable`/`unknown function` would claim a declared name is unknown.
+- **`FunctionSignature` carries no `Position`** — nothing reads it, and a "declared here" note is not among the diagnostics. Its `Parameters` is `IReadOnlyList<SuruType?>`, one entry per *written* parameter so arity is reported from the source even when a type name failed, with nulls skipped in the per-argument check.
+
+`ScopeStackTests` moved to a local `Entry` record implementing `IScopeEntry` and gained the barrier tests; `SemanticTests` took only the `void` edit, as planned.
+
+- **`Binding`** (new, `Semantic/`) — `VariableBinding(SuruType Type)` with `SurvivesFunctionBoundary => false`, and `FunctionBinding(FunctionSignature Signature)` with `=> true`.
 
 **`FunctionSignature(string Name, IReadOnlyList<SuruType> Parameters, SuruType ReturnType, SourcePosition Position)`** — deliberately **not** a `SuruType`. [SuruType.cs](../../src/Suru.Compiler/SuruType.cs) is a sealed record compared structurally by `Name` at a dozen sites; with no first-class function values nothing can *hold* a function type, and there is no syntax to write one, so a `FunctionType` node would be unreachable speculative structure. It becomes a type the day a function is a value.
 
@@ -194,8 +202,8 @@ DeclareSignatures(statements, isDeclarationContext):
     resolve return type and each parameter type (annotating the nodes)
     reject a duplicate parameter name        -> "'a' is already declared"
     reject the name 'printLn'                -> "'printLn' is a builtin and cannot be redeclared"
-    reject if not isDeclarationContext       -> "a function can only be declared at the top
-                                                 level of a file or of another function"
+    reject if not isDeclarationContext       -> "a function cannot be declared inside an 'if'
+                                                 or a 'while'"
     Declare(name, FunctionBinding(sig))      -- DeclaredHere gives the one-namespace collision
                                                 check against a 'let' for free
 ```
@@ -208,8 +216,10 @@ Register the signature **even when a type name failed**, so calls report their o
 
 **New diagnostics** (all in the existing `path(line,col): message` form):
 
-- `a function can only be declared at the top level of a file or of another function`
+- `a function cannot be declared inside an 'if' or a 'while'`
 - `'printLn' is a builtin and cannot be redeclared`
+- `'f' is not a function` — a call naming a variable
+- `'f' is a function and cannot be used as a value` — an identifier, an assignment or a `#mock`
 - `'f' is already declared` — reused for duplicate function and duplicate parameter
 - `'f' expects 2 arguments, got 1`
 - `argument 2 of 'f' is of type 'f64'; expected 'i64'`

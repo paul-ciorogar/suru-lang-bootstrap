@@ -61,7 +61,7 @@ public sealed class CodeGenerator
     /// </para>
     /// </summary>
     private readonly ScopeStack<
-        (LLVMValueRef Slot, LLVMTypeRef Type),
+        VariableSlot,
         (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break)> _scopes = new();
 
     private CodeGenerator(Module module, BuildMode mode)
@@ -393,7 +393,7 @@ public sealed class CodeGenerator
 
         var slot = _allocas.BuildAlloca(type, let.Name);
         _builder.BuildStore(value, slot);
-        _scopes.Declare(let.Name, (slot, type));
+        _scopes.Declare(let.Name, new VariableSlot(slot, type));
     }
 
     /// <summary>
@@ -464,8 +464,8 @@ public sealed class CodeGenerator
         };
     }
 
-    private (LLVMValueRef Slot, LLVMTypeRef Type) Variable(string name) =>
-        _scopes.TryLookup(name, out var variable)
+    private VariableSlot Variable(string name) =>
+        _scopes.TryLookupVariable(name, out var variable)
             ? variable
             : throw new CodegenException($"unknown variable '{name}'");
 

@@ -97,13 +97,16 @@ public sealed class Parser
     {
         var keyword = Expect(TokenKind.If);
         var condition = ParseExpression();
-        var then = ParseBlock();
+        var then = ParseBlock(ScopeKind.Branch);
 
         Statement? otherwise = null;
         if (_tokens.Current().Kind == TokenKind.Else)
         {
             _tokens.Next();
-            otherwise = _tokens.Current().Kind == TokenKind.If ? ParseIf() : ParseBlock();
+            // An 'else if' is a nested IfStatement, so its own arms are marked by that call.
+            otherwise = _tokens.Current().Kind == TokenKind.If
+                ? ParseIf()
+                : ParseBlock(ScopeKind.Branch);
         }
 
         return new IfStatement(PositionOf(keyword), condition, then, otherwise);

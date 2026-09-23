@@ -5,8 +5,9 @@ namespace Suru.Compiler;
 /// parser — the one stage that knows <i>why</i> it is building a block — and rides in on the node
 /// from there, which is what keeps semantic analysis and codegen from drifting on it.
 /// <para>
-/// Only kinds some lookup actually distinguishes should exist. <c>if</c> arms stay
-/// <see cref="Plain"/> until something asks them apart.
+/// Only kinds some lookup actually distinguishes should exist. <c>if</c> arms were
+/// <see cref="Plain"/> until something asked them apart, and what asked is where a <c>fn</c> may
+/// be declared: a bare block always runs, an arm may not, so the two can no longer share a kind.
 /// </para>
 /// </summary>
 public enum ScopeKind
@@ -18,11 +19,36 @@ public enum ScopeKind
     Loop,
 
     /// <summary>
-    /// A function body, and the barrier the outward searches stop at. Nothing creates one yet —
-    /// user-defined functions do, and the searches below are already written to respect it so
-    /// that adding them is a change of what exists, not of how lookup works.
+    /// An <c>if</c> or <c>else</c> arm — a block whose execution is conditional. This and
+    /// <see cref="Loop"/> are the control-flow kinds: a declaration inside one may or may not be
+    /// reached, which is why a <c>fn</c> cannot be written there, and telling an arm from a bare
+    /// block is what asked the two apart.
+    /// </summary>
+    Branch,
+
+    /// <summary>
+    /// A function body, and the barrier the outward searches stop at.
     /// </summary>
     Function,
+}
+
+/// <summary>
+/// What a binding is, as far as the barrier is concerned: whether it stays visible to a lookup
+/// that has crossed a <see cref="ScopeKind.Function"/> scope.
+/// <para>
+/// The rule lives here and in <see cref="ScopeStack{TEntry, TScope}"/> rather than at each call
+/// site, so semantic analysis and codegen only say which of their two binding shapes is which and
+/// cannot drift on what the barrier does.
+/// </para>
+/// </summary>
+public interface IScopeEntry
+{
+    /// <summary>
+    /// False for a variable — a body must not see its caller's locals. True for a function name,
+    /// which is declared in the scope <i>outside</i> the body it names, so recursion depends on
+    /// it passing through.
+    /// </summary>
+    bool SurvivesFunctionBoundary { get; }
 }
 
 /// <summary>Per-scope data for a stage that needs none.</summary>
@@ -40,29 +66,37 @@ public readonly record struct NoScopeData;
 /// </para>
 /// <para>
 /// Semantic analysis and codegen both need this over their own payloads — a type and a stack slot
-/// for <typeparamref name="TName"/>, nothing and a loop's two basic blocks for
+/// for <typeparamref name="TEntry"/>, nothing and a loop's two basic blocks for
 /// <typeparamref name="TScope"/> — so it is one generic type rather than the same list of
 /// dictionaries written twice. The per-scope payload is a second type parameter rather than a
 /// shared enum because only codegen has anything to put there.
 /// </para>
 /// <para>
-/// <b>The barrier is per-query, not per-scope.</b> A <see cref="ScopeKind.Function"/> scope stops
-/// <see cref="TryFindEnclosing"/>, because a <c>break</c> written in a function called from inside
-/// a loop does not belong to that loop. It will <i>not</i> stop every query once functions exist:
-/// a function's own name is declared in the scope outside its body, so the search that resolves a
-/// call has to pass through the barrier or recursion could not work, while the search that
-/// resolves a variable has to stop at it or a body would see its caller's locals. Those are two
-/// searches over this one walk, and the day they exist the difference belongs here rather than in
-/// either stage.
+/// <b>The barrier is per-query, not per-scope.</b> Three searches cross a
+/// <see cref="ScopeKind.Function"/> scope differently, and that difference is the whole of what
+/// makes one namespace and lexical function names work:
+/// </para>
+/// <list type="bullet">
+/// <item><see cref="TryLookupVariable"/> — the barrier <b>hides</b> a binding that does not
+/// survive it, so a body cannot see its caller's locals.</item>
+/// <item><see cref="TryLookupFunction"/> — <b>no</b> barrier, because a function's own name is
+/// declared in the scope outside its body and recursion could not work otherwise.</item>
+/// <item><see cref="TryFindEnclosing"/> — the walk <b>stops</b>, because a <c>break</c> written in
+/// a function called from inside a loop does not belong to that loop.</item>
+/// </list>
+/// <para>
+/// The first two walk every scope regardless; what the barrier changes is which entries are
+/// admitted, and an entry answers that itself through <see cref="IScopeEntry"/>. Neither stage
+/// writes the rule down.
 /// </para>
 /// </summary>
-public sealed class ScopeStack<TName, TScope>
+public sealed class ScopeStack<TEntry, TScope> where TEntry : IScopeEntry
 {
     private sealed class Scope(ScopeKind kind, TScope data)
     {
         public ScopeKind Kind { get; } = kind;
         public TScope Data { get; } = data;
-        public Dictionary<string, TName> Names { get; } = [];
+        public Dictionary<string, TEntry> Names { get; } = [];
     }
 
     /// <summary>The outermost scope is the file itself and is never exited.</summary>
@@ -89,10 +123,39 @@ public sealed class ScopeStack<TName, TScope>
     public bool DeclaredHere(string name) => _scopes[^1].Names.ContainsKey(name);
 
     /// <summary>Binds in the innermost scope, shadowing any outer binding of the same name.</summary>
-    public void Declare(string name, TName value) => _scopes[^1].Names[name] = value;
+    public void Declare(string name, TEntry value) => _scopes[^1].Names[name] = value;
 
-    /// <summary>Innermost first, then outward. False when the name is bound nowhere.</summary>
-    public bool TryLookup(string name, out TName value)
+    /// <summary>
+    /// Innermost first, then outward, as a value is resolved. Once the walk has crossed a
+    /// <see cref="ScopeKind.Function"/> scope only an entry that survives the boundary is
+    /// admitted, so a function body sees the names of functions declared around it and none of
+    /// the variables. False when the name is bound nowhere the walk can see it.
+    /// </summary>
+    public bool TryLookupVariable(string name, out TEntry value)
+    {
+        var crossed = false;
+        for (int i = _scopes.Count - 1; i >= 0; i--)
+        {
+            if (_scopes[i].Names.TryGetValue(name, out value!)
+                && (!crossed || value.SurvivesFunctionBoundary))
+                return true;
+
+            // Checked after the scope's own names: a body's parameters live in the function
+            // scope itself and are on this side of the barrier.
+            crossed |= _scopes[i].Kind == ScopeKind.Function;
+        }
+
+        value = default!;
+        return false;
+    }
+
+    /// <summary>
+    /// Innermost first, then outward, as a call is resolved — with no barrier at all. A
+    /// function's name is declared in the scope containing its body, so this walk passing
+    /// through a <see cref="ScopeKind.Function"/> scope is exactly what lets a function call
+    /// itself, its siblings and the functions around it.
+    /// </summary>
+    public bool TryLookupFunction(string name, out TEntry value)
     {
         for (int i = _scopes.Count - 1; i >= 0; i--)
             if (_scopes[i].Names.TryGetValue(name, out value!))

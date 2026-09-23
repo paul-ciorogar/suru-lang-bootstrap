@@ -120,10 +120,10 @@ public class FunctionTests
                   BlockStatement (2,3)
                   IfStatement (3,3)
                     IdentifierExpression (3,6) ready
-                    BlockStatement (3,12)
+                    BlockStatement (3,12) branch
                       ReturnStatement (3,14)
                         IntLiteral (3,21) 1
-                    BlockStatement (3,30)
+                    BlockStatement (3,30) branch
                       ReturnStatement (3,32)
                         IntLiteral (3,39) 2
                   WhileStatement (4,3)
@@ -177,7 +177,7 @@ public class FunctionTests
             Module test.suru
               IfStatement (1,1)
                 BoolLiteral (1,4) true
-                BlockStatement (1,9)
+                BlockStatement (1,9) branch
                   FunctionDeclaration (1,11) f void
                     BlockStatement (1,23) function
                   ReturnStatement (1,26)

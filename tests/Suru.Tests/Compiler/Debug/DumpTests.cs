@@ -112,6 +112,38 @@ public class DumpTests
             dump);
     }
 
+    /// <summary>
+    /// The twin of <see cref="UnresolvedFunctionAndParameterTypesAreMarked"/>: the same dump once
+    /// the analyzer has run, which is where a return type, a parameter's type and a call's type
+    /// all become visible. The two differ only in the annotations, since analysis annotates the
+    /// tree in place.
+    /// </summary>
+    [Fact]
+    public void DumpsAFunctionWithItsResolvedTypes()
+    {
+        var dump = AstPrinter.Print(
+            Source.Analyzed("fn f(a i64, b f64) i64 {\n  return a\n}\nprintLn(f(1, 2.5))"),
+            withTypes: true);
+
+        Assert.Equal(
+            """
+            Module test.suru
+              FunctionDeclaration (1,1) f i64 : i64
+                Parameter (1,6) a i64 : i64
+                Parameter (1,13) b f64 : f64
+                BlockStatement (1,24) function
+                  ReturnStatement (2,3)
+                    IdentifierExpression (2,10) a : i64
+              ExpressionStatement (4,1)
+                CallExpression (4,1) printLn : void
+                  CallExpression (4,9) f : i64
+                    IntLiteral (4,11) 1 : i64
+                    FloatLiteral (4,14) 2.5 : f64
+
+            """,
+            dump);
+    }
+
     [Fact]
     public void DumpsBindingsOperatorsAndVariableUses()
     {
@@ -183,11 +215,11 @@ public class DumpTests
                 BinaryExpression (2,4) > : bool
                   IdentifierExpression (2,4) x : i64
                   IntLiteral (2,8) 0 : i64
-                BlockStatement (2,10)
+                BlockStatement (2,10) branch
                   ExpressionStatement (3,1)
                     CallExpression (3,1) printLn : void
                       IdentifierExpression (3,9) x : i64
-                BlockStatement (4,8)
+                BlockStatement (4,8) branch
                   ExpressionStatement (5,1)
                     CallExpression (5,1) printLn : void
                       IntLiteral (5,9) 0 : i64

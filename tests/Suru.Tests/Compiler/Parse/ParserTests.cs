@@ -442,7 +442,7 @@ public class ParserTests
             Module test.suru
               IfStatement (1,1)
                 BoolLiteral (1,4) true
-                BlockStatement (1,9)
+                BlockStatement (1,9) branch
                   ExpressionStatement (1,11)
                     CallExpression (1,11) printLn
                       IntLiteral (1,19) 1
@@ -459,11 +459,11 @@ public class ParserTests
             Module test.suru
               IfStatement (1,1)
                 BoolLiteral (1,4) true
-                BlockStatement (1,9)
+                BlockStatement (1,9) branch
                   ExpressionStatement (1,11)
                     CallExpression (1,11) printLn
                       IntLiteral (1,19) 1
-                BlockStatement (1,29)
+                BlockStatement (1,29) branch
                   ExpressionStatement (1,31)
                     CallExpression (1,31) printLn
                       IntLiteral (1,39) 2
@@ -482,11 +482,11 @@ public class ParserTests
             Module test.suru
               IfStatement (1,1)
                 IdentifierExpression (1,4) a
-                BlockStatement (1,6)
+                BlockStatement (1,6) branch
                 IfStatement (1,14)
                   IdentifierExpression (1,17) b
-                  BlockStatement (1,19)
-                  BlockStatement (1,27)
+                  BlockStatement (1,19) branch
+                  BlockStatement (1,27) branch
 
             """,
             AstPrinter.Print(Source.Parse("if a {} else if b {} else {}")));
@@ -538,7 +538,7 @@ public class ParserTests
                 BinaryExpression (1,4) >
                   IdentifierExpression (1,4) x
                   IntLiteral (2,3) 1
-                BlockStatement (2,5)
+                BlockStatement (2,5) branch
 
             """,
             AstPrinter.Print(Source.Parse("if x\n> 1 {\n}")));
@@ -555,7 +555,7 @@ public class ParserTests
             Module test.suru
               IfStatement (1,1)
                 IdentifierExpression (1,4) x
-                BlockStatement (2,1)
+                BlockStatement (2,1) branch
 
             """,
             AstPrinter.Print(Source.Parse("if x\n{\n}")));
@@ -569,8 +569,8 @@ public class ParserTests
             Module test.suru
               IfStatement (1,1)
                 IdentifierExpression (1,4) a
-                BlockStatement (1,6)
-                BlockStatement (3,6)
+                BlockStatement (1,6) branch
+                BlockStatement (3,6) branch
 
             """,
             AstPrinter.Print(Source.Parse("if a {\n}\nelse {\n}")));
@@ -626,7 +626,7 @@ public class ParserTests
                 BlockStatement (1,12) loop
                   IfStatement (1,14)
                     IdentifierExpression (1,17) x
-                    BlockStatement (1,19)
+                    BlockStatement (1,19) branch
                       BreakStatement (1,21)
 
             """,
