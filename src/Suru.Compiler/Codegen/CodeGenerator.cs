@@ -1,6 +1,7 @@
 using LLVMSharp.Interop;
 using Suru.Compiler.Parse.Ast;
 using Suru.Compiler.Testing;
+using Suru.Lib;
 
 namespace Suru.Compiler.Codegen;
 
@@ -465,9 +466,8 @@ public sealed class CodeGenerator
     }
 
     private VariableSlot Variable(string name) =>
-        _scopes.TryLookupVariable(name, out var variable)
-            ? variable
-            : throw new CodegenException($"unknown variable '{name}'");
+        _scopes.LookupVariable(name).UnwrapOrElse(_ =>
+            throw new CodegenException($"unknown variable '{name}'"));
 
     private static LLVMTypeRef LlvmType(SuruType type)
     {

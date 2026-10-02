@@ -1,3 +1,5 @@
+using Suru.Lib;
+
 namespace Suru.Compiler;
 
 /// <summary>
@@ -55,6 +57,12 @@ public interface IScopeEntry
 public readonly record struct NoScopeData;
 
 /// <summary>
+/// A lookup's failure: the name is bound nowhere the walk can see. It carries nothing because the
+/// caller already holds the name, and there is only the one way to not find it.
+/// </summary>
+public readonly record struct Unbound;
+
+/// <summary>
 /// The names in scope, innermost last, and what kind of scope each one is. A block enters a scope
 /// on the way in and exits it on the way out; a lookup walks outward from the innermost, so an
 /// inner binding shadows an outer one of the same name.
@@ -77,9 +85,9 @@ public readonly record struct NoScopeData;
 /// makes one namespace and lexical function names work:
 /// </para>
 /// <list type="bullet">
-/// <item><see cref="TryLookupVariable"/> — the barrier <b>hides</b> a binding that does not
+/// <item><see cref="LookupVariable"/> — the barrier <b>hides</b> a binding that does not
 /// survive it, so a body cannot see its caller's locals.</item>
-/// <item><see cref="TryLookupFunction"/> — <b>no</b> barrier, because a function's own name is
+/// <item><see cref="LookupFunction"/> — <b>no</b> barrier, because a function's own name is
 /// declared in the scope outside its body and recursion could not work otherwise.</item>
 /// <item><see cref="TryFindEnclosing"/> — the walk <b>stops</b>, because a <c>break</c> written in
 /// a function called from inside a loop does not belong to that loop.</item>
@@ -129,24 +137,23 @@ public sealed class ScopeStack<TEntry, TScope> where TEntry : IScopeEntry
     /// Innermost first, then outward, as a value is resolved. Once the walk has crossed a
     /// <see cref="ScopeKind.Function"/> scope only an entry that survives the boundary is
     /// admitted, so a function body sees the names of functions declared around it and none of
-    /// the variables. False when the name is bound nowhere the walk can see it.
+    /// the variables. <see cref="Unbound"/> when the name is bound nowhere the walk can see it.
     /// </summary>
-    public bool TryLookupVariable(string name, out TEntry value)
+    public Result<TEntry, Unbound> LookupVariable(string name)
     {
         var crossed = false;
         for (int i = _scopes.Count - 1; i >= 0; i--)
         {
-            if (_scopes[i].Names.TryGetValue(name, out value!)
+            if (_scopes[i].Names.TryGetValue(name, out var value)
                 && (!crossed || value.SurvivesFunctionBoundary))
-                return true;
+                return Result.Ok<TEntry, Unbound>(value);
 
             // Checked after the scope's own names: a body's parameters live in the function
             // scope itself and are on this side of the barrier.
             crossed |= _scopes[i].Kind == ScopeKind.Function;
         }
 
-        value = default!;
-        return false;
+        return Result.Error<TEntry, Unbound>(default);
     }
 
     /// <summary>
@@ -155,14 +162,13 @@ public sealed class ScopeStack<TEntry, TScope> where TEntry : IScopeEntry
     /// through a <see cref="ScopeKind.Function"/> scope is exactly what lets a function call
     /// itself, its siblings and the functions around it.
     /// </summary>
-    public bool TryLookupFunction(string name, out TEntry value)
+    public Result<TEntry, Unbound> LookupFunction(string name)
     {
         for (int i = _scopes.Count - 1; i >= 0; i--)
-            if (_scopes[i].Names.TryGetValue(name, out value!))
-                return true;
+            if (_scopes[i].Names.TryGetValue(name, out var value))
+                return Result.Ok<TEntry, Unbound>(value);
 
-        value = default!;
-        return false;
+        return Result.Error<TEntry, Unbound>(default);
     }
 
     /// <summary>

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — architecture diagrams
+- `doc/architecture.md`: plain-text diagrams of the projects, the pipeline and where it fails, a feature × stage matrix, `ScopeStack` and its three walks, the basic-block layout of `if`/`while`, the `suru test` run, and the debug dumps
+
 ### Added — functions mean something
 - Semantic analysis understands `fn` and `return`: signatures are collected, bodies are scoped and checked, calls resolve to a declared function and are checked for arity and argument types, and a non-`void` function must return on every path. Codegen still cannot emit a declaration, so an `fn` program now analyzes cleanly and fails as `Internal compiler error: cannot emit statement 'FunctionDeclaration'` — the honest state of things until the emitter lands
 - **Every signature in a statement list is collected before any statement in it is analyzed.** That one ordering is the whole of what makes recursion, mutual recursion and a call to a function declared further down work, and it is why it is a pass rather than a lookup that resolves lazily. It runs for the file and for each function body, so a nested `fn` gets the same treatment as a top-level one. A consequence worth knowing: a `let` colliding with an `fn` of the same name is reported at the `let` whichever order the two are written in, because the function name was already there

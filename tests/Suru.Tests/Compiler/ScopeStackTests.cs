@@ -1,4 +1,5 @@
 using Suru.Compiler;
+using Suru.Lib;
 
 namespace Suru.Tests.Compiler;
 
@@ -24,14 +25,18 @@ public class ScopeStackTests
     /// <summary>A binding the barrier lets through — a function name, in both stages.</summary>
     private static Entry Fn(int value) => new(value, SurvivesFunctionBoundary: true);
 
+    /// <summary>A lookup that found <paramref name="entry"/>, to compare a whole result against.</summary>
+    private static Result<Entry, Unbound> Found(Entry entry) => Result.Ok<Entry, Unbound>(entry);
+
+    private static readonly Result<Entry, Unbound> NotFound = Result.Error<Entry, Unbound>(default);
+
     [Fact]
     public void FindsANameBoundInTheCurrentScope()
     {
         var scopes = new ScopeStack<Entry, string>();
         scopes.Declare("x", Local(1));
 
-        Assert.True(scopes.TryLookupVariable("x", out var value));
-        Assert.Equal(Local(1), value);
+        Assert.Equal(Found(Local(1)), scopes.LookupVariable("x"));
     }
 
     [Fact]
@@ -42,8 +47,7 @@ public class ScopeStackTests
         scopes.EnterNew();
         scopes.EnterNew();
 
-        Assert.True(scopes.TryLookupVariable("x", out var value));
-        Assert.Equal(Local(1), value);
+        Assert.Equal(Found(Local(1)), scopes.LookupVariable("x"));
     }
 
     [Fact]
@@ -54,8 +58,7 @@ public class ScopeStackTests
         scopes.EnterNew();
         scopes.Declare("x", Local(2));
 
-        Assert.True(scopes.TryLookupVariable("x", out var value));
-        Assert.Equal(Local(2), value);
+        Assert.Equal(Found(Local(2)), scopes.LookupVariable("x"));
     }
 
     [Fact]
@@ -67,8 +70,7 @@ public class ScopeStackTests
         scopes.Declare("x", Local(2));
         scopes.Exit();
 
-        Assert.True(scopes.TryLookupVariable("x", out var value));
-        Assert.Equal(Local(1), value);
+        Assert.Equal(Found(Local(1)), scopes.LookupVariable("x"));
     }
 
     [Fact]
@@ -79,7 +81,7 @@ public class ScopeStackTests
         scopes.Declare("x", Local(1));
         scopes.Exit();
 
-        Assert.False(scopes.TryLookupVariable("x", out _));
+        Assert.Equal(NotFound, scopes.LookupVariable("x"));
     }
 
     [Fact]
@@ -90,7 +92,7 @@ public class ScopeStackTests
         scopes.EnterNew();
 
         // Visible, but shadowing it is not a redeclaration.
-        Assert.True(scopes.TryLookupVariable("x", out _));
+        Assert.True(scopes.LookupVariable("x").IsOk);
         Assert.False(scopes.DeclaredHere("x"));
     }
 
@@ -107,8 +109,7 @@ public class ScopeStackTests
     [Fact]
     public void AnUnboundNameIsNotFound()
     {
-        Assert.False(new ScopeStack<Entry, string>().TryLookupVariable("x", out var value));
-        Assert.Null(value);
+        Assert.Equal(NotFound, new ScopeStack<Entry, string>().LookupVariable("x"));
     }
 
     [Fact]
@@ -210,7 +211,7 @@ public class ScopeStackTests
         scopes.Declare("x", Local(1));
         scopes.EnterNew(ScopeKind.Function);
 
-        Assert.False(scopes.TryLookupVariable("x", out _));
+        Assert.Equal(NotFound, scopes.LookupVariable("x"));
     }
 
     /// <summary>
@@ -225,8 +226,7 @@ public class ScopeStackTests
         scopes.Declare("f", Fn(1));
         scopes.EnterNew(ScopeKind.Function);
 
-        Assert.True(scopes.TryLookupVariable("f", out var value));
-        Assert.Equal(Fn(1), value);
+        Assert.Equal(Found(Fn(1)), scopes.LookupVariable("f"));
     }
 
     /// <summary>A parameter is declared in the function scope itself — this side of the barrier.</summary>
@@ -238,8 +238,7 @@ public class ScopeStackTests
         scopes.Declare("a", Local(1));
         scopes.EnterNew();
 
-        Assert.True(scopes.TryLookupVariable("a", out var value));
-        Assert.Equal(Local(1), value);
+        Assert.Equal(Found(Local(1)), scopes.LookupVariable("a"));
     }
 
     /// <summary>The function lookup has no barrier at all, which is what makes recursion work.</summary>
@@ -251,8 +250,7 @@ public class ScopeStackTests
         scopes.EnterNew(ScopeKind.Function);
         scopes.EnterNew(ScopeKind.Function);
 
-        Assert.True(scopes.TryLookupFunction("f", out var value));
-        Assert.Equal(Fn(1), value);
+        Assert.Equal(Found(Fn(1)), scopes.LookupFunction("f"));
     }
 
     /// <summary>
@@ -266,8 +264,7 @@ public class ScopeStackTests
         scopes.Declare("x", Local(1));
         scopes.EnterNew(ScopeKind.Function);
 
-        Assert.True(scopes.TryLookupFunction("x", out var value));
-        Assert.Equal(Local(1), value);
+        Assert.Equal(Found(Local(1)), scopes.LookupFunction("x"));
     }
 
     /// <summary>
@@ -283,7 +280,6 @@ public class ScopeStackTests
         scopes.Declare("f", Local(2));
         scopes.EnterNew(ScopeKind.Function);
 
-        Assert.True(scopes.TryLookupVariable("f", out var value));
-        Assert.Equal(Fn(1), value);
+        Assert.Equal(Found(Fn(1)), scopes.LookupVariable("f"));
     }
 }

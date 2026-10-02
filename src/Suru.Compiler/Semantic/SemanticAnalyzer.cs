@@ -1,4 +1,5 @@
 using Suru.Compiler.Parse.Ast;
+using Suru.Lib;
 
 namespace Suru.Compiler.Semantic;
 
@@ -502,19 +503,19 @@ public sealed class SemanticAnalyzer
     /// </summary>
     private SuruType? VariableType(SourcePosition position, string name)
     {
-        if (!_scopes.TryLookupVariable(name, out var binding))
+        switch (_scopes.LookupVariable(name))
         {
-            Error(position, $"unknown variable '{name}'");
-            return null;
-        }
+            case Ok<Binding, Unbound>(VariableBinding variable):
+                return variable.Type;
 
-        if (binding is not VariableBinding variable)
-        {
-            Error(position, $"'{name}' is a function and cannot be used as a value");
-            return null;
-        }
+            case Ok<Binding, Unbound>:
+                Error(position, $"'{name}' is a function and cannot be used as a value");
+                return null;
 
-        return variable.Type;
+            default:
+                Error(position, $"unknown variable '{name}'");
+                return null;
+        }
     }
 
     /// <summary>
@@ -581,13 +582,14 @@ public sealed class SemanticAnalyzer
         if (call.Name == PrintLn)
             return ResolvePrintLn(call);
 
-        if (!_scopes.TryLookupFunction(call.Name, out var binding))
+        var lookup = _scopes.LookupFunction(call.Name);
+        if (lookup.IsError)
         {
             Error(call.Position, $"unknown function '{call.Name}'");
             return null;
         }
 
-        if (binding is not FunctionBinding function)
+        if (lookup is not Ok<Binding, Unbound>(FunctionBinding function))
         {
             Error(call.Position, $"'{call.Name}' is not a function");
             return null;
