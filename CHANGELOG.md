@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — one emitter per function
+- **Codegen emits a function body through a `FunctionEmitter`**, which owns only what is per-function: the builder that writes the code and the one parked at the end of `entry` for the allocas. `main` is emitted through one like any function will be, and first, so its `entry` is still the first in the module. No behaviour change: every fixture's `--dump=llvm` is byte-identical to before
+- **Why a second emitter rather than moving the one alloca builder.** That builder sits at the end of its function's `entry` for the whole run, which is what puts every slot in the frame however deeply branched its `let` is. Moving it into another function's `entry` and back has to be done *exactly*, and a slot built while it was elsewhere lands silently in the wrong frame. Two emitters cannot get that wrong — each builder is positioned once. *Rejected alternative:* repositioning a shared builder, carefully
+- **What stays shared** is what is per-module: the LLVM module, the declared `printf` and test runtime, the interned strings, and the one `ScopeStack`. Sharing the scope stack is the per-query barrier paying off — a nested function's emitter will enter a `Function` scope on it, and the barrier already hides the enclosing function's variables, so nothing is copied, saved or restored
+- String interning keeps its module-level cache but takes the caller's builder: `BuildGlobalStringPtr` needs a positioned builder, and with one emitter per function there is no builder that belongs to the module. An unpositioned one is an LLVM assertion, not a C# exception
+- The emitter is disposable, so a `CodegenException` mid-emit no longer leaks the two builders the generator used to dispose in a straight line at the end
+
 ### Added — architecture diagrams
 - `doc/architecture.md`: plain-text diagrams of the projects, the pipeline and where it fails, a feature × stage matrix, `ScopeStack` and its three walks, the basic-block layout of `if`/`while`, the `suru test` run, and the debug dumps
 

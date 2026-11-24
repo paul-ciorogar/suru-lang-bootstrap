@@ -262,7 +262,15 @@ Add a `TODO` on the `ExpressionStatement` case ([SemanticAnalyzer.cs:71](../../s
 
 ## Task 5 — codegen restructure (no behaviour change)
 
-- [ ] `_allocas` is pinned to `main`'s `entry` and documented as "never moved" ([CodeGenerator.cs:28-33](../../src/Suru.Compiler/Codegen/CodeGenerator.cs#L28-L33)). A second function needs a second entry block, so **extract a `FunctionEmitter`** rather than repositioning a shared builder — "moved, but carefully" turns a wrong-frame slot into a silent bug.
+- [x] **Done.** Every existing test passes unedited, and `--dump=llvm` of every fixture is byte-identical to before. Three deviations:
+
+- **`FunctionEmitter` is a private class nested in a now-`partial` `CodeGenerator`**, in its own file. Nesting is what lets it reach the generator's private shared state (`_scopes`, `_strings`, the declared runtime) without widening any of it — the alternative was making those `internal`, i.e. everybody's business.
+- **It does not hold the function's `LLVMValueRef`**, only the `body` block `Finish()` branches to. Nothing in task 5 reads the function: `EmitIf`/`EmitWhile` take it from `InsertBlock.Parent`, as before. Task 6's parameter prologue (`GetParam`) is what adds it.
+- **`Variable` and `Loop` stay on `CodeGenerator`**, beside the `_scopes` they walk; they touch no builder. The static helpers (`LlvmType`, `IntPredicate`, `Int32`, `TypeOf`) stay there too.
+
+Also fixed in passing: CLAUDE.md's Codegen paragraph still named `_loops.Peek()`, which task 1 deleted.
+
+`_allocas` is pinned to `main`'s `entry` and documented as "never moved" ([CodeGenerator.cs:28-33](../../src/Suru.Compiler/Codegen/CodeGenerator.cs#L28-L33)). A second function needs a second entry block, so **extract a `FunctionEmitter`** rather than repositioning a shared builder — "moved, but carefully" turns a wrong-frame slot into a silent bug.
 
 **`FunctionEmitter` owns only what is truly per-function**: the two builders and the current `LLVMValueRef`. It builds the `entry`/`body` pair in its constructor and terminates `entry` with `BuildBr(body)` in `Finish()`, and is `IDisposable` so a `CodegenException` mid-emit no longer leaks the builders that [CodeGenerator.cs:140-141](../../src/Suru.Compiler/Codegen/CodeGenerator.cs#L140-L141) disposes in a straight line today.
 
