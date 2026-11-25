@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `#view` and `#assert` inside a function body
+- **`suru test` now finds the directives in a `fn` body, nested ones included.** Before, it collected directives only from top-level statements, blocks, `if` arms and `while` bodies. A body's `#view` or `#assert` was compiled and reported its frame, but no directive claimed the frame. The run then ended with "reported a 'view' for directive 0, which is not in this program" and left the source unwritten
+- **No other part of `suru test` changed: not the protocol, not the C shim, not `Frame`.** A body runs once per call, which a loop already raised: one directive can report many times or not at all. The id-keyed rules written for `while` already cover it. A `#view` in a function called three times shows the last call, and an `#assert` that ever failed stays failed with the value that first failed. A directive in a function never called, or past a `return`, reads `undefined`. A `#mock` on a parameter overrides the argument the caller passed, because a parameter is a stack slot like any `let`
+- The `directives-in-function` fixture covers each of these, plus a directive in a nested function
+
 ### Fixed — the build carries its own libLLVM
 - **Every project now builds for the host's RuntimeIdentifier**, set in a root `Directory.Build.targets`, so NuGet restores `libLLVM.runtime.<rid>` and copies LLVMSharp's own `libLLVM.so` beside the CLI and the test assembly. Without a RID that package is never restored, and the loader found only whatever unversioned `libLLVM.so` the system had. That broke every compile, and every integration test, once the system's LLVM 20 was gone
 - A `.targets` file rather than `.props`: the SDK defines `NETCoreSdkRuntimeIdentifier` after `Directory.Build.props` is read, so a RID taken from it there is silently empty
@@ -29,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A parameter gets a stack slot**, named `a.addr` beside the incoming `%a`, and its name is bound to the slot. Everything downstream already loads from and stores to a slot, so a parameter is readable, assignable and `#mock`-able without a case of its own — and assigning one never reaches the caller
 - **A non-`void` body whose last block is left open ends in `unreachable`.** It is not hypothetical: when both arms of an `if` return, `if.end` is appended anyway, with no predecessors and no terminator. The analyzer has proved every path returns, so the IR is told the block is never reached. This is the one place a mistake in that proof would be a miscompile rather than a rejected program, which is why the two stages share one definition of "returns". A `void` body left open returns
 - `return`, like `break` before it, leaves a block terminated, and needs nothing past its own instruction: the guard every branch already goes through, and the stop at the first terminated statement, were written for `break` and serve it unchanged
-- **Known gap:** a `#view`/`#assert` inside a body is not yet collected by `suru test`
 
 ### Changed — one emitter per function
 - **Codegen emits a function body through a `FunctionEmitter`**, which owns only what is per-function: the builder that writes the code and the one parked at the end of `entry` for the allocas. `main` is emitted through one like any function will be, and first, so its `entry` is still the first in the module. No behaviour change: every fixture's `--dump=llvm` is byte-identical to before

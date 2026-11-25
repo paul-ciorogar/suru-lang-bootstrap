@@ -213,6 +213,9 @@ internal static class TestRun
             case WhileStatement loop:
                 CollectDirectives(loop.Body, into);
                 break;
+            case FunctionDeclaration function:
+                CollectDirectives(function.Body, into);
+                break;
         }
     }
 

@@ -1,0 +1,50 @@
+// TODO tests will be only on a unit, a unit will be a function. Calling a funcion in a test will not trigger the mocks inside that function.
+// a mechanism to determine if a function is tested or called needs to be created. If it is called all directives behave as comments.
+
+// A function body is reached once per call, so a directive in one can report many times or
+// not at all — the same two cases a loop raised, answered by the same rules.
+
+// Called three times. Last hit wins for the '#view'; the '#assert' failed on the first call,
+// held on the second and failed on the third, and is sticky with the value that first failed.
+
+fn square(n i64) i64 {
+  let result i64: n * n
+  #view result: 9
+  #assert(result, 4): fail, got 1
+  return result
+}
+
+// Never called, so nothing in it is ever reached.
+fn neverCalled(n i64) i64 {
+  #view n: undefined
+  #assert(n, 0): undefined
+  return n
+}
+
+// A parameter is a slot like any 'let', so a mock overrides the argument the caller passed.
+fn echo(n i64) i64 {
+  #mock n: 7
+  #view n: 7
+  return n
+}
+
+// A directive is found however deeply the function holding it is nested.
+fn outer(n i64) i64 {
+  fn inner(m i64) i64 {
+    #view m: 40
+    return m + 1
+  }
+
+  return inner(n * 10)
+}
+
+// Past a 'return' a body is analyzed but never emitted, so its directive is never reached.
+fn early() i64 {
+  return 1
+  #view 2: undefined
+}
+
+printLn(square(1) + square(2) + square(3))
+printLn(echo(1))
+printLn(outer(4))
+printLn(early())

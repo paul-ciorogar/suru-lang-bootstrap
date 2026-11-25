@@ -343,7 +343,7 @@ Fixture must prove a call on the dead side is **not** made — a function that p
 
 ## Task 8 — test-mode directives in function bodies
 
-- [ ] **[TestRun.cs:36](../../src/Suru.Compiler/Testing/TestRun.cs#L36)** seeds `CollectDirectives` from `module.Statements` only. A directive in a body would be collected by nobody, its frame would match no directive, and `TestRun` would **throw and leave the source file unwritten** — the exact failure its own comment warns about. Fix: recurse into `FunctionDeclaration.Body`.
+- [x] **[TestRun.cs:36](../../src/Suru.Compiler/Testing/TestRun.cs#L36)** seeds `CollectDirectives` from `module.Statements` only. A directive in a body would be collected by nobody, its frame would match no directive, and `TestRun` would **throw and leave the source file unwritten** — the exact failure its own comment warns about. Fix: recurse into `FunctionDeclaration.Body`.
 
 `ReturnStatement` needs no case — it carries an `Expression`, and directives are statements.
 
