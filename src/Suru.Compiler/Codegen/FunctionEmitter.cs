@@ -220,15 +220,16 @@ public sealed partial class CodeGenerator
         /// <c>if</c>, with or without an <c>else</c>. With no <c>else</c> there is still an
         /// <c>if.end</c>, because the program needs somewhere to continue.
         /// <para>
-        /// An arm can leave early, so when both do, <c>if.end</c> has no predecessors. That is
-        /// valid IR only while no phi node exists — every variable is an alloca in <c>entry</c>.
-        /// The first expression that needs a phi, a short-circuiting <c>and</c>, must revisit it.
+        /// An arm can leave early, so when both do, <c>if.end</c> has no predecessors. A block
+        /// with no predecessors is legal as long as it holds no phi, and every phi this compiler
+        /// emits sits in a block it has just created with an edge into it (<c>and.end</c>,
+        /// <c>or.end</c>). Variables need none: each is an alloca in <c>entry</c>.
         /// </para>
         /// </summary>
         private void EmitIf(IfStatement branch)
         {
-            // Read after the condition, so it would still be right if the condition emitted
-            // blocks of its own, as a short-circuiting 'and' will.
+            // Read after the condition, because a short-circuiting 'and' in it emits blocks of
+            // its own.
             var condition = EmitExpr(branch.Condition);
             var function = _builder.InsertBlock.Parent;
 
@@ -345,15 +346,14 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Both operands are evaluated, <c>and</c> and <c>or</c> included.
-        /// <para>
-        /// TODO(short-circuit): that was sound while no expression could have a side effect, and a
-        /// call is one — <c>false and f()</c> runs <c>f</c> today. Task 7 of
-        /// doc/RD/todo_functions.md fixes it.
-        /// </para>
+        /// Both operands are evaluated, except for <c>and</c> and <c>or</c>, which are sent off
+        /// before either side is emitted: whether the right side runs at all is their meaning.
         /// </summary>
         private LLVMValueRef EmitBinary(BinaryExpression binary)
         {
+            if (binary.Operator is BinaryOperator.And or BinaryOperator.Or)
+                return EmitShortCircuit(binary);
+
             var left = EmitExpr(binary.Left);
             var right = EmitExpr(binary.Right);
             var operandType = binary.Left.Type
@@ -370,10 +370,45 @@ public sealed partial class CodeGenerator
                 // Integer division truncates toward zero and yields an integer.
                 BinaryOperator.Divide => _builder.BuildSDiv(left, right),
                 BinaryOperator.Remainder => _builder.BuildSRem(left, right),
-                BinaryOperator.And => _builder.BuildAnd(left, right),
-                BinaryOperator.Or => _builder.BuildOr(left, right),
                 _ => _builder.BuildICmp(IntPredicate(binary.Operator), left, right),
             };
+        }
+
+        /// <summary>
+        /// <c>a and b</c> runs <c>b</c> only when <c>a</c> is true; <c>a or b</c> only when it
+        /// is false. The skipped side's answer is already known — <c>false</c> for <c>and</c>,
+        /// <c>true</c> for <c>or</c> — so that edge into the phi carries a constant.
+        /// <para>
+        /// Each incoming block is the insert block as it stands after its operand, never the one
+        /// the operand started in: an operand that is itself an <c>and</c> ends in its own
+        /// <c>.end</c> block, and a chain folds left, so that is the common case.
+        /// </para>
+        /// </summary>
+        private LLVMValueRef EmitShortCircuit(BinaryExpression binary)
+        {
+            var isAnd = binary.Operator == BinaryOperator.And;
+            var prefix = isAnd ? "and" : "or";
+
+            var left = EmitExpr(binary.Left);
+            var leftBlock = _builder.InsertBlock;
+            var function = leftBlock.Parent;
+
+            var rhsBlock = function.AppendBasicBlock($"{prefix}.rhs");
+            var endBlock = function.AppendBasicBlock($"{prefix}.end");
+
+            _builder.BuildCondBr(left, isAnd ? rhsBlock : endBlock, isAnd ? endBlock : rhsBlock);
+
+            _builder.PositionAtEnd(rhsBlock);
+            var right = EmitExpr(binary.Right);
+            var rightBlock = _builder.InsertBlock;
+            // Not BranchTo: an expression cannot leave its block terminated, only a statement can.
+            _builder.BuildBr(endBlock);
+
+            _builder.PositionAtEnd(endBlock);
+            var phi = _builder.BuildPhi(LLVMTypeRef.Int1, prefix);
+            var skipped = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, isAnd ? 0ul : 1ul, false);
+            phi.AddIncoming([skipped, right], [leftBlock, rightBlock], 2);
+            return phi;
         }
 
         private LLVMValueRef EmitFloatBinary(BinaryOperator op, LLVMValueRef left, LLVMValueRef right) =>

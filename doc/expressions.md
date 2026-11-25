@@ -128,9 +128,22 @@ is a gap in the bootstrap compiler, not a decision.
 
 ## Evaluation
 
-`and` and `or` evaluate both sides. No expression can have a side effect yet — there are
-no user-defined functions — so this is not observable, and short-circuiting will arrive
-with the feature that makes it matter.
+`and` and `or` short-circuit: `and` evaluates its right side only when the left is
+`true`, and `or` only when the left is `false`. Otherwise the left side has already decided
+the answer.
+
+```suru
+fn loud(v bool) bool {
+  printLn(v)
+  return v
+}
+
+printLn(false and loud(true))   // false — loud is never called
+printLn(true or loud(false))    // true — loud is never called
+```
+
+Since operators fold left to right, `a and b or c` is `(a and b) or c`, and each operator
+decides whether to run its own right side.
 
 ## Not yet supported
 

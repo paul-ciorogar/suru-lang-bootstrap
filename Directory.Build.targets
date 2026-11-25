@@ -1,0 +1,17 @@
+<Project>
+
+  <!--
+    LLVMSharp's native libLLVM ships in a per-RID package (libLLVM.runtime.<rid>) that NuGet
+    restores only for a build with a RuntimeIdentifier. Without one, the loader falls back to
+    whatever unversioned libLLVM.so the system happens to have, which need not exist or be the
+    version LLVMSharp was built against. The host's own RID keeps the build portable; set on
+    every project so a referencing project never disagrees with what it references.
+    A .targets file rather than .props: the SDK defines NETCoreSdkRuntimeIdentifier after
+    Directory.Build.props is read, so there it is still empty.
+  -->
+  <PropertyGroup>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+</Project>

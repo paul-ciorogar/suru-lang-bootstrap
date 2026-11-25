@@ -331,7 +331,7 @@ This is the one place a bug in `AlwaysReturns` becomes invalid IR rather than a 
 
 ## Task 7 — short-circuiting `and` / `or`
 
-- [ ] Dispatched from `EmitBinary` **before** the type switch, since it must not evaluate the right operand eagerly. Emits `and.rhs`/`and.end` (or `or.*`), a `cond-br`, and a phi over `Int1`.
+- [x] Dispatched from `EmitBinary` **before** the type switch, since it must not evaluate the right operand eagerly. Emits `and.rhs`/`and.end` (or `or.*`), a `cond-br`, and a phi over `Int1`.
 
 Both incoming blocks are **re-read** from `_builder.InsertBlock` after emitting each operand, never assumed — emitting an operand may itself have been a short-circuit and moved the insert block. `EmitIf` already reads its function after the condition ([CodeGenerator.cs:247-251](../../src/Suru.Compiler/Codegen/CodeGenerator.cs#L247-L251)) in anticipation of exactly this, and `EmitWhile` reading it before (`:305`) stays correct because emission moves the insert *block*, never the function.
 

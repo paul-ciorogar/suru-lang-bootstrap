@@ -99,6 +99,22 @@ public class DumpIntegrationTests : IDisposable
         Assert.Contains("unreachable", dump);
     }
 
+    [Fact]
+    public void AndOrBranchToAPhiInsteadOfComputingBothSides()
+    {
+        var dump = Compile(Dump.Llvm, "short-circuit");
+
+        Assert.Contains("and.rhs", dump);
+        Assert.Contains("and.end", dump);
+        Assert.Contains("or.rhs", dump);
+        Assert.Contains("or.end", dump);
+        Assert.Contains("phi i1", dump);
+
+        // The bitwise forms evaluate both operands, which is what short-circuiting rules out.
+        Assert.DoesNotContain("= and i1", dump);
+        Assert.DoesNotContain("= or i1", dump);
+    }
+
     private string Compile(Dump stages, string fixture = "print")
     {
         var writer = new StringWriter();
