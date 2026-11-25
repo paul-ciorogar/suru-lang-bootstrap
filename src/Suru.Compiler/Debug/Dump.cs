@@ -3,11 +3,9 @@ namespace Suru.Compiler.Debug;
 /// <summary>
 /// The compiler stages that can dump their output.
 /// <para>
-/// Compilers debug by dumping the whole intermediate form after each stage — you
-/// diff what the program looked like before and after a stage — rather than by
-/// narrating events the way an application log does. The dumps are always
-/// compiled in and off by default, because the person who needs them is usually
-/// holding a release build.
+/// A compiler is debugged by diffing whole intermediate forms before and after a stage, not
+/// by logging events. Dumps are always compiled in and off by default, because the person who
+/// needs them is usually holding a release build.
 /// </para>
 /// </summary>
 [Flags]

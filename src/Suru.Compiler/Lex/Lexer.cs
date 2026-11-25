@@ -35,9 +35,8 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
                 continue;
             }
 
-            // A production build treats a directive as a comment, so the parser never learns
-            // one was there; a test build hands the '#' over and lexes the rest of the line
-            // like any other code.
+            // A production build treats a directive as a comment, so no later stage can be
+            // broken by a directive it does not understand.
             if (c == '#' && mode == BuildMode.Production)
             {
                 SkipRestOfLine();
@@ -52,13 +51,11 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
                 case '{': Advance(); return new Token(TokenKind.LeftBrace, startLine, startCol);
                 case '}': Advance(); return new Token(TokenKind.RightBrace, startLine, startCol);
                 case ',': Advance(); return new Token(TokenKind.Comma, startLine, startCol);
-                // Reached only in BuildMode.Test; a production build skipped the line above.
                 case '#': Advance(); return new Token(TokenKind.Hash, startLine, startCol);
                 case ':': Advance(); return new Token(TokenKind.Colon, startLine, startCol);
                 case '+': Advance(); return new Token(TokenKind.Plus, startLine, startCol);
                 case '-': Advance(); return new Token(TokenKind.Minus, startLine, startCol);
                 case '*': Advance(); return new Token(TokenKind.Star, startLine, startCol);
-                // A '/' pair is a comment, handled above; a lone one divides.
                 case '/': Advance(); return new Token(TokenKind.Slash, startLine, startCol);
                 case '%': Advance(); return new Token(TokenKind.Percent, startLine, startCol);
                 case '=': Advance(); return new Token(TokenKind.Equal, startLine, startCol);
@@ -90,8 +87,8 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
             "break" => TokenKind.Break,
             "continue" => TokenKind.Continue,
             "fn" => TokenKind.Fn,
-            // 'void' is deliberately absent: it stays an ordinary identifier like 'i64', so
-            // the stage that decides where it may be written is the analyzer, not the parser.
+            // 'void' is deliberately absent: like 'i64' it is an identifier, so where it may be
+            // written is the analyzer's call, not the parser's.
             "return" => TokenKind.Return,
             "and" => TokenKind.And,
             "or" => TokenKind.Or,
@@ -125,11 +122,10 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
     }
 
     /// <summary>
-    /// Reads an integer or float literal. An integer is decimal, or hexadecimal, binary or
-    /// octal behind a <c>0x</c>/<c>0b</c>/<c>0o</c> prefix — lowercase only, so a literal
-    /// has one spelling; every form may separate digits with <c>_</c>. The literal is
-    /// decoded here rather than in the parser, since this is the only stage that knows the
-    /// base and has a position to report an error against.
+    /// An integer or float literal. An integer is decimal, or hexadecimal, binary or octal
+    /// behind a <c>0x</c>/<c>0b</c>/<c>0o</c> prefix — lowercase only, so a literal has one
+    /// spelling; every form may separate digits with <c>_</c>. Decoded here rather than in the
+    /// parser, since only this stage knows the base and has a position to report against.
     /// </summary>
     private Token ReadNumber()
     {
@@ -140,8 +136,8 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
         if (Peek() == '0' && PrefixBase(Peek(1)) is var prefix && prefix is not null)
         {
             var (radix, name) = prefix.Value;
-            Advance(); // '0'
-            Advance(); // 'x', 'b' or 'o'
+            Advance();
+            Advance();
             ScanDigits(radix, name, digits);
             RejectTrailing(name);
             return new Token(source[start.._pos], ToMagnitude(digits, radix, startLine, startCol), startLine, startCol);
@@ -195,9 +191,8 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
     }
 
     /// <summary>
-    /// Consumes a run of digits of the given base, appending them to
-    /// <paramref name="digits"/> with the separators dropped. A <c>_</c> must sit between
-    /// two digits, so it can neither open nor close the run nor follow another <c>_</c>.
+    /// A run of digits of the given base, separators dropped. A <c>_</c> must sit between two
+    /// digits, so it can neither open nor close the run nor follow another <c>_</c>.
     /// </summary>
     private void ScanDigits(int radix, string name, StringBuilder digits)
     {
@@ -241,10 +236,9 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
     }
 
     /// <summary>
-    /// Decodes the digits as an unsigned magnitude. The bound is one past
-    /// <see cref="long.MaxValue"/> rather than <see cref="long.MaxValue"/> itself: the sign
-    /// is not part of the literal, so only the parser knows whether 9223372036854775808 is
-    /// the negated <c>i64</c> minimum or an out-of-range positive.
+    /// The bound is one past <see cref="long.MaxValue"/>: the sign is not part of the literal,
+    /// so only the parser knows whether 9223372036854775808 is the negated <c>i64</c> minimum
+    /// or an out-of-range positive.
     /// </summary>
     private ulong ToMagnitude(StringBuilder digits, int radix, int line, int column)
     {
@@ -261,7 +255,7 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
         }
         catch (OverflowException)
         {
-            // Falls through to the same diagnostic — too big to decode is still too big.
+            // Too big to decode is still too big: same diagnostic.
         }
 
         throw new LexException($"{sourcePath}({line},{column}): integer literal is out of range for 'i64'");
@@ -271,15 +265,8 @@ public sealed class Lexer(string source, string sourcePath, BuildMode mode = Bui
     private const ulong NegatedMinimum = (ulong)long.MaxValue + 1;
 
     /// <summary>
-    /// Consumes everything up to — but not including — the newline, so the newline itself
-    /// still goes through <see cref="AdvanceWhitespace"/> and keeps the line counter right.
-    /// A last line without one just runs into EOF.
-    /// <para>
-    /// Three callers, all discarding text no stage will look at: a <c>//</c> comment, a
-    /// <c>#</c> directive in a production build, and — through
-    /// <see cref="Tokens.DiscardRestOfLine"/> — the rest of a directive's line, past the
-    /// <c>:</c> of a <c>#view</c> or the <c>)</c> of a <c>#assert</c>.
-    /// </para>
+    /// Discards text no stage will look at. Stops short of the newline, so
+    /// <see cref="AdvanceWhitespace"/> still counts it and the line numbers stay right.
     /// </summary>
     internal void SkipRestOfLine()
     {

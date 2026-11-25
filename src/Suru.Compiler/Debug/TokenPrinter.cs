@@ -6,10 +6,8 @@ namespace Suru.Compiler.Debug;
 /// <summary>
 /// Prints the token stream in source order.
 /// <para>
-/// The source is lexed a second time rather than teeing the parser's cursor:
-/// lexing here is context-free, so the result is identical, the pull-based path
-/// through <c>Tokens</c> stays untouched, and the dump costs exactly nothing
-/// when it is off.
+/// Re-lexes the source rather than teeing the parser's cursor, so the pull path through
+/// <c>Tokens</c> stays untouched and the dump costs nothing when it is off.
 /// </para>
 /// </summary>
 public static class TokenPrinter
@@ -35,7 +33,7 @@ public static class TokenPrinter
         }
         catch (LexException exception)
         {
-            // The real parse reports this properly; the dump just stops where the lexer did.
+            // The real parse reports this; the dump only stops where the lexer did.
             output.Append($"<lex error: {exception.Message}>\n");
         }
 

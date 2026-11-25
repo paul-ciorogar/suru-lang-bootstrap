@@ -51,17 +51,15 @@ public sealed class Parser
             return new BreakStatement(PositionOf(Expect(TokenKind.Break)));
         if (token.Kind == TokenKind.Continue)
             return new ContinueStatement(PositionOf(Expect(TokenKind.Continue)));
-        // An identifier starts an assignment only when a ':' follows; otherwise it
-        // is the start of an expression — a call, or a use of the name.
+        // Without a ':' after it, an identifier starts an expression: a call or a use of the name.
         if (token.Kind == TokenKind.Identifier && _tokens.Peek().Kind == TokenKind.Colon)
             return ParseAssignment();
         return new ExpressionStatement(ParseExpression());
     }
 
     /// <summary>
-    /// The same loop as <see cref="_Parse"/>, stopping at the closing brace. It stops at
-    /// <c>Eof</c> too, so an unterminated block ends as 'expected RightBrace, got Eof'
-    /// rather than spinning.
+    /// Stops at <c>Eof</c> as well as <c>}</c>, so an unterminated block reports
+    /// 'expected RightBrace, got Eof' rather than spinning.
     /// </summary>
     /// <remarks>
     /// The kind is decided here rather than re-derived downstream: the parser is the one stage
@@ -78,19 +76,16 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>if &lt;condition&gt; { ... }</c> with an optional <c>else</c>. The body is always
-    /// braced: there is no single-statement form, so there is no dangling <c>else</c> to have a
-    /// rule about.
+    /// <c>if &lt;condition&gt; { ... }</c> with an optional <c>else</c>. Arms are always braced,
+    /// so there is no dangling <c>else</c> to have a rule about.
     /// <para>
-    /// <c>else if</c> recurses here rather than being a form of its own, which is what makes a
-    /// trailing <c>else</c> belong to the nearest <c>if</c>. The condition needs no terminator
-    /// either: <c>{</c> is not a binary operator, so the fold in
-    /// <see cref="ParseExpression"/> stops at it on its own.
+    /// <c>else if</c> is an <c>else</c> whose body is another <c>if</c>, not a form of its own.
+    /// The condition needs no terminator: <c>{</c> is not a binary operator, so
+    /// <see cref="ParseExpression"/> stops at it.
     /// </para>
     /// <para>
-    /// Only <see cref="Tokens.Current"/> is consulted, never <see cref="Tokens.Peek"/>: a
-    /// directive inside an arm relies on <see cref="Tokens.DiscardRestOfLine"/>, which refuses to
-    /// run with anything buffered ahead of it.
+    /// Never uses <see cref="Tokens.Peek"/>: a directive inside an arm relies on
+    /// <see cref="Tokens.DiscardRestOfLine"/>, which refuses to run with anything buffered.
     /// </para>
     /// </summary>
     private IfStatement ParseIf()
@@ -103,7 +98,6 @@ public sealed class Parser
         if (_tokens.Current().Kind == TokenKind.Else)
         {
             _tokens.Next();
-            // An 'else if' is a nested IfStatement, so its own arms are marked by that call.
             otherwise = _tokens.Current().Kind == TokenKind.If
                 ? ParseIf()
                 : ParseBlock(ScopeKind.Branch);
@@ -113,36 +107,28 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>while &lt;condition&gt; { ... }</c>. Structurally an <see cref="ParseIf"/> with no
-    /// second arm, and it inherits both of that method's reasons: the body is always braced, so
-    /// there is no single-statement form, and the condition needs no terminator because
-    /// <c>{</c> is not a binary operator and the fold in <see cref="ParseExpression"/> stops at
-    /// it on its own.
-    /// <para>
-    /// Only <see cref="Tokens.Current"/> is consulted, never <see cref="Tokens.Peek"/>, for the
-    /// reason <see cref="ParseIf"/> gives: a directive inside the body relies on
-    /// <see cref="Tokens.DiscardRestOfLine"/>, which refuses to run with anything buffered.
-    /// </para>
+    /// <c>while &lt;condition&gt; { ... }</c>. An <see cref="ParseIf"/> with no second arm, for
+    /// the same reasons: braced body, unterminated condition, and no <see cref="Tokens.Peek"/>
+    /// so a directive in the body can still <see cref="Tokens.DiscardRestOfLine"/>.
     /// </summary>
     private WhileStatement ParseWhile()
     {
         var keyword = Expect(TokenKind.While);
         var condition = ParseExpression();
-        // This block is the loop's scope, which is what a 'break' inside it searches outward for.
+        // The scope a 'break' or 'continue' searches outward for.
         var body = ParseBlock(ScopeKind.Loop);
         return new WhileStatement(PositionOf(keyword), condition, body);
     }
 
     /// <summary>
     /// <c>fn &lt;name&gt;(&lt;parameters&gt;) &lt;return type&gt; { ... }</c>. The return type
-    /// is always written and is read as a plain identifier — <c>void</c> included — so where
-    /// <c>void</c> may appear is left to the analyzer. So is where a declaration may appear: this
-    /// is reached from <see cref="ParseStatement"/>, which is to say from anywhere.
+    /// is always written and is a plain identifier, <c>void</c> included, so where <c>void</c>
+    /// may appear is the analyzer's call — as is where a declaration may appear, since this is
+    /// reachable from any statement.
     /// <para>
-    /// Only <see cref="Expect"/> and <see cref="Tokens.Current"/> are used, never
-    /// <see cref="Tokens.Peek"/>, for the reason <see cref="ParseIf"/> gives: a directive as the
-    /// body's first statement relies on <see cref="Tokens.DiscardRestOfLine"/>, which refuses to
-    /// run with anything buffered.
+    /// Only <see cref="Expect"/> and <see cref="Tokens.Current"/>, never <see cref="Tokens.Peek"/>:
+    /// a directive as the body's first statement relies on <see cref="Tokens.DiscardRestOfLine"/>,
+    /// which refuses to run with anything buffered.
     /// </para>
     /// </summary>
     private FunctionDeclaration ParseFunction()
@@ -153,16 +139,15 @@ public sealed class Parser
         var parameters = ParseParameters();
         _ = Expect(TokenKind.RightParen);
         var returnType = Expect(TokenKind.Identifier);
-        // The body is the function's scope: the barrier that hides the enclosing variables and
-        // stops a 'break' from finding a loop outside the function.
+        // The barrier that hides enclosing variables and stops a 'break' finding an outer loop.
         var body = ParseBlock(ScopeKind.Function);
         return new FunctionDeclaration(
             PositionOf(keyword), name.Text, parameters, returnType.Text, PositionOf(returnType), body);
     }
 
     /// <summary>
-    /// Comma-separated, zero allowed, no trailing comma — <see cref="ParseArguments"/> line for
-    /// line. Uses no <see cref="Tokens.Peek"/>, for the reason <see cref="ParseFunction"/> gives.
+    /// Comma-separated, zero allowed, no trailing comma. No <see cref="Tokens.Peek"/>, for the
+    /// reason <see cref="ParseFunction"/> gives.
     /// </summary>
     private List<Parameter> ParseParameters()
     {
@@ -186,20 +171,19 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>return</c>, optionally followed by a value. Whether it is the analyzer's business is
-    /// not decided here: a <c>return</c> outside a function parses, and is reported later.
+    /// <c>return</c>, optionally followed by a value. A <c>return</c> outside a function parses;
+    /// the analyzer reports it.
     /// <para>
-    /// Uses no <see cref="Tokens.Peek"/>, for the reason <see cref="ParseFunction"/> gives — a
+    /// No <see cref="Tokens.Peek"/>, for the reason <see cref="ParseFunction"/> gives: a
     /// directive on the line after a bare <c>return</c> must still find nothing buffered.
     /// </para>
     /// </summary>
     private Statement ParseReturn()
     {
         var keyword = Expect(TokenKind.Return);
-        // The same-line rule: a value belongs to this 'return' only if it starts on its line.
-        // The one place a newline is significant, because without it the next statement would
-        // silently become the returned value. A value that began here still continues onto a
-        // following line that starts with an operator, exactly as any expression does.
+        // A value belongs to this 'return' only if it starts on its line — the one place a
+        // newline is significant, since otherwise the next statement would silently become the
+        // returned value. Once started, the value continues across lines like any expression.
         var next = _tokens.Current();
         var value = next.Line == keyword.Line && StartsAnExpression(next.Kind)
             ? ParseExpression()
@@ -231,15 +215,13 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// A <c>#</c> test directive. The word after the <c>#</c> is an ordinary identifier
-    /// rather than a keyword, so <c>mock</c>, <c>view</c> and <c>assert</c> remain usable as
-    /// names everywhere else in the language.
+    /// A <c>#</c> test directive. Its name is an identifier, not a keyword, so <c>mock</c>,
+    /// <c>view</c> and <c>assert</c> stay usable as names everywhere else.
     /// <para>
-    /// A directive owns the rest of its line. Each of the three ends at a terminator of its
-    /// own — the <c>:</c> of a <c>#view</c>, the <c>)</c> of a <c>#assert</c>, the value
-    /// expression of a <c>#mock</c> — and the two that carry an annotation throw away
-    /// everything from that terminator to the newline without lexing it. Nothing downstream
-    /// ever sees a second directive on a line, because the first one consumed it.
+    /// A directive owns the rest of its line: it ends at its terminator (the <c>:</c> of a
+    /// <c>#view</c>, the <c>)</c> of a <c>#assert</c>, the value of a <c>#mock</c>), and the two
+    /// that carry an annotation discard the rest of the line unlexed, since a run writes text
+    /// there that no lexer can accept.
     /// </para>
     /// </summary>
     private Statement ParseDirective()
@@ -259,10 +241,9 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>#mock &lt;name&gt;: &lt;value&gt;</c>. The colon is the assignment's, not an
-    /// annotation's: what follows it is an expression, and a mock reports nothing, so it is
-    /// never written back to. Its value expression is therefore the end of the directive, and
-    /// anything else on the line is a mistake rather than text to discard.
+    /// <c>#mock &lt;name&gt;: &lt;value&gt;</c>. The colon is an assignment's, not an
+    /// annotation's: a mock reports nothing and is never written back to, so anything after its
+    /// value is a mistake rather than text to discard.
     /// </summary>
     private Statement ParseMock(Token hash)
     {
@@ -275,9 +256,8 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>#view &lt;expression&gt;:</c>. The colon is required — it is where the run writes
-    /// the value, so a <c>#view</c> without one has nowhere to report to — and it ends the
-    /// directive: everything after it is discarded up to the newline.
+    /// <c>#view &lt;expression&gt;:</c>. The colon is required: it is where a run writes the
+    /// value, so without it there is nowhere to report to.
     /// </summary>
     private Statement ParseView(Token hash)
     {
@@ -294,11 +274,10 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>#assert(&lt;actual&gt;, &lt;expected&gt;)</c>. The <c>)</c> ends the directive, so
-    /// the annotation a run writes after it — colon and all — is discarded up to the newline.
+    /// <c>#assert(&lt;actual&gt;, &lt;expected&gt;)</c>.
     /// <para>
     /// The <c>)</c> is not consumed with <see cref="Expect"/>: that would lex the token after
-    /// it, and the annotation is text no lexer can accept.
+    /// it, and the annotation a run writes there is text no lexer can accept.
     /// </para>
     /// </summary>
     private Statement ParseAssert(Token hash)
@@ -322,9 +301,7 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Rejects anything still sitting on the directive's line. Only <c>#mock</c> needs it:
-    /// the other two discard the rest of the line at their terminator, so there is nothing
-    /// left for this to find.
+    /// Only <c>#mock</c> needs this: the other two discard the rest of their line.
     /// </summary>
     private void RequireNothingElseOnTheLine(Token hash)
     {
@@ -336,21 +313,20 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Holds a directive to the line its <c>#</c> is on. Ordinary statements may run over
-    /// several lines, but a directive is a comment as far as a production build is
-    /// concerned, and a comment stops at the newline.
+    /// Holds a directive to the line its <c>#</c> is on: to a production build a directive is a
+    /// comment, and a comment stops at the newline.
     /// <para>
-    /// <paramref name="last"/> is where the directive ended: the token it last consumed, or —
-    /// for a <c>#assert</c>, whose <c>)</c> is still at the cursor — that <c>)</c>.
+    /// <paramref name="last"/> is the directive's final token — for a <c>#assert</c>, the
+    /// <c>)</c> still at the cursor.
     /// </para>
     /// </summary>
     private void RequireOneLine(Token hash, Token last)
     {
-        // TODO: add multy line directives ex:
+        // TODO: multi-line directives, continued by a line starting with '#':
         // #mock val
         // # + 1
         // # * 3
-        // or in the case of a view that will print a lot of text adding a new line with # would continue the print ex:
+        // and likewise a long #view annotation:
         // #view largeTextVal: "some really large text
         // # that continues on this line also"
         if (last.Line != hash.Line)
@@ -360,11 +336,9 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Operands folded left to right with no precedence — Suru has none, so this is
-    /// one loop rather than a precedence table. It is also the whole line-continuation
-    /// rule: an expression keeps going while the next token is a binary operator, and
-    /// since no statement can begin with one, the following line joins exactly when it
-    /// starts with an operator.
+    /// Folds left to right: Suru has no precedence. This is also the whole line-continuation
+    /// rule — no statement begins with a binary operator, so a line joins the previous
+    /// expression exactly when it starts with one.
     /// </summary>
     private Expression ParseExpression()
     {
@@ -381,10 +355,8 @@ public sealed class Parser
     {
         var token = _tokens.Current();
 
-        // A '-' straight in front of a number is part of the literal, not an operator on
-        // it: '-1' is the literal -1. Only here, in prefix position — the '-' of '1 - 2'
-        // is consumed as a binary operator before this is ever reached. It is also the
-        // only way to write the i64 minimum, whose magnitude no positive literal may have.
+        // A prefix '-' on a number is part of the literal, not a negation: it is the only way
+        // to write the i64 minimum, whose magnitude no positive literal may have.
         if (token.Kind == TokenKind.Minus && IsNumber(_tokens.Peek().Kind))
         {
             _tokens.Next();
@@ -408,9 +380,8 @@ public sealed class Parser
         kind is TokenKind.IntLiteral or TokenKind.FloatLiteral;
 
     /// <summary>
-    /// Builds the literal for a number token, applying a folded-in sign. The lexer decodes
-    /// an unsigned magnitude, so the range check lands here: 9223372036854775808 is the
-    /// <c>i64</c> minimum when negated and out of range when not.
+    /// The range check lives here, not in the lexer, because only the sign decides it:
+    /// 9223372036854775808 is the <c>i64</c> minimum when negated and out of range when not.
     /// </summary>
     private Expression NumberLiteral(Token token, SourcePosition position, bool negated)
     {
@@ -488,7 +459,7 @@ public sealed class Parser
             return new CallExpression(PositionOf(token), token.Text, args);
         }
 
-        // The lexer decodes a number, since only it knows the base it was written in.
+        // Already decoded by the lexer, the only stage that knows the base it was written in.
         if (IsNumber(token.Kind))
             return NumberLiteral(token, PositionOf(token), negated: false);
 
@@ -512,8 +483,7 @@ public sealed class Parser
             _tokens.Next();
             return token;
         }
-        // TODO: the parser should store the error message and try to continue parsing
-        // presenting the user with more errors is a good thing
+        // TODO: record the error and recover, so one run reports more than the first.
         throw new ParseException($"{_tokens.SourcePath}({token.Line},{token.Column}): expected {kind}, got {token.Kind}");
     }
 }

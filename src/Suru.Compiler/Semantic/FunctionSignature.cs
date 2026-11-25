@@ -2,8 +2,7 @@ namespace Suru.Compiler.Semantic;
 
 /// <summary>
 /// What a call needs to know about a function: how many arguments, of what types, and what it
-/// yields. Collected before any statement in a list is analyzed, which is what lets a call reach
-/// a function declared further down.
+/// yields.
 /// <para>
 /// Deliberately <b>not</b> a <see cref="SuruType"/>. Nothing in the language can hold a function
 /// as a value and there is no syntax for writing a function type down, so a type node for one

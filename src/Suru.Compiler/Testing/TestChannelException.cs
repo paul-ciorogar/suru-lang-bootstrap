@@ -3,10 +3,9 @@ namespace Suru.Compiler.Testing;
 /// <summary>
 /// The test channel failed, and this says how.
 /// <para>
-/// Every one of these carries a whole sentence written to be read, because the failure they
+/// Every one carries a whole sentence meant to be shown as it is, because the failure they
 /// exist to prevent is the shim's own default: records dropped silently, every directive
-/// annotated <c>undefined</c>, and nothing said about why. <c>Compiler.Test</c> passes the
-/// message through verbatim rather than wrapping it.
+/// annotated <c>undefined</c>, and nothing said about why.
 /// </para>
 /// <para>
 /// A run that throws one of these leaves the source file untouched. That is deliberate — a

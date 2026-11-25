@@ -27,23 +27,19 @@ public class Spec
     public const string HelpFlag = "--help";
     public const string HelpSmallFlag = "-h";
 
-    // Each step either hands the spec on or ends the parse: AndThen carries a failure
-    // through untouched, so no step past the failing one has to ask whether one happened.
+    // Chained, so no step past a failing one has to ask whether a failure happened.
     public static Result<Spec, ArgsError> Parse(string[] args) =>
         ParseCommand(args, new Spec())
             .AndThen(ParseEnvironmentVariables)
             .AndThen(spec => ParseArgs(args, spec));
 
-    // Every argument is another step in the same chain, so a flag that fails ends the parse
-    // the way a failing stage does — the fold stops asking, rather than each branch checking.
     private static Result<Spec, ArgsError> ParseArgs(string[] args, Spec spec)
     {
         var result = Ok(spec);
 
         foreach (var (flag, value) in args.Skip(1).Select(SplitFlag))
         {
-            // The two reasons to stop reading arguments, in the one place both are visible:
-            // the parse failed, or --help already decided what this run does.
+            // Nothing after --help is read, not even to reject it: help already decided the run.
             if (result.Match(parsed => parsed.Help, _ => true)) break;
 
             result = result.AndThen(parsed => ParseArg(flag, value, parsed));

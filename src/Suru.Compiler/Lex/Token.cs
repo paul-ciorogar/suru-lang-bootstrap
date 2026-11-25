@@ -8,15 +8,12 @@ public record Token
     public int Column { get; }
 
     /// <summary>
-    /// The decoded magnitude of an <see cref="TokenKind.IntLiteral"/>. The lexer decodes it
-    /// because it is the stage that knows the base and can report a bad digit against a
-    /// position; <see cref="Text"/> stays the raw lexeme so dumps and diagnostics still show
-    /// what was written.
+    /// The decoded magnitude of an <see cref="TokenKind.IntLiteral"/>; <see cref="Text"/> stays
+    /// the raw lexeme so dumps and diagnostics show what was written.
     /// <para>
-    /// It is unsigned and reaches one past <see cref="long.MaxValue"/> because a leading '-'
-    /// is folded into the literal by the parser, and 9223372036854775808 is in range only
-    /// once it has been: the lexer cannot tell the two cases apart, so the parser makes the
-    /// range check.
+    /// Unsigned and reaching one past <see cref="long.MaxValue"/> because the parser folds a
+    /// leading '-' into the literal, and 9223372036854775808 is in range only once it has: the
+    /// lexer cannot tell the two cases apart, so the parser makes the range check.
     /// </para>
     /// </summary>
     public ulong IntMagnitude { get; }

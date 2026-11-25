@@ -17,7 +17,10 @@ public sealed class SemanticAnalyzer
 
     private static readonly SuruType[] NumericTypes = [SuruType.I64, SuruType.F64];
 
-    /// <summary>The types a program can write down, by name. `void` is not among them.</summary>
+    /// <summary>
+    /// The types a program can write down, by name. <c>void</c> is not among them: only a return
+    /// type may name it.
+    /// </summary>
     private static readonly Dictionary<string, SuruType> NamedTypes = new()
     {
         [SuruType.Bool.Name] = SuruType.Bool,
@@ -29,16 +32,14 @@ public sealed class SemanticAnalyzer
     private readonly List<string> _errors = [];
 
     /// <summary>
-    /// The bindings in scope, and what kind of scope each one is. A block enters a scope and
-    /// exits it again. Semantics needs nothing per scope beyond the kind — only codegen has a
-    /// payload to carry — so the scope data is <see cref="NoScopeData"/>.
+    /// Semantics needs nothing per scope beyond its kind — only codegen has a payload — hence
+    /// <see cref="NoScopeData"/>.
     /// </summary>
     private readonly ScopeStack<Binding, NoScopeData> _scopes = new();
 
     /// <summary>
-    /// The function whose body is being analyzed, which is what a <c>return</c> checks itself
-    /// against. Saved and restored around each body rather than assigned once, because a
-    /// function may be declared inside another one.
+    /// The function a <c>return</c> is checked against. Saved and restored around each body,
+    /// because a function may be declared inside another.
     /// </summary>
     private FunctionDeclaration? _function;
 
@@ -55,8 +56,7 @@ public sealed class SemanticAnalyzer
 
     private IReadOnlyList<string> _Analyze()
     {
-        // The file is a declaration context and its outermost scope is never entered, so the
-        // pre-pass is run here by hand rather than by whatever opened the scope.
+        // The file's scope is never entered, so nothing else would run the pre-pass for it.
         DeclareSignatures(_module.Statements, isDeclarationContext: true);
 
         foreach (var statement in _module.Statements)
@@ -121,13 +121,12 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// The one place semantics enters a scope, since the kind rides in on the node. Errors are
-    /// collected rather than thrown, so the exit always runs.
+    /// The one place semantics enters a scope; the kind rides in on the node. Errors are collected
+    /// rather than thrown, so the exit needs no <c>finally</c>.
     /// <para>
-    /// A function body is this same block with two additions, which is why it goes through here
-    /// rather than beside it: its parameters are declared in the scope the body itself opens — so
-    /// a <c>let</c> naming a parameter is a redeclaration and not a shadow — and they are in
-    /// place before the pre-pass, so a nested <c>fn</c> cannot be shadowed by one.
+    /// A function body comes through here too, its parameters declared in the scope the body
+    /// opens — so a <c>let</c> naming one is a redeclaration, not a shadow — and before the
+    /// pre-pass, so a nested <c>fn</c> sharing a parameter's name is a redeclaration as well.
     /// </para>
     /// </summary>
     private void AnalyzeScope(BlockStatement block, FunctionDeclaration? declaration = null)
@@ -148,19 +147,16 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// Whether a <c>fn</c> may be written in a list of statements. A file, a function body and a
-    /// bare block all run exactly once when they are reached, so a declaration in one is a fact;
-    /// an <c>if</c> arm and a <c>while</c> body are control flow, and whether a declaration there
-    /// happens at all is not something the compiler can know.
+    /// Whether a <c>fn</c> may be written here. A file, a function body and a bare block run once
+    /// when reached, so a declaration in one is a fact; whether one in an <c>if</c> arm or a
+    /// <c>while</c> body happens at all is not something the compiler can know.
     /// </summary>
     private static bool IsDeclarationContext(ScopeKind kind) =>
         kind is ScopeKind.Function or ScopeKind.Plain;
 
     /// <summary>
-    /// Collects every signature in a statement list before any statement in it is analyzed. That
-    /// order is the whole of what makes recursion, mutual recursion and a call to a function
-    /// declared further down work, and it is why this is a pass rather than a lookup that
-    /// resolves lazily.
+    /// A pass over a statement list before any of it is analyzed, so recursion, mutual recursion
+    /// and a call to a function declared further down all resolve.
     /// <para>
     /// A signature is registered even when a type name failed or the declaration is in a place it
     /// may not be, so a call reports its own problems instead of cascading into
@@ -213,11 +209,6 @@ public sealed class SemanticAnalyzer
         }
     }
 
-    /// <summary>
-    /// The body is the block it looks like, plus the parameters. The declaration is tracked while
-    /// it is analyzed so a <c>return</c> inside knows what it must carry, and restored after,
-    /// because a function may be declared inside another one.
-    /// </summary>
     private void AnalyzeFunction(FunctionDeclaration declaration)
     {
         var enclosing = _function;
@@ -232,11 +223,6 @@ public sealed class SemanticAnalyzer
                 $"'{declaration.Name}' must return a value of type '{returnType}' on every path");
     }
 
-    /// <summary>
-    /// A <c>return</c> is checked against the function it sits in, which is the only thing that
-    /// says what it may carry — and, at the top level of a file, that there is nothing to return
-    /// from at all.
-    /// </summary>
     private void AnalyzeReturn(ReturnStatement returned)
     {
         var valueType = returned.Value is null ? null : AnalyzeExpression(returned.Value);
@@ -247,8 +233,8 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        // A return type that did not resolve already reported itself; the value has been
-        // analyzed for its own errors and there is nothing left to compare it against.
+        // A return type that did not resolve already reported itself, and leaves nothing to
+        // compare the value against.
         if (function.ReturnType is not { } returnType)
             return;
 
@@ -275,16 +261,15 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// Whether every path out of a statement returns. Pure and stateless: the shape of the
-    /// statement is the whole of the answer, since nothing folds a constant condition.
+    /// Whether every path out of a statement returns, judged by shape alone, since nothing folds
+    /// a constant condition.
     /// <para>
-    /// This has a contract with codegen, which emits an <c>unreachable</c> at the end of a body
-    /// this says always returns. <b>Any</b> statement in a block, not the last, because a
-    /// <c>return</c> makes the rest of the block unreachable and codegen stops emitting there
-    /// too; and an <c>if</c> only with both arms present, because one arm is a path that falls
-    /// through. A <c>while</c> body may never run, so no loop counts — which rejects
-    /// <c>while true { return 1 }</c> as a whole body, an accepted cost while no constant
-    /// folding exists.
+    /// A contract with codegen, which emits <c>unreachable</c> at the end of a body this says
+    /// always returns, so a wrong answer here is a miscompile. <b>Any</b> statement in a block
+    /// counts, not just the last, because codegen also stops emitting at a <c>return</c>; an
+    /// <c>if</c> counts only with both arms, since a missing arm falls through. A <c>while</c>
+    /// body may never run, so no loop counts — rejecting <c>while true { return 1 }</c> as a
+    /// whole body, an accepted cost while there is no constant folding.
     /// </para>
     /// </summary>
     private static bool AlwaysReturns(Statement statement) => statement switch
@@ -300,8 +285,7 @@ public sealed class SemanticAnalyzer
     };
 
     /// <summary>
-    /// Each arm is analyzed as the ordinary statement it is, which is where its scope comes from
-    /// and why <c>else if</c> needs nothing of its own here.
+    /// An arm is an ordinary statement, so its scope and <c>else if</c> both come for free.
     /// </summary>
     private void AnalyzeIf(IfStatement branch)
     {
@@ -313,10 +297,9 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// The body is analyzed as the ordinary block it is, so its scope costs nothing here — the
-    /// only thing a loop adds is that a <c>break</c> or <c>continue</c> inside it now has
-    /// somewhere to go, and the body block carries the loop kind that says so. Analyzing a loop
-    /// is therefore nothing but checking its condition.
+    /// A loop adds nothing to check but its condition: the body block's
+    /// <see cref="ScopeKind.Loop"/> kind is what gives a <c>break</c> or <c>continue</c>
+    /// somewhere to go.
     /// </summary>
     private void AnalyzeWhile(WhileStatement loop)
     {
@@ -325,10 +308,9 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// A condition must already be a <c>bool</c> — nothing converts implicitly, so a number is
-    /// not a truth value. Shared by <c>if</c> and <c>while</c> so the two cannot drift apart in
-    /// what they accept, which is the reason <see cref="AnalyzeStore"/> is shared too. Only
-    /// <paramref name="verb"/> differs, because "branch on" is wrong for a loop.
+    /// A condition must already be a <c>bool</c>: nothing converts implicitly, so a number is not
+    /// a truth value. Shared by <c>if</c> and <c>while</c> so they cannot drift on what they
+    /// accept; only <paramref name="verb"/> differs, because "branch on" is wrong for a loop.
     /// </summary>
     private void RequireBoolCondition(string keyword, string verb, Expression condition)
     {
@@ -351,10 +333,9 @@ public sealed class SemanticAnalyzer
     }
 
     /// <summary>
-    /// A type name in a position that binds a value: a <c>let</c>, or a parameter. <c>void</c> is
-    /// rejected here and nowhere else, which is what makes it writable in the one position that
-    /// does not bind — a return type. It is not <c>unknown type 'void'</c>: the compiler knows
-    /// that type perfectly well, and what is wrong is binding to it.
+    /// A type name in a position that binds a value: a <c>let</c> or a parameter. <c>void</c> is
+    /// rejected here and nowhere else, which leaves it writable as a return type. The error is
+    /// not <c>unknown type 'void'</c>: the type is known, and what is wrong is binding to it.
     /// </summary>
     private SuruType? ResolveBindingType(string name, SourcePosition position)
     {
@@ -405,9 +386,9 @@ public sealed class SemanticAnalyzer
         AnalyzeStore(assignment.Position, assignment.Name, assignment.Value);
 
     /// <summary>
-    /// Checks a store into an existing binding. Shared by <c>&lt;name&gt;: &lt;value&gt;</c>
-    /// and by <c>#mock</c>, which is that statement restricted to test builds — so the two
-    /// cannot drift apart in what they accept or in what they say when they refuse.
+    /// A store into an existing binding. Shared by <c>&lt;name&gt;: &lt;value&gt;</c> and by
+    /// <c>#mock</c>, which is that statement restricted to test builds, so the two cannot drift
+    /// on what they accept or what they say when they refuse.
     /// </summary>
     private void AnalyzeStore(SourcePosition position, string name, Expression value)
     {
@@ -491,14 +472,12 @@ public sealed class SemanticAnalyzer
         VariableType(identifier.Position, identifier.Name);
 
     /// <summary>
-    /// The type a name reads as, or null with the reason reported. Shared by every position that
-    /// wants a value out of a name — an identifier, an assignment and a <c>#mock</c> — so the
-    /// three cannot drift on what they say.
+    /// The type a name reads as, or null with the reason reported. Shared by an identifier, an
+    /// assignment and a <c>#mock</c> so the three cannot drift on what they say.
     /// <para>
-    /// The lookup is the one the barrier hides variables from, so a name bound in an enclosing
-    /// function is simply not there. A function name found instead is a different mistake from an
-    /// unbound one and says so: the name <i>is</i> declared, and there are no function values to
-    /// read it as.
+    /// A variable of an enclosing function is hidden by the barrier and so reads as unknown. A
+    /// function name gets its own error: the name <i>is</i> declared, but there are no function
+    /// values to read it as.
     /// </para>
     /// </summary>
     private SuruType? VariableType(SourcePosition position, string name)
@@ -577,8 +556,7 @@ public sealed class SemanticAnalyzer
         foreach (var arg in call.Args)
             AnalyzeExpression(arg);
 
-        // The builtin is matched by name before the scope is consulted, which is also what makes
-        // 'printLn' a name no declaration can take.
+        // Matched before the scope is consulted, so no declaration can take the builtin's name.
         if (call.Name == PrintLn)
             return ResolvePrintLn(call);
 
@@ -600,8 +578,8 @@ public sealed class SemanticAnalyzer
         {
             Error(call.Position, Arity(call.Name, signature.Parameters.Count, call.Args.Count));
 
-            // Still the declared return type: the call site has a problem of its own, not an
-            // unknown one, and saying so twice helps nobody.
+            // Still the declared return type, so the arity error does not cascade into the
+            // expression around the call.
             return signature.ReturnType;
         }
 
@@ -639,7 +617,7 @@ public sealed class SemanticAnalyzer
 
     /// <summary>
     /// Shared so the builtin and a declared function cannot drift on how they count. The plural
-    /// follows the number expected, which is what the word before "got" is about.
+    /// follows the number expected, the word it qualifies.
     /// </summary>
     private static string Arity(string name, int expected, int got) =>
         $"'{name}' expects {expected} argument{(expected == 1 ? "" : "s")}, got {got}";

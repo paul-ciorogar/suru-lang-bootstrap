@@ -10,10 +10,8 @@ public sealed partial class CodeGenerator
     private readonly Module _module;
 
     /// <summary>
-    /// Which build this is. The directives themselves are already gone from a production
-    /// module by the time codegen runs, since the lexer never handed them over — but the test
-    /// channel's runtime declarations must appear in a test module and only there, and that is
-    /// a decision this stage has to be able to make for itself.
+    /// Which build this is. A production module has no directives left to emit, but only a test
+    /// module may declare the test channel's runtime, and that is this stage's decision.
     /// </summary>
     private readonly BuildMode _mode;
 
@@ -29,9 +27,8 @@ public sealed partial class CodeGenerator
     private readonly LLVMValueRef _printfFn;
 
     /// <summary>
-    /// The test channel's runtime, declared in <see cref="BuildMode.Test"/> and left null in a
-    /// production module — which is the whole reason this stage is told its mode. The shim's
-    /// own definitions live in <c>runtime/suru_rt.c</c>, linked in by the same decision.
+    /// The test channel's runtime: declared in <see cref="BuildMode.Test"/>, null otherwise. The
+    /// definitions are in <c>runtime/suru_rt.c</c>, which only a test build links.
     /// </summary>
     private readonly LLVMTypeRef _frameType;
     private readonly LLVMValueRef _frameBeginFn;
@@ -40,26 +37,28 @@ public sealed partial class CodeGenerator
     private readonly LLVMValueRef _fieldFn;
 
     /// <summary>
-    /// Every global string constant, shared by all the functions in the module — a global is
-    /// module-scope, so two functions printing the same format reuse one.
+    /// Interned string constants, per module rather than per function, so the same text is one
+    /// global wherever it is used.
     /// </summary>
     private readonly Dictionary<string, LLVMValueRef> _strings = [];
 
     /// <summary>
-    /// The stack slot behind each binding, with the type to load it back through. Scoped
-    /// the same way the analyzer scopes types, so a shadowing binding gets its own slot
-    /// and the outer one comes back when the block ends.
+    /// What each name means here, scoped exactly as the analyzer scopes it, so a shadowing binding
+    /// gets its own slot and the outer one comes back when the block ends.
     /// <para>
-    /// A loop scope carries where a <c>break</c> and a <c>continue</c> go as its payload, so this
-    /// stage keeps no second copy of a nesting it is already tracking: the search that finds a
-    /// <c>break</c> its target is the same walk that finds an identifier its slot. Neither
-    /// statement takes a label, so the innermost enclosing loop is the only one either can name —
-    /// which is what the innermost-first walk already means.
+    /// A loop scope also carries the targets of <c>break</c> and <c>continue</c>, so loop nesting
+    /// is not tracked a second time.
     /// </para>
     /// </summary>
     private readonly ScopeStack<
-        VariableSlot,
+        Binding,
         (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break)> _scopes = new();
+
+    /// <summary>
+    /// The functions being emitted, outermost first. They qualify a nested function's symbol, so
+    /// <c>outer.helper</c> says in the IR where it lives.
+    /// </summary>
+    private readonly List<string> _enclosingFunctions = [];
 
     private CodeGenerator(Module module, BuildMode mode)
     {
@@ -67,7 +66,7 @@ public sealed partial class CodeGenerator
         _mode = mode;
         _llvmModule = LLVMModuleRef.CreateWithName("suru");
 
-        // Declare printf: i32 (ptr, ...) — printLn's, in both modes.
+        // printf is printLn's, so every build needs it.
         var ptrType = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
         _printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, [ptrType], true);
         _printfFn = _llvmModule.AddFunction("printf", _printfType);
@@ -79,8 +78,7 @@ public sealed partial class CodeGenerator
             _frameBeginFn = _llvmModule.AddFunction("suru_frame_begin", _frameType);
             _frameEndFn = _llvmModule.AddFunction("suru_frame_end", _frameType);
 
-            // void suru_field(const char *key, const char *format, ...) — printf-shaped on
-            // purpose, so it takes the same format strings printLn already uses.
+            // printf-shaped on purpose, so it takes the same format strings printLn uses.
             _fieldType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, [ptrType, ptrType], true);
             _fieldFn = _llvmModule.AddFunction("suru_field", _fieldType);
         }
@@ -98,25 +96,21 @@ public sealed partial class CodeGenerator
         var mainFn = _llvmModule.AddFunction("main", mainType);
         mainFn.Linkage = LLVMLinkage.LLVMExternalLinkage;
 
-        // 'main' is emitted through an emitter like any other function would be, and first, so
-        // its 'entry' is the first one in the module. What is special about it is only what
-        // follows: the run frames and the exit code.
+        // Declared first, so the IR opens with the program's entry point. What sets it apart
+        // from other functions is only the run frames and the exit code.
         using var main = new FunctionEmitter(this, mainFn);
 
-        // Announced at the top of 'body' rather than 'entry', which holds nothing but allocas.
+        // In 'body', because 'entry' is reserved for allocas.
         if (_mode == BuildMode.Test)
             main.WriteFrame(Frame.RunStarted, ("run", "%d", Int32(0)));
 
+        // The file's scope is never entered, so nothing else would emit its functions.
+        EmitFunctions(_module.Statements);
         main.EmitStatements(_module.Statements);
 
-        // Emitted in whichever block the builder ended in — after a trailing 'if' that is
-        // 'if.end', after a trailing 'while' that is 'while.end', the one block on the path
-        // that reaches the return. That is the point of it: its absence is how the driver
-        // tells a run that died from a run that simply never reached a directive.
-        //
-        // Unguarded, unlike the branches inside a construct: only 'break', 'continue' and
-        // 'return' can leave a block terminated, and semantic analysis has already rejected
-        // each of them at the top level. So the top level is never the terminated block.
+        // 'run-finished' is how the driver tells a run that died from one that never reached a
+        // directive. It needs no terminator guard: 'break', 'continue' and 'return' are all
+        // rejected at the top level, so nothing can have left this block already.
         if (_mode == BuildMode.Test)
             main.WriteFrame(Frame.RunFinished, ("run", "%d", Int32(0)), ("exit", "%d", Int32(MainExitCode)));
 
@@ -127,10 +121,8 @@ public sealed partial class CodeGenerator
     }
 
     /// <summary>
-    /// The innermost enclosing loop's two exits — the exact counterpart of <see cref="Variable"/>
-    /// one method down: the same walk over the same structure, one resolving a <c>break</c> and
-    /// the other a name. Finding nothing means semantic analysis let a <c>break</c> through from
-    /// outside a loop, which is a compiler bug rather than a program error and is reported as one.
+    /// The innermost enclosing loop's exits. Finding none is a compiler bug, not a program error:
+    /// the analyzer rejects a <c>break</c> or <c>continue</c> outside a loop.
     /// </summary>
     private (LLVMBasicBlockRef Continue, LLVMBasicBlockRef Break) Loop(string keyword) =>
         _scopes.TryFindEnclosing(ScopeKind.Loop, out var loop)
@@ -139,7 +131,86 @@ public sealed partial class CodeGenerator
 
     private VariableSlot Variable(string name) =>
         _scopes.LookupVariable(name).UnwrapOrElse(_ =>
-            throw new CodegenException($"unknown variable '{name}'"));
+            throw new CodegenException($"unknown variable '{name}'")) as VariableSlot
+        ?? throw new CodegenException($"'{name}' is not a variable");
+
+    private FunctionSymbol Function(string name) =>
+        _scopes.LookupFunction(name).UnwrapOrElse(_ =>
+            throw new CodegenException($"unknown function '{name}'")) as FunctionSymbol
+        ?? throw new CodegenException($"'{name}' is not a function");
+
+    /// <summary>
+    /// Gives every function in a statement list its LLVM function and its body, ahead of the
+    /// list's statements.
+    /// <para>
+    /// Exists so a call can name any function in scope — itself, a sibling, one declared further
+    /// down — the codegen counterpart of the analyzer's signature pre-pass. It runs at scope entry
+    /// rather than where the declaration is written because a <c>fn</c> after a <c>return</c> is
+    /// unreachable code, which is never emitted, and would otherwise be left without a body.
+    /// </para>
+    /// </summary>
+    private void EmitFunctions(IReadOnlyList<Statement> statements)
+    {
+        List<(FunctionDeclaration Declaration, FunctionSymbol Symbol)> declared = [];
+        foreach (var declaration in statements.OfType<FunctionDeclaration>())
+            declared.Add((declaration, DeclareFunction(declaration)));
+
+        foreach (var (declaration, symbol) in declared)
+            EmitFunction(declaration, symbol);
+    }
+
+    /// <summary>
+    /// The LLVM function for a declaration, bound under its name in the current scope.
+    /// <para>
+    /// Internal linkage, because nothing outside the module calls a Suru function, and so a Suru
+    /// name can never collide with libc's — <c>printf</c> among them. Symbol names need not be
+    /// unique: two blocks may each declare a <c>helper</c>, since a call resolves by scope, not
+    /// by symbol.
+    /// </para>
+    /// </summary>
+    private FunctionSymbol DeclareFunction(FunctionDeclaration declaration)
+    {
+        var returnType = LlvmReturnType(declaration.ReturnType
+            ?? throw new CodegenException($"function '{declaration.Name}' at {declaration.Position} was never typed"));
+
+        LLVMTypeRef[] parameterTypes = [.. declaration.Parameters.Select(parameter =>
+            LlvmType(parameter.Type
+                ?? throw new CodegenException($"parameter '{parameter.Name}' at {parameter.Position} was never typed")))];
+
+        var type = LLVMTypeRef.CreateFunction(returnType, parameterTypes);
+        var name = string.Join('.', [.. _enclosingFunctions, declaration.Name]);
+
+        var function = _llvmModule.AddFunction(name, type);
+        function.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        // Named after the source, so the IR reads.
+        for (var i = 0; i < declaration.Parameters.Count; i++)
+            function.GetParam((uint)i).Name = declaration.Parameters[i].Name;
+
+        var symbol = new FunctionSymbol(function, type);
+        _scopes.Declare(declaration.Name, symbol);
+        return symbol;
+    }
+
+    private void EmitFunction(FunctionDeclaration declaration, FunctionSymbol symbol)
+    {
+        _enclosingFunctions.Add(declaration.Name);
+
+        using (var emitter = new FunctionEmitter(this, symbol.Function))
+        {
+            emitter.EmitBody(declaration);
+            emitter.Finish();
+        }
+
+        _enclosingFunctions.RemoveAt(_enclosingFunctions.Count - 1);
+    }
+
+    /// <summary>
+    /// A return type: the one place <c>void</c> has a representation. Kept apart from
+    /// <see cref="LlvmType"/>, which still refuses <c>void</c>, because a slot of no type is a bug.
+    /// </summary>
+    private static LLVMTypeRef LlvmReturnType(SuruType type) =>
+        type == SuruType.Void ? LLVMTypeRef.Void : LlvmType(type);
 
     private static LLVMTypeRef LlvmType(SuruType type)
     {
@@ -168,12 +239,11 @@ public sealed partial class CodeGenerator
             ?? throw new CodegenException($"expression at {expression.Position} was never typed");
 
     /// <summary>
-    /// Interns a global string constant so repeated literals share one global.
+    /// A string constant, interned so the same text is one global.
     /// <para>
-    /// The cache is the module's, but the builder is the caller's: <c>BuildGlobalStringPtr</c>
-    /// needs a builder with a position, and with one emitter per function there is no builder
-    /// that belongs to the module. Passing one that was never positioned is an LLVM assertion,
-    /// not a C# exception, which is why every emitter goes through its own.
+    /// Takes the caller's builder because LLVM only creates the global through a positioned
+    /// builder, and no builder belongs to the module. An unpositioned one is an LLVM assertion,
+    /// not a C# exception.
     /// </para>
     /// </summary>
     private LLVMValueRef String(LLVMBuilderRef builder, string value)

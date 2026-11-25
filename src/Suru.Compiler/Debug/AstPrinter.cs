@@ -15,7 +15,7 @@ namespace Suru.Compiler.Debug;
 /// </summary>
 public static class AstPrinter
 {
-    // TODO: refactor this to create an instance of AstPrinter
+    // TODO: make AstPrinter an instance over a module:
     // var printer = new AstPrinter(module);
     // return printer.ToString() or printer.ToStringWithTypes();
     public static string Print(Module module, bool withTypes = false)
@@ -46,17 +46,15 @@ public static class AstPrinter
                 AppendExpression(output, assignment.Value, depth + 1, withTypes);
                 break;
             case BlockStatement block:
-                // Only a kind other than Plain is rendered: the whole parser test layer then
-                // asserts on the kind without a hand-written assertion, and the detail appears
-                // exactly on the blocks it distinguishes rather than on every block there is.
+                // Plain is left unrendered, so the kind shows only on the blocks it distinguishes
+                // and parser tests assert on it through the dump alone.
                 AppendNode(output, depth, "BlockStatement", block.Position,
                     block.Kind == ScopeKind.Plain ? "" : block.Kind.ToString().ToLowerInvariant());
                 foreach (var inner in block.Statements)
                     AppendStatement(output, inner, depth + 1, withTypes);
                 break;
-            // Condition, then-arm and else-arm as unlabelled children in source order. An
-            // 'else if' shows up as a nested IfStatement one level in, which is what tells it
-            // apart from an 'if' inside the then-arm — that one sits under a BlockStatement.
+            // An 'else if' is a nested IfStatement directly under this one, which tells it apart
+            // from an 'if' inside the then-arm, which sits under a BlockStatement.
             case IfStatement branch:
                 AppendNode(output, depth, "IfStatement", branch.Position);
                 AppendExpression(output, branch.Condition, depth + 1, withTypes);
@@ -64,23 +62,19 @@ public static class AstPrinter
                 if (branch.Else is not null)
                     AppendStatement(output, branch.Else, depth + 1, withTypes);
                 break;
-            // Condition then body, the same unlabelled-children shape as an 'if'.
             case WhileStatement loop:
                 AppendNode(output, depth, "WhileStatement", loop.Position);
                 AppendExpression(output, loop.Condition, depth + 1, withTypes);
                 AppendStatement(output, loop.Body, depth + 1, withTypes);
                 break;
-            // Leaves: neither carries an operand, and which loop it leaves is nesting, which
-            // the tree already shows.
             case BreakStatement:
                 AppendNode(output, depth, "BreakStatement", statement.Position);
                 break;
             case ContinueStatement:
                 AppendNode(output, depth, "ContinueStatement", statement.Position);
                 break;
-            // Parameters as children ahead of the body, which renders through the block case
-            // above and so carries its 'function' kind. The declaration and each parameter take
-            // a resolved type the way an expression does, so both dumps still diff line for line.
+            // The declaration and each parameter carry a resolved type as an expression does, so
+            // the two dumps still diff line for line.
             case FunctionDeclaration function:
                 AppendNode(output, depth, "FunctionDeclaration", function.Position,
                     $"{function.Name} {function.ReturnTypeName}", TypeSuffix(function.ReturnType, withTypes));
@@ -89,7 +83,6 @@ public static class AstPrinter
                         $"{parameter.Name} {parameter.TypeName}", TypeSuffix(parameter.Type, withTypes));
                 AppendStatement(output, function.Body, depth + 1, withTypes);
                 break;
-            // A bare 'return' is a leaf; one with a value has it as its only child.
             case ReturnStatement ret:
                 AppendNode(output, depth, "ReturnStatement", ret.Position);
                 if (ret.Value is not null)

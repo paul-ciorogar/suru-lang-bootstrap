@@ -6,14 +6,13 @@ namespace Suru.Compiler.Testing;
 /// <summary>
 /// Turns bytes off the test channel into <see cref="Frame"/>s.
 /// <para>
-/// A streaming cursor, because a socket read ends wherever the kernel says it does: chunks are
-/// fed in as they arrive and whole frames come back out. A partial frame is held until the rest
-/// of it turns up, which is what <c>Content-Length</c> is for.
+/// A streaming cursor, because a socket read ends wherever the kernel says it does, not where a
+/// frame does.
 /// </para>
 /// <para>
-/// Nothing here knows what a directive is, or which kinds exist. A frame whose <c>kind</c> means
-/// nothing to the consumer is still a well-formed frame and is still yielded — skipping it is
-/// the consumer's decision, and is how the event set grows without a flag.
+/// Knows nothing of directives or of which kinds exist: a frame of an unknown <c>kind</c> is
+/// still well-formed and still yielded. Skipping it is the consumer's decision, and is how the
+/// event set grows without a flag.
 /// </para>
 /// </summary>
 public sealed class FrameReader
@@ -126,9 +125,9 @@ public sealed class FrameReader
     }
 
     /// <summary>
-    /// One <c>key ":" byte-length ":" bytes "\n"</c>. Every step is checked against the end of
-    /// the body, so a length that disagrees with the bytes around it is caught where it happens
-    /// rather than turning the rest of the frame into a different frame.
+    /// One <c>key ":" byte-length ":" bytes "\n"</c>, bounded by the end of the body, so a length
+    /// that disagrees with its bytes is caught where it happens rather than turning the rest of
+    /// the frame into a different frame.
     /// </summary>
     private (string Key, string Value) ReadField(ref int position, int end)
     {
@@ -144,9 +143,8 @@ public sealed class FrameReader
             throw new FrameException(
                 $"the test channel sent the field '{key}' with a length that is not a number: '{digits}'");
 
-        // The delimiter has to sit inside the body too, so the value has one byte less room
-        // than the body has left. Compared this way round rather than by adding, because a
-        // length the frame made up can be large enough to wrap.
+        // Leaves a byte for the delimiter. Subtracts rather than adds, because a length the
+        // frame made up can be large enough to wrap.
         var valueStart = lengthEnd + 1;
         if (length >= end - valueStart)
             throw new FrameException(

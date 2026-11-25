@@ -12,10 +12,8 @@ public sealed record ChannelRun(IReadOnlyList<Frame> Frames, string Output, int 
 /// <summary>
 /// Runs a test build and reads what it says.
 /// <para>
-/// The driver listens first and starts the child second, handing it the socket path in
-/// <see cref="RuntimeShim.ChannelVariable"/>. The program's own output stays on stdout and its
-/// records travel the socket, so the two no longer have to be told apart — which is the whole
-/// reason the channel exists.
+/// The program's records travel a socket of their own, so its stdout never has to be sieved
+/// for them — the whole reason the channel exists.
 /// </para>
 /// <para>
 /// POSIX only, and said out loud: <c>AF_UNIX</c> on both sides. <c>suru build</c> is unaffected,
@@ -66,7 +64,7 @@ public static class TestChannel
 
             using var process = Start(executablePath, socketPath);
 
-            // The deadline starts when the child does, so 200 ms means 200 ms of its life.
+            // Started with the child, so the deadline measures the child's life, not our setup.
             connect.CancelAfter(options.Connect);
 
             using var channel = await Accept(accepting, process, options);
@@ -142,8 +140,7 @@ public static class TestChannel
     /// <para>
     /// Reading one to the end before starting the other deadlocks the moment the other fills at
     /// around 64 KB: the child blocks writing the pipe nobody is draining, and we block reading
-    /// the one it is no longer writing. This is the first place the compiler has had two pipes
-    /// to lose that race with.
+    /// the one it is no longer writing.
     /// </para>
     /// </summary>
     private static async Task<ChannelRun> Drain(Socket channel, Process process, TestOptions options)

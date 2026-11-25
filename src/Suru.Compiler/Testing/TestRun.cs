@@ -71,9 +71,8 @@ internal static class TestRun
                 case Frame.Assert:
                     break;
                 default:
-                    // A kind this build does not know is skipped, per the protocol — which is
-                    // how the event set grows without a flag day. The reader yields it; whether
-                    // it means anything is this consumer's business.
+                    // An unknown kind is skipped, per the protocol, so the event set can grow
+                    // without a flag day.
                     continue;
             }
 
@@ -107,13 +106,9 @@ internal static class TestRun
             };
 
             // An assertion is sticky, where a '#view' is last-hit-wins: one that ever failed
-            // reads 'fail', keeping the first failing iteration's value. Last-hit-wins here
-            // would erase a failure on iteration 3 that happened to pass on iteration 10, and
-            // an assertion that did not hold is not one that held.
-            //
-            // It is also the forward-compatible answer. The intended end state is fail-fast — a
-            // failed assertion stops the loop and the rest of the run — under which the first
-            // failure is the only one, and sticky and fail-fast agree on every program.
+            // reads 'fail' with the first failing iteration's value, since a later pass does not
+            // undo an earlier failure. It also agrees on every program with the intended
+            // fail-fast end state, under which the first failure is the only one.
             outcomes[id] = outcomes.GetValueOrDefault(id, true) && held;
 
             if (held)
@@ -135,20 +130,17 @@ internal static class TestRun
             throw new TestChannelException(
                 "The program connected to the test channel and never began its body.");
 
-        // A directive that reported nothing means two different things, and the run-finished
-        // event is what tells them apart. After a finish it is 'undefined' — the branch was not
-        // taken — and that needs no notion of a branch to say, so it will be the same answer
-        // for an unreached '#view-step-N' or an unmocked parameter when those exist. Without a
-        // finish the program died on the way, and nothing is known about the line at all.
+        // run-finished is what tells two silences apart. After it, an unreported directive is
+        // 'undefined' — never reached — an answer that needs no notion of a branch, so it will
+        // hold for an unreached '#view-step-N' or an unmocked parameter too. Without it the
+        // program died on the way, and nothing is known about the line at all.
         foreach (var id in pending)
             annotations[directives[id].Position] = finished ? Undefined : Unknown;
 
         Annotate(sourcePath, annotations);
 
-        // Ordered by id, which is source order — the parser numbers directives as it meets
-        // them. For straight-line and branching code that is also arrival order, so this
-        // reproduces what appending as frames arrived produced; a loop is the only thing that
-        // can revisit a directive, and reporting those in source order is the readable answer.
+        // Source order, since the parser numbers directives as it meets them. Outside a loop
+        // that is also arrival order; inside one, source order is the readable answer.
         var failures = failureText.OrderBy(entry => entry.Key).Select(entry => entry.Value).ToList();
 
         return TestResult.Ran(
@@ -225,11 +217,10 @@ internal static class TestRun
     }
 
     /// <summary>
-    /// Writes each annotation into its directive's line, reading and writing the file once.
-    /// Line endings are preserved by splitting on '\n' and leaving any '\r' where it was.
+    /// Writes each annotation into its directive's line, leaving line endings — CRLF included —
+    /// as they were.
     /// <para>
-    /// A line carries one directive, so a line is rewritten once and no annotation has to
-    /// be placed around another.
+    /// A line carries one directive, so no annotation has to be placed around another.
     /// </para>
     /// </summary>
     private static void Annotate(

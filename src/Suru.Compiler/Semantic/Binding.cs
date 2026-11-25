@@ -2,8 +2,8 @@ namespace Suru.Compiler.Semantic;
 
 /// <summary>
 /// What a name means. Variables and functions share one namespace, so they share one
-/// <see cref="ScopeStack{TEntry, TScope}"/> — and the two shapes differ only in what they are and
-/// in whether they survive a function boundary, which is the whole of what the barrier reads.
+/// <see cref="ScopeStack{TEntry, TScope}"/>, and differ only in whether they survive a function
+/// boundary, which is all the barrier reads.
 /// </summary>
 public abstract record Binding : IScopeEntry
 {

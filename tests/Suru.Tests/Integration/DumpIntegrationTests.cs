@@ -76,6 +76,29 @@ public class DumpIntegrationTests : IDisposable
         Assert.Contains("if.end", dump);
     }
 
+    [Fact]
+    public void FunctionsAreInternalQualifiedAndEmittedAfterMain()
+    {
+        var dump = Compile(Dump.Llvm, "functions");
+
+        // 'main' first, so its 'entry' is the first one in the module — what
+        // EveryStackSlotSitsInTheEntryBlock slices from.
+        Assert.True(
+            dump.IndexOf("define i32 @main()", StringComparison.Ordinal)
+            < dump.IndexOf("define internal", StringComparison.Ordinal));
+
+        // A nested function is qualified by the one around it, and nothing a Suru program
+        // declares is visible outside the module.
+        Assert.Contains("define internal i64 @hypotenuseSquared.sq(i64 %x)", dump);
+        Assert.DoesNotContain("define i64", dump);
+
+        // A parameter is stored into its own slot, so it can be loaded and assigned like a 'let'.
+        Assert.Contains("store i64 %n, ptr %n.addr", dump);
+
+        // 'sign' returns from every arm; the block left open after them is declared unreachable.
+        Assert.Contains("unreachable", dump);
+    }
+
     private string Compile(Dump stages, string fixture = "print")
     {
         var writer = new StringWriter();

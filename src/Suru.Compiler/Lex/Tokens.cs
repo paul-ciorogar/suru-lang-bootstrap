@@ -9,9 +9,9 @@ internal sealed class Tokens(Lexer lexer)
     internal string SourcePath => lexer.SourcePath;
 
     /// <summary>
-    /// The token most recently moved past, or <c>null</c> before the first
-    /// <see cref="Next"/>. It is what a caller checks to find out where the construct it
-    /// just parsed actually ended — the parser uses it to hold a test directive to one line.
+    /// The token most recently moved past, or <c>null</c> before the first <see cref="Next"/>:
+    /// where the construct just parsed actually ended, which is what holds a test directive to
+    /// one line.
     /// </summary>
     internal Token? LastConsumed { get; private set; }
 
@@ -44,20 +44,15 @@ internal sealed class Tokens(Lexer lexer)
     }
 
     /// <summary>
-    /// Consumes the token at the cursor together with the rest of its line, then loads the
-    /// first token of the next one. This is how a caller ends a construct at the newline
-    /// without the lexer ever seeing what follows: the discarded text is thrown away as
-    /// characters, not as tokens.
+    /// Consumes the token at the cursor and the rest of its line, without lexing the rest.
     /// <para>
-    /// A directive is what needs it. The text after its terminator is output rather than
-    /// source — <c>fail, got 2</c> is not an expression, and a large <c>f64</c> prints as
-    /// <c>1e+20</c>, which the literal scanner rejects — so it cannot be lexed and then
-    /// ignored; it must never be lexed at all.
+    /// A directive needs it: the text after its terminator is output, not source —
+    /// <c>fail, got 2</c> is not an expression, and a large <c>f64</c> prints as <c>1e+20</c>,
+    /// which the literal scanner rejects — so it must never be lexed at all.
     /// </para>
     /// <para>
-    /// Discarding is only possible while nothing has been buffered past the cursor, since a
-    /// buffered token has already been lexed — an invariant of the call sites, not
-    /// something a program can violate.
+    /// Impossible once anything is buffered past the cursor, since that has already been lexed.
+    /// That is an invariant of the parser's call sites, not something a program can violate.
     /// </para>
     /// </summary>
     internal void DiscardRestOfLine()

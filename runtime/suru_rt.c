@@ -30,7 +30,7 @@
  */
 #define SURU_BODY_MAX 65536
 
-/* One field's rendered value, before it is measured and copied into the body. */
+/* Bounds one field's rendered value. */
 #define SURU_SCRATCH_MAX 8192
 
 /* Set once at startup; -1 means "no harness", and every exported function is then a no-op. */
@@ -47,8 +47,8 @@ static int suru_overflowed = 0;
 static const char *suru_overflow_key = "";
 
 /*
- * Reads the channel's path and connects. A missing variable is not an error: a test binary run
- * by hand still runs, it just drops its records.
+ * A constructor, so the emitted program never has to open the channel. A missing variable is
+ * not an error: a test binary run by hand still runs, it just drops its records.
  */
 __attribute__((constructor)) static void suru_rt_open(void)
 {
@@ -132,7 +132,7 @@ static void suru_append(const char *key, const char *bytes, size_t length)
     suru_body_len += length;
 }
 
-/* Writes `body` as one frame: the header that measures it, then the body itself. */
+/* Sends `body` as one frame. */
 static void suru_send(const char *body, size_t length)
 {
     char header[64];

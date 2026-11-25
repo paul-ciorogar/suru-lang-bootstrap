@@ -288,7 +288,17 @@ Everything builder-touching moves in unchanged: `EmitStatement`/`EmitStatements`
 
 ## Task 6 — codegen: functions
 
-- [ ] **`Binding`** in codegen mirrors semantics: `VariableBinding(Slot, Type)` (`SurvivesFunctionBoundary => false`) and `FunctionBinding(Fn, FnType)` (`=> true`).
+- [x] **Done.** `tests/fixtures/functions` + `Integration/FunctionTests` cover the fixture list below, plus `DumpIntegrationTests.FunctionsAreInternalQualifiedAndEmittedAfterMain`; every older fixture's IR is byte-identical. Deviations:
+
+- **No module-wide declare-all walk and no `Dictionary<FunctionDeclaration, …>`.** Declaring a list's functions at the entry of its scope (`EmitFunctions`) is already enough: every name in the list is bound before any body in it is emitted, and every enclosing list was bound before that. The scope stack is the lookup, so nested-name collisions never arise — the node key existed only to avoid them.
+- **The codegen bindings are `VariableSlot` (kept) and `FunctionSymbol`**, under a codegen `Binding` base, rather than `VariableBinding`/`FunctionBinding` — the semantic names would read as the analyzer's types in a file that uses both.
+- **`EmitFunctions` runs at every scope entry** — the file, a body, a bare block, and also an arm and a loop body, where the analyzer guarantees it finds nothing. One rule rather than a list of which kinds may hold a `fn`.
+- **A parameter's slot is named `a.addr`**, beside the incoming `%a`, so the two read apart in the IR.
+- `TerminateFunction` takes the declaration, not the type.
+
+**Known gap until task 7:** `false and f()` calls `f`. The eager `EmitBinary` now carries a `TODO(short-circuit)`.
+
+**`Binding`** in codegen mirrors semantics: `VariableBinding(Slot, Type)` (`SurvivesFunctionBoundary => false`) and `FunctionBinding(Fn, FnType)` (`=> true`).
 
 **Declare-all pass, keyed by node not name.** A recursive walk over the module's statements and every function body creates one `LLVMValueRef` per `FunctionDeclaration` into `Dictionary<FunctionDeclaration, (LLVMValueRef Fn, LLVMTypeRef Type)>` before any body is emitted — the codegen counterpart of the analyzer's pre-pass, and what makes forward and mutual references resolve to a real value. Keying by the **node** sidesteps nested-name collisions entirely (two sibling functions may each contain a `helper`).
 

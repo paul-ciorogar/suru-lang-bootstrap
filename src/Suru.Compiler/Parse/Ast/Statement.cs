@@ -38,11 +38,9 @@ public sealed class BlockStatement(
     ScopeKind kind = ScopeKind.Plain) : Statement(position)
 {
     /// <summary>
-    /// What kind of scope this block opens. Set by the parser, which is the only stage that knows
-    /// <i>why</i> it is building a block — a loop body and the block that happens to be an
-    /// <c>if</c> arm are the same syntax, and only the parser can still tell them apart. Every
-    /// stage downstream reads it off the node rather than re-deriving it, which is what keeps the
-    /// two of them from drifting.
+    /// Set by the parser, the only stage that knows <i>why</i> it built the block: a loop body
+    /// and an <c>if</c> arm are the same syntax. Downstream stages read it rather than re-derive
+    /// it, so they cannot drift apart.
     /// </summary>
     public ScopeKind Kind { get; } = kind;
 
@@ -51,11 +49,10 @@ public sealed class BlockStatement(
 
 /// <summary>
 /// <c>if &lt;condition&gt; { ... }</c>, with an optional <c>else</c>. Both arms are blocks, so
-/// both are scopes and neither needs a rule of its own.
+/// both are scopes with no rule of their own.
 /// <para>
 /// <see cref="Else"/> is a <see cref="BlockStatement"/>, or another <see cref="IfStatement"/>
-/// when the source wrote <c>else if</c> — that nesting is the whole of what <c>else if</c> is,
-/// which is why no stage past the parser has a case for it.
+/// for <c>else if</c> — which is why no stage past the parser has a case for <c>else if</c>.
 /// </para>
 /// </summary>
 public sealed class IfStatement(
@@ -68,9 +65,8 @@ public sealed class IfStatement(
 }
 
 /// <summary>
-/// <c>while &lt;condition&gt; { ... }</c>. The condition is re-evaluated before every iteration,
-/// and the body is a <see cref="BlockStatement"/>, so it is a scope for the same reason an
-/// <c>if</c> arm is one and needs no rule of its own.
+/// <c>while &lt;condition&gt; { ... }</c>. The condition is re-evaluated before every iteration;
+/// the body is a block, so a scope with no rule of its own.
 /// </summary>
 public sealed class WhileStatement(
     SourcePosition position, Expression condition, BlockStatement body) : Statement(position)
@@ -80,23 +76,21 @@ public sealed class WhileStatement(
 }
 
 /// <summary>
-/// <c>break</c> — leaves the innermost enclosing loop. It carries nothing but its position,
-/// which is where the diagnostic for one written outside a loop points. There are no labels,
-/// so which loop it leaves is decided by nesting alone.
+/// <c>break</c>: leaves the innermost enclosing loop. There are no labels, so nesting alone
+/// picks the loop.
 /// </summary>
 public sealed class BreakStatement(SourcePosition position) : Statement(position);
 
 /// <summary>
-/// <c>continue</c> — abandons this iteration and re-tests the innermost enclosing loop's
-/// condition. Carries only its position, and picks its loop by nesting, exactly as
-/// <see cref="BreakStatement"/> does.
+/// <c>continue</c>: re-tests the innermost enclosing loop's condition. Picks its loop by
+/// nesting, as <see cref="BreakStatement"/> does.
 /// </summary>
 public sealed class ContinueStatement(SourcePosition position) : Statement(position);
 
 /// <summary>
-/// <c>return</c>, with a value or without one. A value belongs to the <c>return</c> only if it
-/// begins on the <c>return</c>'s own line — see <c>Parser.ParseReturn</c> — so
-/// <see cref="Value"/> is null for a bare <c>return</c> followed by a statement on the next line.
+/// <c>return</c>, with or without a value. A value belongs to it only if it begins on the
+/// <c>return</c>'s own line (see <c>Parser.ParseReturn</c>), so a statement on the next line is
+/// never mistaken for one.
 /// </summary>
 public sealed class ReturnStatement(SourcePosition position, Expression? value) : Statement(position)
 {
@@ -113,16 +107,16 @@ public sealed class AssignmentStatement(SourcePosition position, string name, Ex
 
 /// <summary>
 /// A <c>#</c> test directive. Only a <see cref="BuildMode.Test"/> compilation ever sees one:
-/// a production build discards the line in the lexer. Every directive's
-/// <see cref="Statement.Position"/> is that of its <c>#</c>.
+/// a production build discards the line in the lexer. Its <see cref="Statement.Position"/> is
+/// its <c>#</c>.
 /// </summary>
 public abstract class Directive(SourcePosition position) : Statement(position);
 
 /// <summary>
-/// <c>#mock &lt;name&gt;: &lt;value&gt;</c> — an assignment that exists only in a test build.
+/// <c>#mock &lt;name&gt;: &lt;value&gt;</c>: an assignment that exists only in a test build.
 /// It takes effect where it is written rather than replacing the binding's initialiser, so
-/// it needs no handling of its own in scoping or codegen and obeys the ordinary assignment
-/// rules; <paramref name="namePosition"/> is where those diagnostics point.
+/// it obeys the ordinary assignment rules and needs no case of its own in scoping or codegen;
+/// <paramref name="namePosition"/> is where those diagnostics point.
 /// </summary>
 public sealed class MockDirective(
     SourcePosition position,
@@ -136,16 +130,15 @@ public sealed class MockDirective(
 }
 
 /// <summary>
-/// <c>#view &lt;subject&gt;:</c> — prints the subject's value back into its own source line,
-/// after the colon.
+/// <c>#view &lt;subject&gt;:</c>: reports the subject's value into its own source line, after
+/// the colon.
 /// </summary>
 public sealed class ViewDirective(SourcePosition position, int id, Expression subject)
     : Directive(position)
 {
     /// <summary>
-    /// Identifies this directive in the record the compiled program prints when it reaches
-    /// it, which is how a runtime value finds its way back to a source line. Assigned by the
-    /// parser in source order, so it is stable across a run and readable in a dump.
+    /// How a value reported at runtime finds its way back to this source line. Numbered in
+    /// source order, so it is stable across a run and readable in a dump.
     /// </summary>
     public int Id { get; } = id;
 
@@ -153,8 +146,8 @@ public sealed class ViewDirective(SourcePosition position, int id, Expression su
 }
 
 /// <summary>
-/// <c>#assert(&lt;actual&gt;, &lt;expected&gt;):</c> — compares the two and records the
-/// outcome both in its own source line and, on failure, as a diagnostic.
+/// <c>#assert(&lt;actual&gt;, &lt;expected&gt;):</c>: records the outcome in its own source
+/// line and, on failure, as a diagnostic.
 /// </summary>
 public sealed class AssertDirective(
     SourcePosition position,

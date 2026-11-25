@@ -4,10 +4,9 @@ namespace Suru.Compiler.Testing;
 /// Finds the C runtime linked into test builds — <c>runtime/suru_rt.c</c>, the program side of
 /// the test channel.
 /// <para>
-/// A shipped compiler carries the source beside its assembly, so the ordinary answer is one
-/// <see cref="File.Exists(string)"/>. Walking up the ancestors as well is what makes a compiler
-/// run out of the source tree work, the way
-/// <c>CompiledFixtures.FixturePath</c> walks up for a fixture.
+/// A shipped compiler carries the source beside its assembly; looking in the ancestors too is
+/// what lets a compiler run out of the source tree find it, as
+/// <c>CompiledFixtures.FixturePath</c> finds a fixture.
 /// </para>
 /// <para>
 /// The source is passed to <c>cc</c> rather than a prebuilt object file: a second compile costs
@@ -21,7 +20,6 @@ namespace Suru.Compiler.Testing;
 /// </summary>
 public static class RuntimeShim
 {
-    /// <summary>Where the shim sits, relative to whichever directory holds it.</summary>
     private const string RelativePath = "runtime/suru_rt.c";
 
     /// <summary>
@@ -33,11 +31,10 @@ public static class RuntimeShim
         "Test runtime not found: '" + RelativePath + "' is missing from the compiler's installation";
 
     /// <summary>
-    /// The environment variable that hands the shim its socket path — the .NET side's one
-    /// spelling of <c>SURU_CHANNEL_ENV</c> in <c>runtime/suru_rt.c</c>. It lives here rather
-    /// than on <see cref="FrameProtocol"/> because it is about how the shim is <i>reached</i>,
-    /// not about how a frame is spelled. A binary that finds no such variable drops its
-    /// records, so the driver always sets it.
+    /// The environment variable that hands the shim its socket path; must match
+    /// <c>SURU_CHANNEL_ENV</c> in <c>runtime/suru_rt.c</c>. Here rather than on
+    /// <see cref="FrameProtocol"/> because it is about how the shim is <i>reached</i>, not how a
+    /// frame is spelled. A binary that finds no such variable drops its records.
     /// </summary>
     public const string ChannelVariable = "SURU_TEST_CHANNEL";
 

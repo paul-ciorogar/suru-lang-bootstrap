@@ -7,28 +7,20 @@ namespace Suru.Compiler.Codegen;
 public sealed partial class CodeGenerator
 {
     /// <summary>
-    /// Emits the body of one LLVM function. It owns exactly what is per-function — the two
-    /// builders and the function they build into — and reaches everything else through the
-    /// <see cref="CodeGenerator"/> it belongs to: the module, the declared runtime, the interned
-    /// strings and the one scope stack.
+    /// Emits the code of one LLVM function. It owns only what is per-function; everything
+    /// per-module stays on the <see cref="CodeGenerator"/>.
     /// <para>
-    /// <b>Why a second function needs a second emitter rather than a moved builder.</b>
-    /// <c>_allocas</c> sits at the end of its function's <c>entry</c> for the whole run,
-    /// and that is what puts every slot in the frame however deeply branched its <c>let</c> is.
-    /// A builder repositioned into another function's <c>entry</c> and back would have to be
-    /// moved back <i>exactly</i>, and a slot built while it was elsewhere would silently land in
-    /// the wrong frame. Two emitters cannot get that wrong: each builder is positioned once.
+    /// Exists so each function has its own alloca builder, fixed in its own <c>entry</c>.
+    /// One builder moved between functions would have to come back to exactly the right spot,
+    /// and any slot built while it was away would land silently in the wrong frame.
     /// </para>
     /// <para>
-    /// <b>The scope stack is shared, not per-emitter.</b> A nested function's emitter enters a
-    /// <see cref="ScopeKind.Function"/> scope on the same stack, and the barrier hides the
-    /// enclosing function's variables while letting function bindings through — so nothing has to
-    /// be copied in or saved and restored around the nested body.
+    /// The scope stack is deliberately <i>not</i> per-emitter: the <see cref="ScopeKind.Function"/>
+    /// barrier already hides an enclosing function's variables, so a nested body can share it.
     /// </para>
     /// <para>
-    /// Nested rather than separate so it can reach the generator's private state without that
-    /// state becoming anybody else's business, and <see cref="IDisposable"/> so the builders
-    /// are released when a <see cref="CodegenException"/> leaves an emit half-done.
+    /// Nested so it can use the generator's private state without that state being widened, and
+    /// disposable so a <see cref="CodegenException"/> does not leak the builders.
     /// </para>
     /// </summary>
     private sealed class FunctionEmitter : IDisposable
@@ -38,26 +30,25 @@ public sealed partial class CodeGenerator
         private readonly LLVMBuilderRef _builder;
 
         /// <summary>
-        /// Positioned at this function's entry block and never moved. Every stack slot is built
-        /// through it, so a binding's slot belongs to the frame however deeply branched the
+        /// Builds every stack slot, so a slot belongs to the frame however deeply branched the
         /// statement that declares it is.
         /// </summary>
         private readonly LLVMBuilderRef _allocas;
 
+        private readonly LLVMValueRef _function;
         private readonly LLVMBasicBlockRef _body;
 
         public FunctionEmitter(CodeGenerator generator, LLVMValueRef function)
         {
             _generator = generator;
+            _function = function;
 
             var context = generator._llvmModule.Context;
             _builder = LLVMBuilderRef.Create(context);
             _allocas = LLVMBuilderRef.Create(context);
 
-            // Two blocks rather than one: 'entry' is the frame and holds nothing but allocas,
-            // 'body' holds the code. Keeping them apart is what lets _allocas sit at the end of
-            // 'entry' for the whole run without later code getting in ahead of it — which one
-            // block could not promise the moment a branch terminates it.
+            // 'entry' holds nothing but allocas and 'body' holds the code, so no branch emitted
+            // later can terminate the block the allocas still go into.
             var entry = function.AppendBasicBlock("entry");
             _body = function.AppendBasicBlock("body");
 
@@ -66,8 +57,8 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Terminates <c>entry</c> with its jump into <c>body</c>. Called last, once every slot
-        /// is in — a slot built after it would land behind the terminator.
+        /// Closes <c>entry</c>. Must come last: a slot built afterwards would sit behind the
+        /// terminator.
         /// </summary>
         public void Finish() => _allocas.BuildBr(_body);
 
@@ -77,8 +68,62 @@ public sealed partial class CodeGenerator
             _builder.Dispose();
         }
 
-        /// <summary>Returns <paramref name="value"/> from wherever emission ended up.</summary>
         public void Return(LLVMValueRef value) => _builder.BuildRet(value);
+
+        /// <summary>
+        /// A <c>fn</c>'s body, parameters included.
+        /// <para>
+        /// A parameter is bound to a stack slot rather than to the incoming value, so it can be
+        /// read, assigned and <c>#mock</c>ed exactly like a <c>let</c>. The slot is named
+        /// <c>a.addr</c> so it reads apart from the incoming <c>%a</c> in the IR.
+        /// </para>
+        /// <para>
+        /// Parameters are bound before the body's functions because that is the analyzer's order,
+        /// and the two stages must agree on what each name in the body means.
+        /// </para>
+        /// </summary>
+        public void EmitBody(FunctionDeclaration declaration)
+        {
+            _generator._scopes.EnterNew(declaration.Body.Kind);
+
+            for (var i = 0; i < declaration.Parameters.Count; i++)
+            {
+                var parameter = declaration.Parameters[i];
+                var type = LlvmType(parameter.Type
+                    ?? throw new CodegenException($"parameter '{parameter.Name}' at {parameter.Position} was never typed"));
+
+                var slot = _allocas.BuildAlloca(type, parameter.Name + ".addr");
+                _builder.BuildStore(_function.GetParam((uint)i), slot);
+                _generator._scopes.Declare(parameter.Name, new VariableSlot(slot, type));
+            }
+
+            _generator.EmitFunctions(declaration.Body.Statements);
+            EmitStatements(declaration.Body.Statements);
+            TerminateFunction(declaration);
+
+            _generator._scopes.Exit();
+        }
+
+        /// <summary>
+        /// Ends a body whose last block is still open: a <c>void</c> function returns, and any
+        /// other is marked <c>unreachable</c>, since the analyzer proved every path returns.
+        /// <para>
+        /// Exists because the open block is real — when both arms of an <c>if</c> return,
+        /// <c>if.end</c> is still there, with no terminator, and the IR is invalid without one.
+        /// It is also the one place where a mistake in the analyzer's <c>AlwaysReturns</c> becomes
+        /// a miscompile rather than a rejected program, so the two must agree on what returns.
+        /// </para>
+        /// </summary>
+        private void TerminateFunction(FunctionDeclaration declaration)
+        {
+            if (Terminated)
+                return;
+
+            if (declaration.ReturnType == SuruType.Void)
+                _builder.BuildRetVoid();
+            else
+                _builder.BuildUnreachable();
+        }
 
         private void EmitStatement(Statement statement)
         {
@@ -94,15 +139,24 @@ public sealed partial class CodeGenerator
                     _builder.BuildStore(EmitExpr(assignment.Value), _generator.Variable(assignment.Name).Slot);
                     break;
                 case BlockStatement block:
-                    // Still purely lexical: no branch and no new basic block, only a scope. An
-                    // arm gets its blocks from the 'if', not from the block that is its body.
-                    //
-                    // This case handles every block that is not a loop body, because a loop scope's
-                    // payload is the two basic blocks and those do not exist until 'EmitWhile' has
-                    // made them — so that one enters its own scope. See the note there.
+                    // A block is only a scope; any basic blocks belong to the 'if' around it. A
+                    // loop body is the exception and enters its own scope in EmitWhile, because
+                    // its scope data does not exist until the loop's blocks do.
                     _generator._scopes.EnterNew(block.Kind);
+                    _generator.EmitFunctions(block.Statements);
                     EmitStatements(block.Statements);
                     _generator._scopes.Exit();
+                    break;
+                case FunctionDeclaration:
+                    // Already emitted when its scope was entered; see EmitFunctions.
+                    break;
+                case ReturnStatement returned:
+                    // Leaving the block terminated is all a 'return' has to do: the handling
+                    // 'break' needed for that already covers a 'return' anywhere in a body.
+                    if (returned.Value is null)
+                        _builder.BuildRetVoid();
+                    else
+                        _builder.BuildRet(EmitExpr(returned.Value));
                     break;
                 case IfStatement branch:
                     EmitIf(branch);
@@ -117,8 +171,7 @@ public sealed partial class CodeGenerator
                     _builder.BuildBr(_generator.Loop("continue").Continue);
                     break;
                 case MockDirective mock:
-                    // Emitted exactly as the assignment it is; only reaching codegen at all is
-                    // what makes it a test-build feature.
+                    // A mock is an assignment; only the lexer's build mode makes it test-only.
                     _builder.BuildStore(EmitExpr(mock.Value), _generator.Variable(mock.Name).Slot);
                     break;
                 case ViewDirective view:
@@ -133,8 +186,8 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Emits an expression and returns its value, or a null value reference for
-        /// expressions of type <see cref="SuruType.Void"/>.
+        /// An expression's value, or a null value reference for one of type
+        /// <see cref="SuruType.Void"/>.
         /// </summary>
         private LLVMValueRef EmitExpr(Expression expression)
         {
@@ -149,6 +202,8 @@ public sealed partial class CodeGenerator
                 case CallExpression { Name: "printLn", Args.Count: 1 } call:
                     EmitPrintLn(call.Args[0]);
                     return default;
+                case CallExpression call:
+                    return EmitCall(call);
                 case IdentifierExpression identifier:
                     var variable = _generator.Variable(identifier.Name);
                     return _builder.BuildLoad2(variable.Type, variable.Slot, identifier.Name);
@@ -162,29 +217,18 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// The first construct to emit more than one basic block. The condition is already an
-        /// <c>i1</c> — <c>bool</c> maps to <see cref="LLVMTypeRef.Int1"/> and a comparison yields
-        /// one — so it feeds the branch with nothing in between.
+        /// <c>if</c>, with or without an <c>else</c>. With no <c>else</c> there is still an
+        /// <c>if.end</c>, because the program needs somewhere to continue.
         /// <para>
-        /// With no <c>else</c> the false edge goes straight to <c>if.end</c>: there is no
-        /// alternative to run, only somewhere to be afterwards, which is why the block exists in
-        /// both shapes and is named for continuing rather than for merging.
-        /// </para>
-        /// <para>
-        /// An arm <i>can</i> leave early — a <c>break</c> or <c>continue</c> inside one terminates
-        /// its block — so the branch to the end goes through <see cref="BranchTo"/> rather than
-        /// being built unconditionally. When both arms leave, <c>if.end</c> has no predecessors at
-        /// all, which is valid IR here only because there are no phi nodes to leave without an
-        /// incoming edge: every variable is an alloca in <c>entry</c>, which dominates the whole
-        /// function. That is the assumption to revisit the day an expression needs a phi, as a
-        /// short-circuiting <c>and</c> would.
+        /// An arm can leave early, so when both do, <c>if.end</c> has no predecessors. That is
+        /// valid IR only while no phi node exists — every variable is an alloca in <c>entry</c>.
+        /// The first expression that needs a phi, a short-circuiting <c>and</c>, must revisit it.
         /// </para>
         /// </summary>
         private void EmitIf(IfStatement branch)
         {
-            // The condition is emitted first, so the function is read back from where emission
-            // actually ended up rather than from where it started — which will matter the day an
-            // expression can move the insert point, as a short-circuiting 'and' would.
+            // Read after the condition, so it would still be right if the condition emitted
+            // blocks of its own, as a short-circuiting 'and' will.
             var condition = EmitExpr(branch.Condition);
             var function = _builder.InsertBlock.Parent;
 
@@ -203,9 +247,7 @@ public sealed partial class CodeGenerator
             EmitStatement(branch.Then);
             BranchTo(endBlock);
 
-            // 'else if' arrives here as an IfStatement and needs no case of its own: it appends
-            // its own blocks, leaves the builder at its own end, and the branch below terminates
-            // that block rather than this one.
+            // 'else if' is an IfStatement in the else arm and needs no case of its own.
             if (otherwise is not null)
             {
                 _builder.PositionAtEnd(elseBlock);
@@ -217,32 +259,23 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// <c>while &lt;condition&gt; { ... }</c>: a header that tests, a body that branches back to
-        /// it, and an end to continue at. The body is emitted as the ordinary block it is, so its
-        /// scope — and a shadowing binding's own slot — costs nothing here.
+        /// <c>while &lt;condition&gt; { ... }</c>.
         /// <para>
-        /// <b>The condition is emitted inside <c>while.cond</c>, not before the loop.</b> Not
-        /// because an expression could have a side effect (none can, which is what
-        /// <see cref="EmitBinary"/> leans on) but because <c>i &lt; 10</c> compiles to a load from
-        /// <c>i</c>'s slot. Emitted once ahead of the branch it would be a snapshot taken at loop
-        /// entry, and the loop would never end.
+        /// The condition belongs inside the loop, not before it: <c>i &lt; 10</c> reads
+        /// <c>i</c>'s slot, and evaluated once at entry it would never change and the loop would
+        /// never end.
         /// </para>
         /// <para>
-        /// The enclosing function is read <i>before</i> the condition, where <see cref="EmitIf"/>
-        /// reads it after — the condition needs a block to live in, so there is no choice. Both are
-        /// right: what emission can move is the insert <i>block</i>, never the enclosing function.
-        /// </para>
-        /// <para>
-        /// This is where hoisting allocas to <c>entry</c> stops being tidiness and becomes a
-        /// requirement: a <c>let</c> in the body allocates one slot however many times the loop
-        /// runs, and the store is what repeats.
+        /// The loop is why allocas live in <c>entry</c> rather than where they are declared: a
+        /// <c>let</c> in the body must be one slot however many times the body runs.
         /// </para>
         /// </summary>
         private void EmitWhile(WhileStatement loop)
         {
+            // Read before the condition, unlike EmitIf, because the condition needs a block to go
+            // in. Either way is right: emission can change the block, never the function.
             var function = _builder.InsertBlock.Parent;
 
-            // Appended in source order so the IR reads in it, the same as an 'if'.
             var condBlock = function.AppendBasicBlock("while.cond");
             var bodyBlock = function.AppendBasicBlock("while.body");
             var endBlock = function.AppendBasicBlock("while.end");
@@ -251,22 +284,15 @@ public sealed partial class CodeGenerator
 
             _builder.PositionAtEnd(condBlock);
             var condition = EmitExpr(loop.Condition);
-
-            // Built wherever emitting the condition ended up, which is 'while.cond' today and need
-            // not be the day a condition takes blocks of its own.
             _builder.BuildCondBr(condition, bodyBlock, endBlock);
 
-            // The body's scope is entered here rather than by the generic block case, because its
-            // payload is the two basic blocks and those did not exist until a moment ago. 'Body' is
-            // statically a 'BlockStatement', so doing it here is type-safe, and it buys the invariant
-            // that whoever enters a scope supplies its data: no half-initialised scope and no pending
-            // field for the exit. The three lines of duplication with the block case are the price.
-            //
-            // 'condBlock' is the header as created, not a re-read of the insert block: a 'continue'
-            // has to re-test the whole condition, so it targets where the condition starts.
+            // Entered here rather than by the block case, because the scope's data is the loop's
+            // exits and they exist only now. 'continue' targets the start of the condition, so
+            // the whole condition is tested again.
             _generator._scopes.EnterNew(loop.Body.Kind, (Continue: condBlock, Break: endBlock));
 
             _builder.PositionAtEnd(bodyBlock);
+            _generator.EmitFunctions(loop.Body.Statements);
             EmitStatements(loop.Body.Statements);
             BranchTo(condBlock);
 
@@ -276,11 +302,9 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Emits statements in order, stopping at the first one that leaves the block terminated.
-        /// What follows a <c>break</c> is unreachable, and appending it after the terminator is what
-        /// would make the module fail verification. It is still <i>analyzed</i> — semantic analysis
-        /// walks every statement — so unreachable code still reports its own errors; it is only
-        /// never emitted.
+        /// Emits statements up to the first one that leaves the block terminated. What follows is
+        /// unreachable, and emitting it after a terminator would fail verification. It has still
+        /// been analyzed, so unreachable code still reports its own errors.
         /// </summary>
         public void EmitStatements(IReadOnlyList<Statement> statements)
         {
@@ -293,10 +317,9 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Branches to <paramref name="target"/> unless the current block already ends in a
-        /// terminator — which it does when the statement just emitted was a <c>break</c> or a
-        /// <c>continue</c>. A second terminator in one block is invalid IR, and the branch it
-        /// replaces would be unreachable anyway.
+        /// A branch that is skipped when the block has already left by a <c>break</c>,
+        /// <c>continue</c> or <c>return</c>. A second terminator is invalid IR, and the branch
+        /// would be unreachable anyway.
         /// </summary>
         private void BranchTo(LLVMBasicBlockRef target)
         {
@@ -304,14 +327,11 @@ public sealed partial class CodeGenerator
                 _builder.BuildBr(target);
         }
 
-        /// <summary>Whether the block the builder sits in already ends in a terminator.</summary>
         private bool Terminated => _builder.InsertBlock.Terminator.Handle != IntPtr.Zero;
 
         /// <summary>
-        /// The slot goes in the entry block and the store stays where the binding sits: a frame
-        /// slot belongs to the frame, and it is the store — not the alloca — that carries the
-        /// binding's position, so initialisation stays in order. A binding that shadows another is
-        /// still simply a second alloca, which LLVM gives its own name.
+        /// The slot belongs to the frame, but the store stays where the <c>let</c> is written, so
+        /// bindings are initialised in source order. A shadowing binding is simply another slot.
         /// </summary>
         private void EmitLet(LetStatement let)
         {
@@ -325,9 +345,12 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Both operands are evaluated: no expression can have a side effect yet, so
-        /// <c>and</c> and <c>or</c> need no branching. Short-circuiting arrives with
-        /// user-defined functions.
+        /// Both operands are evaluated, <c>and</c> and <c>or</c> included.
+        /// <para>
+        /// TODO(short-circuit): that was sound while no expression could have a side effect, and a
+        /// call is one — <c>false and f()</c> runs <c>f</c> today. Task 7 of
+        /// doc/RD/todo_functions.md fixes it.
+        /// </para>
         /// </summary>
         private LLVMValueRef EmitBinary(BinaryExpression binary)
         {
@@ -381,6 +404,27 @@ public sealed partial class CodeGenerator
             };
         }
 
+        /// <summary>
+        /// A call to a declared function, arguments evaluated left to right. A <c>void</c> call
+        /// is left unnamed, because naming an instruction with no value is invalid IR.
+        /// </summary>
+        private LLVMValueRef EmitCall(CallExpression call)
+        {
+            var function = _generator.Function(call.Name);
+
+            // Typed explicitly: BuildCall2 also has a span overload, and a collection expression
+            // cannot choose between them.
+            LLVMValueRef[] arguments = [.. call.Args.Select(EmitExpr)];
+
+            if (TypeOf(call) == SuruType.Void)
+            {
+                _builder.BuildCall2(function.Type, function.Function, arguments, "");
+                return default;
+            }
+
+            return _builder.BuildCall2(function.Type, function.Function, arguments, call.Name);
+        }
+
         private void EmitPrintLn(Expression arg)
         {
             var (format, argument) = Render(EmitExpr(arg), TypeOf(arg));
@@ -397,11 +441,10 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Compares the two operands and reports the outcome along with both values, so the
-        /// driver can say what was expected and what turned up without evaluating anything
-        /// itself. The comparison is the one the program computes, not a comparison of the
-        /// printed text — <c>%g</c> rounds, and two <c>f64</c>s that print alike need not be
-        /// equal.
+        /// Reports the outcome with both values, so the driver can say what was expected and what
+        /// turned up without evaluating anything itself. The program does the comparison, not the
+        /// driver on printed text: <c>%g</c> rounds, and two <c>f64</c>s that print alike need not
+        /// be equal.
         /// </summary>
         private void EmitAssert(AssertDirective assert)
         {
@@ -413,8 +456,7 @@ public sealed partial class CodeGenerator
                 ? _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, actual, expected)
                 : _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, actual, expected);
 
-            // The wire spells an outcome 'pass' or 'fail', so the word is picked at runtime the
-            // same way Render picks 'true' or 'false' for a bool.
+            // The wire spells an outcome 'pass' or 'fail'.
             var outcome = _builder.BuildSelect(equal, String("pass"), String("fail"));
 
             var (format, actualArgument) = Render(actual, type);
@@ -426,22 +468,20 @@ public sealed partial class CodeGenerator
                 ("actual", format, actualArgument),
                 ("expected", format, expectedArgument));
 
-            // TODO: fail-fast. A failing assertion should stop the run here rather than fall
-            // through — see "Not yet supported" in doc/testing.md. That means branching on
-            // 'equal' after the frame is written: the failing edge sends 'run-finished' and
-            // returns from main, so a loop whose assertion fails on its first pass reports
-            // once and ends. The sticky rule TestRun applies agrees with it already, since
+            // TODO: fail-fast. A failing assertion should end the run here rather than fall
+            // through — see "Not yet supported" in doc/testing.md — so a loop whose assertion
+            // fails on its first pass reports once. TestRun's sticky rule already agrees, since
             // under fail-fast the first failure is the only one.
         }
 
         /// <summary>
         /// The printf specifier for a value of the given type, and the argument to pass with it.
-        /// One source of truth for how a value is rendered, so <c>printLn</c> and the test
-        /// records cannot disagree about what a value looks like.
+        /// One source of truth, so <c>printLn</c> and the test frames cannot disagree about what a
+        /// value looks like.
         /// </summary>
         private (string Format, LLVMValueRef Argument) Render(LLVMValueRef value, SuruType type)
         {
-            // printf has no bool conversion, so pick the literal text at runtime.
+            // printf has no bool conversion.
             if (type == SuruType.Bool)
                 return ("%s", _builder.BuildSelect(value, String("true"), String("false")));
             if (type == SuruType.I64)
@@ -453,16 +493,14 @@ public sealed partial class CodeGenerator
         }
 
         /// <summary>
-        /// Writes one frame down the test channel: <c>begin</c>, a field per entry, <c>end</c>.
+        /// One frame down the test channel.
         /// <para>
-        /// The <c>kind</c> field is written here rather than by the shim, which has no idea what
-        /// a kind is — unlike <see cref="FrameWriter"/>, whose callers do not have to say. It goes
-        /// through the same <c>%s</c> path as any other value, so a kind is never a format string.
+        /// The <c>kind</c> is written here because the shim does not know what a kind is, and as
+        /// a <c>%s</c> value so a kind is never a format string.
         /// </para>
         /// <para>
-        /// Separate from <see cref="Printf"/>, which is <c>printLn</c>'s alone: a frame goes to the
-        /// harness and the program's own output goes to whoever ran it, and the two now travel on
-        /// different file descriptors entirely.
+        /// Kept apart from <see cref="Printf"/>, which is <c>printLn</c>'s alone: frames go to the
+        /// harness and the program's own output to whoever ran it.
         /// </para>
         /// </summary>
         public void WriteFrame(
@@ -471,8 +509,7 @@ public sealed partial class CodeGenerator
             if (_generator._mode != BuildMode.Test)
                 throw new CodegenException($"a '{kind}' frame has no place in a production build");
 
-            // The empty argument list is typed explicitly for the same reason Printf's is: a
-            // collection expression cannot choose between BuildCall2's array and span overloads.
+            // Typed explicitly for the same reason as in EmitCall.
             LLVMValueRef[] none = [];
 
             _builder.BuildCall2(_generator._frameType, _generator._frameBeginFn, none, "");
@@ -492,13 +529,11 @@ public sealed partial class CodeGenerator
 
         private void Printf(string format, params LLVMValueRef[] values)
         {
-            // The argument array is built and typed explicitly: BuildCall2 also has a
-            // ReadOnlySpan overload, and a collection expression cannot choose between them.
+            // Typed explicitly for the same reason as in EmitCall.
             LLVMValueRef[] arguments = [String(format), .. values];
             _builder.BuildCall2(_generator._printfType, _generator._printfFn, arguments, "");
         }
 
-        /// <summary>The generator's interned string, built through this emitter's positioned builder.</summary>
         private LLVMValueRef String(string value) => _generator.String(_builder, value);
     }
 }
