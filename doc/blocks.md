@@ -22,23 +22,25 @@ printLn(4)
 What a block adds is a **scope**. That is also what an [`if`](control-flow.md), a
 [`while`](control-flow.md#while) and a [function](functions.md) take as a body, so everything
 on this page is true of an arm and of a loop body. It is true of a function body too, with
-one exception: a function body cannot see the variables around it (see the end of this page). Written on its own, as above, the
-scope is the only reason to write it.
+one exception: a function body cannot see the variables around it (see the end of this page).
+Written on its own, as above, the scope is the only reason to write it.
 
 ## Scope
 
 A binding made inside a block is visible until the closing `}` and no further:
 
 ```suru
-{
-  let count i64: 1
+fn main() void {
+  {
+    let count i64: 1
+    printLn(count)
+  }
   printLn(count)
 }
-printLn(count)
 ```
 
 ```
-error: hello.suru(5,9): unknown variable 'count'
+error: hello.suru(6,11): unknown variable 'count'
 ```
 
 Everything already in scope stays in scope, so a block can read and assign the bindings
@@ -86,14 +88,16 @@ Shadowing works between nesting levels, not within one. Two `let`s of the same n
 the same block are still an error:
 
 ```suru
-{
-  let x i64: 1
-  let x i64: 2
+fn main() void {
+  {
+    let x i64: 1
+    let x i64: 2
+  }
 }
 ```
 
 ```
-error: hello.suru(3,3): 'x' is already declared
+error: hello.suru(4,5): 'x' is already declared
 ```
 
 ## Nesting
@@ -137,15 +141,19 @@ other statement a block needs no separator around it. These are the same program
 { printLn(1) }
 ```
 
-An unterminated block runs into the end of the file:
+An unterminated block runs into the end of the file. Braces pair up by count, not by
+indentation, so the `}` meant for `main` closes the inner block, and it is `main` that is left
+open:
 
 ```suru
-{
-  printLn(1)
+fn main() void {
+  {
+    printLn(1)
+}
 ```
 
 ```
-error: hello.suru(3,1): expected RightBrace, got Eof
+error: hello.suru(5,1): expected RightBrace, got Eof
 ```
 
 ## Not yet supported
@@ -154,5 +162,5 @@ A block is a statement, not an expression — it produces no value, so it cannot
 where one is expected.
 
 A function body is the one block that does not see everything around it. It sees its
-parameters and the functions in scope, but no variable from outside — see
-[Functions](functions.md#scope).
+parameters, the functions in scope and the file's [constants](bindings.md#constants), but no
+variable from outside — see [Functions](functions.md#scope).

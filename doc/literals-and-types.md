@@ -67,11 +67,13 @@ There is no suffix form: `1i64` is rejected, and so is anything else butted up a
 end of a literal.
 
 ```suru
-printLn(1i64)
+fn main() void {
+  printLn(1i64)
+}
 ```
 
 ```
-error: hello.suru(1,10): invalid digit 'i' in decimal literal
+error: hello.suru(2,12): invalid digit 'i' in decimal literal
 ```
 
 A `-` written directly in front of a number is part of the literal, not an operator applied
@@ -93,11 +95,13 @@ printLn(-9223372036854775808)
 ```
 
 ```suru
-printLn(9223372036854775808)
+fn main() void {
+  printLn(9223372036854775808)
+}
 ```
 
 ```
-error: hello.suru(1,9): integer literal is out of range for 'i64'
+error: hello.suru(2,11): integer literal is out of range for 'i64'
 ```
 
 ## Floats
@@ -106,11 +110,13 @@ A float literal is digits, a `.`, then **at least one more digit**. The trailing
 `1.` is not a float — the lexer reads `1` and then rejects the `.`:
 
 ```suru
-printLn(1.)
+fn main() void {
+  printLn(1.)
+}
 ```
 
 ```
-error: hello.suru(1,10): unexpected character '.'
+error: hello.suru(2,12): unexpected character '.'
 ```
 
 Write `1.0` instead. There is no exponent form (`1e9`) and no leading-dot form (`.5`);
@@ -148,11 +154,13 @@ The stored value is the full `f64`; only the printed form is shortened. See
 `void`, which is why one cannot be passed to another:
 
 ```suru
-printLn(printLn(1))
+fn main() void {
+  printLn(printLn(1))
+}
 ```
 
 ```
-error: hello.suru(1,9): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'
+error: hello.suru(2,11): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'
 ```
 
 There is no way to write a `void` value, and nothing else in the language has that type

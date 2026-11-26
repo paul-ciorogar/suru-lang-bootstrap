@@ -61,11 +61,13 @@ A call resolves to `printLn` or to a [function](functions.md) the program declar
 see. Anything else — including a near miss — is rejected. Names are case-sensitive.
 
 ```suru
-print(1)
+fn main() void {
+  print(1)
+}
 ```
 
 ```
-error: hello.suru(1,1): unknown function 'print'
+error: hello.suru(2,3): unknown function 'print'
 ```
 
 ### Wrong number of arguments
@@ -74,19 +76,23 @@ The parser accepts any number of arguments; the check happens during semantic an
 the error points at the call rather than at an argument.
 
 ```suru
-printLn(1, 2)
+fn main() void {
+  printLn(1, 2)
+}
 ```
 
 ```
-error: hello.suru(1,1): 'printLn' expects 1 argument, got 2
+error: hello.suru(2,3): 'printLn' expects 1 argument, got 2
 ```
 
 ```suru
-printLn()
+fn main() void {
+  printLn()
+}
 ```
 
 ```
-error: hello.suru(1,1): 'printLn' expects 1 argument, got 0
+error: hello.suru(2,3): 'printLn' expects 1 argument, got 0
 ```
 
 ### Unprintable argument type
@@ -94,11 +100,13 @@ error: hello.suru(1,1): 'printLn' expects 1 argument, got 0
 Only the three value types can be printed. The error points at the argument, not the call:
 
 ```suru
-printLn(printLn(1))
+fn main() void {
+  printLn(printLn(1))
+}
 ```
 
 ```
-error: hello.suru(1,9): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'
+error: hello.suru(2,11): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'
 ```
 
 ## Not yet supported

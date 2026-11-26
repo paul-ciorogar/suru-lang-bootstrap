@@ -211,27 +211,42 @@ called. It exists so tasks 2a and 2b can move code into `main` one test at a tim
 
 ### 4. Documentation *(~3.5h)*
 
-- [ ] **Every example in `doc/*.md` moves into `main`.** They are all written as file-level
-      statements today, and after task 3 almost none of them compile. Each one is recompiled
-      against the build rather than edited by hand, as with the functions docs.
-- [ ] **[program-structure.md](../program-structure.md).** The TODO goes. A file is `let` and
+- [x] **Examples are body fragments unless the file is the point.** Every example in `doc/*.md`
+      is written as file-level statements today, and after task 3 almost none of them compile
+      as written. Wrapping all of them in `fn main() void { … }` would put two lines of noise
+      around every three-line example of an operator or a `while`, so most of them are **not**
+      wrapped. They are read as the body of a function, and
+      [README.md](../README.md) says so once, in a short "Reading the examples" note under the
+      first program.
+      An example is a **whole file**, with its `main` written out, when any of these holds:
+      - it declares a `fn` or a constant, since then the reader needs to see what sits at file
+        level and what sits in `main`;
+      - it shows a diagnostic with a position, since `(line,col)` must refer to text the reader
+        can see. That is the reason task 2b gave for refusing `Source.InMain`;
+      - it is about the file itself: README's first program, program-structure, and testing's
+        opening example.
+
+      Each example is still recompiled against the build rather than edited by hand, as the
+      functions docs were. A fragment is compiled wrapped in `main`, and only its stdout is
+      compared, which is why a fragment never carries a position.
+- [x] **[program-structure.md](../program-structure.md).** The TODO goes. A file is `let` and
       `fn`, a program starts at `main`, `main` is optional, the new file-level diagnostic, and
       the reserved-name rules with their three diagnostics.
-- [ ] **[bindings.md](../bindings.md).** A section on constants: literal values only, visible in
+- [x] **[bindings.md](../bindings.md).** A section on constants: literal values only, visible in
       every function regardless of order, and cannot be assigned or mocked.
-- [ ] **[functions.md](../functions.md).** The Scope section's TODO goes: a body sees constants.
+- [x] **[functions.md](../functions.md).** The Scope section's TODO goes: a body sees constants.
       A short `main` section, or a pointer to program-structure. "One namespace" gains `main`
       beside `printLn` as a name that cannot be redeclared, and "Recursion and order" says `main`
       is the one function that cannot be called.
-- [ ] **[testing.md](../testing.md).** Directives live in functions. A directive in a function
+- [x] **[testing.md](../testing.md).** Directives live in functions. A directive in a function
       `main` never reaches reads `undefined`. The opening example is rewritten, and its
       `#mock width` becomes a mock of a local inside `main`. The mocking-a-constant item already in
       "Not yet supported" is reworded from "will not be" to "is not", since constants then exist.
-- [ ] **[todo_test.md](todo_test.md).** Phase B's first task becomes "rename the wrapper to
+- [x] **[todo_test.md](todo_test.md).** Phase B's first task becomes "rename the wrapper to
       `suru_run` and move its frames into the shim". The hang fixture in §5 is
       `fn main() void { while true { } }`. The `#spec` paragraph in testing.md's "Not yet
       supported" notes that every directive now has a function to belong to.
-- [ ] **`CHANGELOG.md`** under `## [Unreleased]`, and **`CLAUDE.md`**: the language summary, the
+- [x] **`CHANGELOG.md`** under `## [Unreleased]`, and **`CLAUDE.md`**: the language summary, the
       codegen paragraph (the wrapper, `suru.main`, constants as immediates) and the analyzer
       paragraph (the three file passes).
 

@@ -12,9 +12,11 @@ feature gets a page when it lands, not when it is designed.
 ## Your first program
 
 ```suru
-let width i64: 3
-let height i64: 4
-printLn(width * height)
+fn main() void {
+  let width i64: 3
+  let height i64: 4
+  printLn(width * height)
+}
 ```
 
 Save it as `hello.suru` and build it:
@@ -48,14 +50,19 @@ Run it:
 
 There is no runtime and no interpreter — `build/hello` is an ordinary native executable.
 
+A program starts at `main`. Most examples on the other pages leave the
+`fn main() void { … }` around them unwritten: they are the body of a function, and you run one
+by putting it in `main`. An example that declares a function or a constant, or that shows an
+error, is a whole file. See [Reading the examples](program-structure.md#reading-the-examples).
+
 ## Language reference
 
 | Page | Covers |
 | --- | --- |
-| [Program structure](program-structure.md) | What a program is: statements, whitespace, the absence of a terminator |
+| [Program structure](program-structure.md) | What a program is: `main`, what a file may hold, statements, whitespace, the absence of a terminator |
 | [Literals and types](literals-and-types.md) | `bool`, `i64`, `f64`, and how literals are written |
 | [Expressions](expressions.md) | Operators, the absence of precedence, and how types combine |
-| [Bindings](bindings.md) | `let`, assignment, and scope |
+| [Bindings](bindings.md) | `let`, assignment, scope, and file-level constants |
 | [Blocks](blocks.md) | `{}`, block scope and shadowing |
 | [Control flow](control-flow.md) | `if`, `else`, `else if`, `while`, `break`, `continue`, and what a condition may be |
 | [Functions](functions.md) | `fn`, `return`, calls, recursion, and what a body can see |

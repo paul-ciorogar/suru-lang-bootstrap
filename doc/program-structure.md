@@ -1,12 +1,19 @@
 # Program structure
 
-A Suru program is a single file. The file is a sequence of statements, executed top to
-bottom, and of [function](functions.md) declarations, which run only when called.
+A Suru program is a single file. The file holds **declarations only**: file-level
+[constants](bindings.md#constants) and [functions](functions.md). A program starts at the
+function named `main`:
 
 ```suru
-printLn(1)
-printLn(2)
-printLn(3)
+let limit i64: 3
+
+fn main() void {
+  let count i64: 1
+  while count <= limit {
+    printLn(count)
+    count: count + 1
+  }
+}
 ```
 
 ```
@@ -15,15 +22,113 @@ printLn(3)
 3
 ```
 
-There is no `main` function to declare — the statements in the file *are* the program. A
-function can be declared anywhere in the file, including below its first call: all of a
-file's functions are known before any of its statements run.
-Compiling an empty file is legal and produces an executable that does nothing and exits
-successfully. (TODO: add a main function, let statements outside a functio are constants and need to be resolved at compile time.)
+`main` runs once, from top to bottom. Every other function runs only when it is called. A
+function and a constant can be declared anywhere in the file, in any order, because all of a
+file's declarations are known before any code runs.
+
+## `main`
+
+```
+fn main() void { body }
+```
+
+`main` takes no parameters and returns nothing, and the program exits successfully when it
+returns. Any other signature is an error, not just another function, because a near-miss on
+the entry point would otherwise build a program that silently does nothing:
+
+```suru
+fn main() i64 {
+  return 0
+}
+```
+
+```
+error: hello.suru(1,1): 'main' must be declared as 'fn main() void'
+```
+
+**`main` is optional.** A file without one compiles to a program that does nothing and exits
+successfully. An empty file is legal, and so is a file of constants and functions with no
+`main`, which [`suru test`](testing.md) can still build.
+
+**The name is reserved.** The file-level `fn main` is the only thing `main` can ever mean, which
+guarantees that it runs exactly once. A `fn main` anywhere but the file level is an error:
+
+```suru
+fn helper() void {
+  fn main() void { }
+}
+```
+
+```
+error: hello.suru(2,3): 'main' can only be declared at file level
+```
+
+So is a `let` or a parameter named `main`, at any level:
+
+```suru
+fn main() void {
+  let main i64: 1
+}
+```
+
+```
+error: hello.suru(2,7): 'main' is reserved
+```
+
+`main` cannot be called, from another function or from itself, whether or not the file declares
+one:
+
+```suru
+fn main() void {
+  main()
+}
+```
+
+```
+error: hello.suru(2,3): 'main' cannot be called
+```
+
+## What a file may hold
+
+A file may hold `let` and `fn`, and nothing else. A file-level `let` is a
+[constant](bindings.md#constants). Code (a call, an assignment, a block, `if`, `while`,
+`break`, `continue` or `return`) belongs in a function. At file level each of these is
+reported once:
+
+```suru
+printLn(1)
+let count i64: 1
+count: 2
+
+fn main() void {
+  printLn(count)
+}
+```
+
+```
+error: hello.suru(1,1): only 'let' and 'fn' may appear outside a function
+error: hello.suru(3,1): only 'let' and 'fn' may appear outside a function
+```
+
+A [test directive](testing.md) also belongs in a function.
+
+## Reading the examples
+
+Most examples on these pages are the **body of a function**. Every statement in them sits
+inside a function, and they leave the `fn main() void { … }` around them unwritten:
+
+```suru
+printLn(1)
+printLn(2)
+```
+
+To run one, put it in `main`. An example that declares a function or a constant, or that shows
+an error message, is written as a **whole file**, because then it matters what sits at file
+level and on which line.
 
 ## Statements
 
-These are the statements:
+These are the statements a function body is made of:
 
 | Form | Example | Page |
 | --- | --- | --- |
@@ -38,11 +143,13 @@ These are the statements:
 An expression statement must be a **call**. A bare value is parsed fine but rejected:
 
 ```suru
-1
+fn main() void {
+  1
+}
 ```
 
 ```
-error: hello.suru(1,1): only call expressions are allowed as statements
+error: hello.suru(2,3): only call expressions are allowed as statements
 ```
 
 This is deliberate: a value computed and then dropped is almost always a mistake. Bind
@@ -107,12 +214,14 @@ Lexing and parsing stop at the first error. Semantic analysis does not — it re
 every problem it finds in one run:
 
 ```suru
-print(1) printLn(1, 2)
+fn main() void {
+  print(1) printLn(1, 2)
+}
 ```
 
 ```
-error: hello.suru(1,1): unknown function 'print'
-error: hello.suru(1,10): 'printLn' expects 1 argument, got 2
+error: hello.suru(2,3): unknown function 'print'
+error: hello.suru(2,12): 'printLn' expects 1 argument, got 2
 ```
 
 Any character that is not part of a literal, an identifier, a comment, an operator (see
@@ -120,13 +229,16 @@ Any character that is not part of a literal, an identifier, a comment, an operat
 the lexer:
 
 ```suru
-printLn(1) @
+fn main() void {
+  printLn(1) @
+}
 ```
 
 ```
-error: hello.suru(1,12): unexpected character '@'
+error: hello.suru(2,14): unexpected character '@'
 ```
 
 ## Not yet supported
 
 Imports and multi-file programs. Each will get its own page here when it lands.
+`main` cannot return an exit code or read command-line arguments.

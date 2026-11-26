@@ -33,13 +33,15 @@ The condition must already be a `bool`. Nothing converts implicitly, so a number
 value:
 
 ```suru
-if 1 {
-  printLn(1)
+fn main() void {
+  if 1 {
+    printLn(1)
+  }
 }
 ```
 
 ```
-error: hello.suru(1,4): 'if' cannot branch on a value of type 'i64'; expected 'bool'
+error: hello.suru(2,6): 'if' cannot branch on a value of type 'i64'; expected 'bool'
 ```
 
 The usual way to get one is a comparison, which yields a `bool` however its operands are typed —
@@ -92,21 +94,25 @@ the nearest `if` above it. In the program above the `else` is the alternative to
 Both arms must be braced. There is no single-statement form:
 
 ```suru
-if true printLn(1)
+fn main() void {
+  if true printLn(1)
+}
 ```
 
 ```
-error: hello.suru(1,9): expected LeftBrace, got Identifier
+error: hello.suru(2,11): expected LeftBrace, got Identifier
 ```
 
 The same applies after `else`, which must be followed by `{` or by `if`:
 
 ```suru
-if true { } else printLn(1)
+fn main() void {
+  if true { } else printLn(1)
+}
 ```
 
 ```
-error: hello.suru(1,18): expected LeftBrace, got Identifier
+error: hello.suru(2,20): expected LeftBrace, got Identifier
 ```
 
 An empty arm is legal and does nothing.
@@ -117,15 +123,17 @@ An arm is a [block](blocks.md), so it is a scope, and it needs no rule of its ow
 in an arm is gone at the `}`:
 
 ```suru
-if true {
-  let count i64: 1
+fn main() void {
+  if true {
+    let count i64: 1
+    printLn(count)
+  }
   printLn(count)
 }
-printLn(count)
 ```
 
 ```
-error: hello.suru(5,9): unknown variable 'count'
+error: hello.suru(6,11): unknown variable 'count'
 ```
 
 It may shadow a binding from outside, which comes back untouched afterwards:
@@ -169,6 +177,7 @@ around it. The condition is an ordinary expression, so the ordinary
 with a binary operator.
 
 ```suru
+let x i64: 2
 if x
   > 1 {
   printLn(1)
@@ -224,22 +233,26 @@ already false runs the body no times at all. Nothing about the loop changes the 
 Everything `if` says about its condition applies here unchanged. It must already be a `bool`:
 
 ```suru
-while 1 {
+fn main() void {
+  while 1 {
+  }
 }
 ```
 
 ```
-error: hello.suru(1,7): 'while' cannot loop on a value of type 'i64'; expected 'bool'
+error: hello.suru(2,9): 'while' cannot loop on a value of type 'i64'; expected 'bool'
 ```
 
 The body is always braced, there is no single-statement form, and an empty body is legal:
 
 ```suru
-while true printLn(1)
+fn main() void {
+  while true printLn(1)
+}
 ```
 
 ```
-error: hello.suru(1,12): expected LeftBrace, got Identifier
+error: hello.suru(2,14): expected LeftBrace, got Identifier
 ```
 
 ### `break` and `continue`
@@ -294,11 +307,13 @@ one carries on, which is why each row still prints.
 Written where there is no loop to leave, either is an error:
 
 ```suru
-break
+fn main() void {
+  break
+}
 ```
 
 ```
-error: hello.suru(1,1): 'break' can only appear inside a loop
+error: hello.suru(2,3): 'break' can only appear inside a loop
 ```
 
 A statement after a `break` never runs. That is not an error — it is simply unreachable, and the
@@ -316,17 +331,19 @@ A loop body is a [block](blocks.md), so it is a scope, and — exactly as with a
 is all that needs saying. A binding made in the body is gone at the `}`:
 
 ```suru
-let i i64: 0
-while i < 2 {
-  i: i + 1
-  let doubled i64: i * 2
+fn main() void {
+  let i i64: 0
+  while i < 2 {
+    i: i + 1
+    let doubled i64: i * 2
+    printLn(doubled)
+  }
   printLn(doubled)
 }
-printLn(doubled)
 ```
 
 ```
-error: hello.suru(7,9): unknown variable 'doubled'
+error: hello.suru(8,11): unknown variable 'doubled'
 ```
 
 A `let` in the body runs afresh on every pass, so it is re-initialised each time round rather

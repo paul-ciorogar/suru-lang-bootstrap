@@ -81,29 +81,35 @@ Both operands of a binary operator must already have the same type. Nothing is p
 or widened:
 
 ```suru
-printLn(1 + 1.5)
+fn main() void {
+  printLn(1 + 1.5)
+}
 ```
 
 ```
-error: hello.suru(1,9): operator '+' cannot be applied to 'i64' and 'f64'
+error: hello.suru(2,11): operator '+' cannot be applied to 'i64' and 'f64'
 ```
 
 Write `1.0 + 1.5`. The same applies to an operator that does not accept the type at all:
 
 ```suru
-printLn(true < false)
+fn main() void {
+  printLn(true < false)
+}
 ```
 
 ```
-error: hello.suru(1,9): operator '<' cannot be applied to 'bool' and 'bool'
+error: hello.suru(2,11): operator '<' cannot be applied to 'bool' and 'bool'
 ```
 
 ```suru
-printLn(not 1)
+fn main() void {
+  printLn(not 1)
+}
 ```
 
 ```
-error: hello.suru(1,9): operator 'not' cannot be applied to 'i64'
+error: hello.suru(2,11): operator 'not' cannot be applied to 'i64'
 ```
 
 ## Integer division truncates
@@ -138,8 +144,10 @@ fn loud(v bool) bool {
   return v
 }
 
-printLn(false and loud(true))   // false — loud is never called
-printLn(true or loud(false))    // true — loud is never called
+fn main() void {
+  printLn(false and loud(true))   // false — loud is never called
+  printLn(true or loud(false))    // true — loud is never called
+}
 ```
 
 Since operators fold left to right, `a and b or c` is `(a and b) or c`, and each operator

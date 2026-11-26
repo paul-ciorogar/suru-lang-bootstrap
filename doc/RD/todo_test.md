@@ -304,8 +304,9 @@ Provable entirely in unit tests: no LLVM, no `cc`, no process.
 - [ ] **Fixtures for the new failures** *(~1.5h)* — a program that hangs (run deadline, killed,
       diagnostic); a program that exits mid-run (no run-finished, crash reported, directives
       before the exit still annotated).
-      **The hang can now be a `.suru` fixture.** `while` landed, so `while true { }` is a program
-      Suru can express that never ends, and the run deadline finally has something to fire on.
+      **The hang can now be a `.suru` fixture.** `while` landed, so
+      `fn main() void { while true { } }` is a program Suru can express that never ends, and the
+      run deadline finally has something to fire on.
       The rest still cannot: nothing in the language exits mid-run — a divide by zero is the
       closest and it traps on x86 while yielding 0 on ARM64, i.e. a fixture that passes on one
       machine — and nothing can send a garbage frame or flood stdout on purpose.
@@ -337,10 +338,13 @@ the same way — the harness answering `#mock` per run rather than the value bei
 codegen — is the case after this one, and is what turns the deferred `#spec` design in
 [todo.md](todo.md) into something buildable.
 
-- [ ] **Emit the body as `suru_run()`** *(~2h)* — codegen in test mode emits the program body as
-      `void suru_run(void)` instead of `main`, and declares nothing else new. Production builds
-      keep emitting `main` exactly as today. The alloca/body block split is unchanged; it just
-      belongs to a different function.
+- [ ] **Rename the wrapper to `suru_run` and move its frames into the shim** *(~1h)* — the program
+      body is already a function of its own: since [main_program_plan.md](main_program_plan.md),
+      codegen emits the C `main` as a wrapper that holds no user code (`run-started`,
+      `call @suru.main`, `run-finished`, `ret`). In test mode that wrapper is emitted as
+      `void suru_run(void)` with nothing but the call in it, and `run-started`/`run-finished` move
+      into the shim's loop below, which is what emits them per request. Production builds keep
+      emitting `main` exactly as today.
 
 - [ ] **The shim's `main` becomes a loop** *(~2h)* — `runtime/suru_rt.c` gains a frame *reader*,
       a `main` that connects, then loops reading requests: on `run`, emit `run-started`, call
@@ -367,4 +371,4 @@ codegen — is the case after this one, and is what turns the deferred `#spec` d
 need C children because no Suru program can hang or die mid-run, and the rest of the
 documentation. The channel itself is end to end. Standalone — it ends at today's behaviour on
 tomorrow's transport, which is the only honest place to stop.
-**Phase B: 5 items, ~9.5 h.** The payoff.
+**Phase B: 5 items, ~8.5 h.** The payoff.

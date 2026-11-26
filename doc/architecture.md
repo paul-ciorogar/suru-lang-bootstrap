@@ -99,6 +99,12 @@ unchanged, or an earlier stage already turned the feature into something general
  let x i64: 1       | Let            | LetStatement           | resolve type name, check  | alloca in 'entry',
                     |                | (+ TypePosition)       | value, Declare in scope   | store in 'body'
  -------------------+----------------+------------------------+---------------------------+----------------------------
+ let r i64: 12      | Let            | LetStatement (the same | file pass: value must be  | ConstantSymbol: a use IS
+  at file level     |                | node; the parser does  | a literal; declared as a  | the literal's immediate;
+  (a constant)      |                | not know the level)    | ConstantBinding, which    | no slot, no global
+                    |                |                        | survives the barrier and  |
+                    |                |                        | cannot be assigned/mocked |
+ -------------------+----------------+------------------------+---------------------------+----------------------------
  x: 2               | Ident Colon    | AssignmentStatement    | LookupVariable,           | store into the slot
                     |                |                        | types must match          |
  -------------------+----------------+------------------------+---------------------------+----------------------------
@@ -129,12 +135,17 @@ unchanged, or an earlier stage already turned the feature into something general
                     |                |                        | arity and argument types  | open non-void end ->
                     |                |                        |                           | unreachable
  -------------------+----------------+------------------------+---------------------------+----------------------------
+ fn main() void {}  | Fn             | FunctionDeclaration    | file level only, exactly  | symbol 'suru.main'; the C
+                    |                | (nothing special)      | () void; name reserved    | 'main' is a wrapper that
+                    |                |                        | everywhere, never callable| calls it (see section 5)
+ -------------------+----------------+------------------------+---------------------------+----------------------------
  #mock x: 5         | Hash (Test     | MockDirective          | checked like assignment   | store, like assignment
                     | only)          |                        |                           |
  #view x:           |                | ViewDirective  (id)    | subject must be printable | WriteFrame -> suru_field
  #assert(a, b):     |                | AssertDirective (id)   | a and b must be the same  | compare, WriteFrame
                     |                | one directive per line,| type                      |
-                    |                | rest of line discarded |                           |
+                    |                | rest of line discarded | all three: only inside a  |
+                    |                |                        | function                  |
 ```
 
 The `else if` row shows the design rule: a feature that the parser can express in terms of
@@ -153,6 +164,7 @@ an existing one costs nothing in any later stage.
    SemanticAnalyzer                              CodeGenerator
    TEntry = Binding:                             TEntry = Binding:
      VariableBinding (type)                        VariableSlot (alloca)
+     ConstantBinding (type)                        ConstantSymbol (LLVM constant)
      FunctionBinding (signature)                   FunctionSymbol (LLVM function)
    TScope = NoScopeData                          TScope = (cond block, end block) for a Loop
 
@@ -166,27 +178,41 @@ an existing one costs nothing in any later stage.
    Three walks, three ways to treat a Function scope (the barrier):
 
      LookupVariable    walk on; after crossing the barrier, only function names
-                       are visible (a body cannot see its caller's locals)
+                       and constants are visible (a body cannot see its
+                       caller's locals). A binding says which it is through
+                       SurvivesFunctionBoundary; the walk has no special case
      LookupFunction    no barrier (recursion: the name lives outside the body)
      TryFindEnclosing  STOP at the barrier (a break inside fn can't reach the
                        loop that calls the fn)
 
-   example: inner names shadow outer ones
+   example: inner names shadow outer ones (inside a function body)
 
-     let x i64: 1        scope 0: x -> i64
-     {                   scope 1
-       let x f64: 2.0    scope 1: x -> f64     lookup "x" finds scope 1 first
-     }                   exit scope 1          lookup "x" finds scope 0 again
+     let x i64: 1        body scope: x -> i64
+     {                   block scope
+       let x f64: 2.0    block scope: x -> f64   lookup "x" finds the block first
+     }                   exit block scope        lookup "x" finds the body again
 ```
 
 ## 5. Codegen: basic blocks inside a function
 
-`main` holds the file's statements, and each `fn` is an LLVM function of its own. Every one of
-them is emitted through its own `FunctionEmitter` and has the same shape. `main` is emitted
-first, so its `entry` is the first one in the module.
+Each `fn` is an LLVM function of its own, and the C entry point `main` is one more, holding no
+user code. Every one of them is emitted through its own `FunctionEmitter` and has the same shape.
+The C `main` is emitted first, so its `entry` is the first one in the module, and it holds no
+allocas.
 
 ```
-  main:
+  the C entry point: a wrapper, the only externally linked function
+
+  define i32 @main()                   production: only the call and the ret
+    [run-started frame]      test only
+    call void @suru.main()   only if the file declares 'fn main'
+    [run-finished frame]     test only
+    ret i32 0                MainExitCode, which run-finished reports too
+
+  Suru's 'main' is an ordinary internal function named 'suru.main'. The dot
+  cannot appear in a Suru or C identifier, so it never collides with a symbol.
+
+  every function, 'suru.main' included:
   +-----------------------------+
   | entry:                      |  only allocas, emitted by a second builder
   |   %x = alloca i64           |  that stays parked here; 'entry' dominates

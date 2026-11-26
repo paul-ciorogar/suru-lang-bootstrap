@@ -5,13 +5,15 @@ directive**: `suru build` never sees it, and `suru test` builds the program with
 directives live, runs it, and writes what they saw back into your source.
 
 ```suru
-let width  i64: 3
-let height i64: 4
-#mock width: 10
-let area   i64: width * height
-#view area: 40
-#assert(area, 40): pass
-printLn(area)
+fn main() void {
+  let width  i64: 3
+  let height i64: 4
+  #mock width: 10
+  let area   i64: width * height
+  #view area: 40
+  #assert(area, 40): pass
+  printLn(area)
+}
 ```
 
 ```bash
@@ -48,16 +50,32 @@ statement, and it obeys every rule the rest of the language does.
 
 `mock`, `view` and `assert` are test specific keywords. `let view i64: 1` is still a legal binding.
 
+A directive is a statement, so like every other statement it belongs in a
+[function](functions.md). At file level it is an error, reported only by `suru test`, since
+`suru build` never reads the line:
+
+```suru
+#view 1:
+
+fn main() void { }
+```
+
+```
+error: hello.suru(1,1): a directive can only appear inside a function
+```
+
 A directive must be written on one line. The rule that lets an expression continue onto the
 next line does not apply to it:
 
 ```suru
-#view 1
-+ 1
+fn main() void {
+  #view 1
+  + 1
+}
 ```
 
 ```
-error: hello.suru(2,3): a directive must be written on one line; '#' is on line 1
+error: hello.suru(3,5): a directive must be written on one line; '#' is on line 2
 ```
 
 And a line carries one directive, because **a directive ends at its terminator and owns the
@@ -79,12 +97,14 @@ ever written into its line. Its colon is the assignment's, what follows is an ex
 that expression ends the directive:
 
 ```suru
-let x i64: 1
-#mock x: 1 #view b:
+fn main() void {
+  let x i64: 1
+  #mock x: 1 #view b:
+}
 ```
 
 ```
-error: hello.suru(2,12): a directive ends at the end of its line
+error: hello.suru(3,14): a directive ends at the end of its line
 ```
 
 ## `#mock` — stub a value
@@ -123,22 +143,26 @@ printLn(seed)
 And it obeys the ordinary type rule, because it is a store into an existing binding:
 
 ```suru
-let seed i64: 7
-#mock seed: 1.5
+fn main() void {
+  let seed i64: 7
+  #mock seed: 1.5
+}
 ```
 
 ```
-error: hello.suru(2,13): cannot assign a value of type 'f64' to 'seed' of type 'i64'
+error: hello.suru(3,15): cannot assign a value of type 'f64' to 'seed' of type 'i64'
 ```
 
 Mocking a name that is not bound is the same error an assignment would give:
 
 ```suru
-#mock seed: 1
+fn main() void {
+  #mock seed: 1
+}
 ```
 
 ```
-error: hello.suru(1,7): unknown variable 'seed'
+error: hello.suru(2,9): unknown variable 'seed'
 ```
 
 > `#mock` is the only directive that changes what the program computes. A test build can
@@ -152,11 +176,13 @@ The colon is required. It is the place the value is written, so a `#view` withou
 nowhere to report to:
 
 ```suru
-#view 1
+fn main() void {
+  #view 1
+}
 ```
 
 ```
-error: hello.suru(2,1): expected Colon, got Eof
+error: hello.suru(3,1): expected Colon, got RightBrace
 ```
 
 Write the directive and leave the line there:
@@ -179,11 +205,13 @@ It takes a whole expression, not just a name. It shows a value the same way `pri
 and accepts the same types:
 
 ```suru
-#view printLn(1):
+fn main() void {
+  #view printLn(1):
+}
 ```
 
 ```
-error: hello.suru(1,7): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'
+error: hello.suru(2,9): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'
 ```
 
 ## `#assert` — pin a result
@@ -200,7 +228,7 @@ A failure is also reported on the terminal, positioned like every other Suru err
 makes `suru test` exit non-zero:
 
 ```
-error: hello.suru(6,1): assert failed: expected 12, got 40
+error: hello.suru(7,3): assert failed: expected 12, got 40
 4 passed, 1 failed, 0 undefined, 5 views written to hello.suru
 ```
 
@@ -211,11 +239,13 @@ Both sides must be the same type, and that type must be one `#view` could show �
 rule `=` follows:
 
 ```suru
-#assert(1, true)
+fn main() void {
+  #assert(1, true)
+}
 ```
 
 ```
-error: hello.suru(1,1): '#assert' cannot compare 'i64' with 'bool'
+error: hello.suru(2,3): '#assert' cannot compare 'i64' with 'bool'
 ```
 
 ## Reading the output of a run
@@ -268,16 +298,18 @@ once — but its line holds one answer, and it counts once in the summary howeve
 ran.
 
 ```suru
-let i i64: 0
-while i < 3 {
-  i: i + 1
-  #view i: 3
-  #assert(i, 1): fail, got 2
+fn main() void {
+  let i i64: 0
+  while i < 3 {
+    i: i + 1
+    #view i: 3
+    #assert(i, 1): fail, got 2
+  }
 }
 ```
 
 ```
-hello.suru(5,3): assert failed: expected 1, got 2
+error: hello.suru(6,5): assert failed: expected 1, got 2
 0 passed, 1 failed, 0 undefined, 1 view written to hello.suru
 ```
 
@@ -317,7 +349,9 @@ fn neverCalled(n i64) i64 {
   return n
 }
 
-printLn(square(2) + square(3))
+fn main() void {
+  printLn(square(2) + square(3))
+}
 ```
 
 ```
@@ -333,11 +367,10 @@ whatever argument the caller passed.
 
 There is no way yet to name a group of directives and switch between them, so a file carries
 one set at a time. `#spec` and `#save` are designed for that, with the function as the unit a
-test case belongs to. Functions have landed, so nothing blocks them now, but they are not built.
+test case belongs to. Every directive now sits in a function, so each one already has a function
+to belong to, and nothing blocks them, but they are not built.
 
-**Mocking a constant** is not supported, and will not be when file-level constants land
-([RD/main_program_plan.md](RD/main_program_plan.md)). Under that plan, a file-level `let` becomes
-a constant whose value is a literal, visible in every function, and `#mock` on one is rejected
+**Mocking a [constant](bindings.md#constants)** is not supported. `#mock` on one is rejected
 like an assignment: `'x' is a constant and cannot be assigned`. Constants are a program's
 configuration (`let maxRetries i64: 3`), which makes them the values a test most wants to vary.
 They still can't simply be assigned by `#mock`, because a mock takes effect *where it is
