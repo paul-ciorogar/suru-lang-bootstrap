@@ -204,7 +204,7 @@ public sealed class Parser
         var type = Expect(TokenKind.Identifier);
         _ = Expect(TokenKind.Colon);
         return new LetStatement(
-            PositionOf(let), name.Text, type.Text, PositionOf(type), ParseExpression());
+            PositionOf(let), name.Text, PositionOf(name), type.Text, PositionOf(type), ParseExpression());
     }
 
     private Statement ParseAssignment()

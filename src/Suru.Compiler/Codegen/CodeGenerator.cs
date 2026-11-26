@@ -21,6 +21,18 @@ public sealed partial class CodeGenerator
     /// </summary>
     private const int MainExitCode = 0;
 
+    /// <summary>
+    /// Suru's entry point: the name the analyzer reserves, and the function the C <c>main</c>
+    /// calls when a file declares it.
+    /// </summary>
+    private const string Main = "main";
+
+    /// <summary>
+    /// Suru's <c>main</c>'s symbol. No Suru or C identifier can contain the dot, so it never
+    /// collides with the C <c>main</c>, and it reads like <c>outer.helper</c>.
+    /// </summary>
+    private const string MainSymbol = "suru.main";
+
     private readonly LLVMModuleRef _llvmModule;
 
     private readonly LLVMTypeRef _printfType;
@@ -108,6 +120,10 @@ public sealed partial class CodeGenerator
         EmitFunctions(_module.Statements);
         main.EmitStatements(_module.Statements);
 
+        // After the file's statements, for now: both forms run while code moves into 'main'.
+        if (_scopes.LookupFunction(Main) is Ok<Binding, Unbound>(FunctionSymbol entry))
+            main.CallVoid(entry);
+
         // 'run-finished' is how the driver tells a run that died from one that never reached a
         // directive. It needs no terminator guard: 'break', 'continue' and 'return' are all
         // rejected at the top level, so nothing can have left this block already.
@@ -128,6 +144,25 @@ public sealed partial class CodeGenerator
         _scopes.TryFindEnclosing(ScopeKind.Loop, out var loop)
             ? loop
             : throw new CodegenException($"'{keyword}' outside a loop reached codegen");
+
+    /// <summary>
+    /// What a name read as a value means: a slot to load from, or a constant's immediate.
+    /// </summary>
+    private Binding Value(string name) =>
+        _scopes.LookupVariable(name).UnwrapOrElse(_ =>
+            throw new CodegenException($"unknown variable '{name}'"));
+
+    /// <summary>
+    /// A literal's LLVM immediate. Static because a constant's value is built outside any
+    /// function, and shared with expression emission so there is one way a literal becomes LLVM.
+    /// </summary>
+    private static LLVMValueRef Literal(Expression literal) => literal switch
+    {
+        BoolLiteral b => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, b.Value ? 1ul : 0ul, false),
+        IntLiteral i => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i.Value, true),
+        FloatLiteral f => LLVMValueRef.CreateConstReal(LLVMTypeRef.Double, f.Value),
+        _ => throw new CodegenException($"'{literal.GetType().Name}' is not a literal"),
+    };
 
     private VariableSlot Variable(string name) =>
         _scopes.LookupVariable(name).UnwrapOrElse(_ =>
@@ -178,7 +213,10 @@ public sealed partial class CodeGenerator
                 ?? throw new CodegenException($"parameter '{parameter.Name}' at {parameter.Position} was never typed")))];
 
         var type = LLVMTypeRef.CreateFunction(returnType, parameterTypes);
-        var name = string.Join('.', [.. _enclosingFunctions, declaration.Name]);
+        // Only the file-level 'main' gets here: the analyzer rejects one anywhere else.
+        var name = declaration.Name == Main
+            ? MainSymbol
+            : string.Join('.', [.. _enclosingFunctions, declaration.Name]);
 
         var function = _llvmModule.AddFunction(name, type);
         function.Linkage = LLVMLinkage.LLVMInternalLinkage;

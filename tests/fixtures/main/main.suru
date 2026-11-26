@@ -1,0 +1,9 @@
+// A program whose output comes only from 'main', calling a helper declared below it.
+fn main() void {
+  printLn(1)
+  printLn(helper(20))
+}
+
+fn helper(n i64) i64 {
+  return n + 1
+}

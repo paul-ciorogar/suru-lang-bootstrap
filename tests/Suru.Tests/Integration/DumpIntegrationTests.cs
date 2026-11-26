@@ -100,6 +100,19 @@ public class DumpIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void MainIsAnInternalFunctionTheEntryPointCalls()
+    {
+        var dump = Compile(Dump.Llvm, "main");
+
+        // The C entry point is still the module's first function, and Suru's 'main' is an
+        // ordinary internal one under a symbol no identifier can spell.
+        Assert.True(
+            dump.IndexOf("define i32 @main()", StringComparison.Ordinal)
+            < dump.IndexOf("define internal void @suru.main()", StringComparison.Ordinal));
+        Assert.Contains("call void @suru.main()", dump);
+    }
+
+    [Fact]
     public void AndOrBranchToAPhiInsteadOfComputingBothSides()
     {
         var dump = Compile(Dump.Llvm, "short-circuit");

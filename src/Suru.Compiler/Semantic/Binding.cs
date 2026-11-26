@@ -1,7 +1,7 @@
 namespace Suru.Compiler.Semantic;
 
 /// <summary>
-/// What a name means. Variables and functions share one namespace, so they share one
+/// What a name means. Variables, constants and functions share one namespace, so they share one
 /// <see cref="ScopeStack{TEntry, TScope}"/>, and differ only in whether they survive a function
 /// boundary, which is all the barrier reads.
 /// </summary>
@@ -21,6 +21,16 @@ public sealed record VariableBinding(SuruType Type) : Binding
 /// the scope around its body and a call to itself has to find it from within.
 /// </summary>
 public sealed record FunctionBinding(FunctionSignature Signature) : Binding
+{
+    public override bool SurvivesFunctionBoundary => true;
+}
+
+/// <summary>
+/// A file-level <c>let</c>, whose value is a literal. Visible through a function boundary,
+/// because every function body sees every constant, and safe to be: its value lives in no
+/// frame, so a body reading it never reaches into its caller's.
+/// </summary>
+public sealed record ConstantBinding(SuruType Type) : Binding
 {
     public override bool SurvivesFunctionBoundary => true;
 }

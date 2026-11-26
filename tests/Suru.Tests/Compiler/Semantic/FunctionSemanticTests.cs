@@ -540,4 +540,128 @@ public class FunctionSemanticTests
         Assert.Equal(
             "test.suru(2,3): 'inner' must return a value of type 'i64' on every path", error);
     }
+
+    // ---- main -------------------------------------------------------------------------------
+
+    [Fact]
+    public void AcceptsAnEntryPointCallingAFunctionDeclaredBelowIt()
+    {
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              printLn(helper(20))
+            }
+
+            fn helper(n i64) i64 {
+              return n + 1
+            }
+            """));
+    }
+
+    [Fact]
+    public void ReportsAnEntryPointWithAParameter()
+    {
+        var error = Assert.Single(Source.Analyze("fn main(a i64) void { }"));
+
+        Assert.Equal("test.suru(1,1): 'main' must be declared as 'fn main() void'", error);
+    }
+
+    [Fact]
+    public void ReportsAnEntryPointReturningAValue()
+    {
+        var error = Assert.Single(Source.Analyze("fn main() i64 {\n  return 1\n}"));
+
+        Assert.Equal("test.suru(1,1): 'main' must be declared as 'fn main() void'", error);
+    }
+
+    [Fact]
+    public void ReportsAnEntryPointNestedInAFunction()
+    {
+        var error = Assert.Single(Source.Analyze("fn outer() void {\n  fn main() void { }\n}"));
+
+        Assert.Equal("test.suru(2,3): 'main' can only be declared at file level", error);
+    }
+
+    [Fact]
+    public void ReportsAnEntryPointInABareBlock()
+    {
+        var error = Assert.Single(Source.Analyze("{\n  fn main() void { }\n}"));
+
+        Assert.Equal("test.suru(2,3): 'main' can only be declared at file level", error);
+    }
+
+    /// <summary>Reported in place of the placement error an ordinary function would get.</summary>
+    [Fact]
+    public void ReportsAnEntryPointInAnIfArmOnce()
+    {
+        var error = Assert.Single(Source.Analyze("if true {\n  fn main() void { }\n}"));
+
+        Assert.Equal("test.suru(2,3): 'main' can only be declared at file level", error);
+    }
+
+    [Fact]
+    public void ReportsALetNamedMainInAFunction()
+    {
+        var error = Assert.Single(Source.Analyze("fn f() void {\n  let main i64: 1\n}"));
+
+        Assert.Equal("test.suru(2,7): 'main' is reserved", error);
+    }
+
+    [Fact]
+    public void ReportsALetNamedMainAtFileLevel()
+    {
+        var error = Assert.Single(Source.Analyze("let main i64: 1"));
+
+        Assert.Equal("test.suru(1,5): 'main' is reserved", error);
+    }
+
+    /// <summary>Reserved, not a redeclaration, even beside the entry point it collides with.</summary>
+    [Fact]
+    public void ReportsALetNamedMainBesideTheEntryPointOnce()
+    {
+        var error = Assert.Single(Source.Analyze("fn main() void { }\nlet main i64: 1"));
+
+        Assert.Equal("test.suru(2,5): 'main' is reserved", error);
+    }
+
+    [Fact]
+    public void ReportsAParameterNamedMain()
+    {
+        var error = Assert.Single(Source.Analyze("fn f(main i64) void { }"));
+
+        Assert.Equal("test.suru(1,6): 'main' is reserved", error);
+    }
+
+    [Fact]
+    public void ReportsACallToMainFromItself()
+    {
+        var error = Assert.Single(Source.Analyze("fn main() void {\n  main()\n}"));
+
+        Assert.Equal("test.suru(2,3): 'main' cannot be called", error);
+    }
+
+    [Fact]
+    public void ReportsACallToMainFromAnotherFunction()
+    {
+        var error = Assert.Single(Source.Analyze("fn main() void { }\nfn f() void {\n  main()\n}"));
+
+        Assert.Equal("test.suru(3,3): 'main' cannot be called", error);
+    }
+
+    /// <summary>The rule is about the name, so it does not depend on what else the file holds.</summary>
+    [Fact]
+    public void ReportsACallToMainInAFileThatDeclaresNone()
+    {
+        var error = Assert.Single(Source.Analyze("main()"));
+
+        Assert.Equal("test.suru(1,1): 'main' cannot be called", error);
+    }
+
+    [Fact]
+    public void ReportsMainUsedAsAValue()
+    {
+        var error = Assert.Single(Source.Analyze("fn main() void { }\nprintLn(main)"));
+
+        Assert.Equal("test.suru(2,9): 'main' is a function and cannot be used as a value", error);
+    }
 }

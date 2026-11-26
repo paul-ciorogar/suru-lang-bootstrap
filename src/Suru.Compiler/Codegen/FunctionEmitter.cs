@@ -70,6 +70,10 @@ public sealed partial class CodeGenerator
 
         public void Return(LLVMValueRef value) => _builder.BuildRet(value);
 
+        /// <summary>A call with no arguments and no result, for the entry point's wrapper.</summary>
+        public void CallVoid(FunctionSymbol function) =>
+            _builder.BuildCall2(function.Type, function.Function, Array.Empty<LLVMValueRef>(), "");
+
         /// <summary>
         /// A <c>fn</c>'s body, parameters included.
         /// <para>
@@ -193,20 +197,21 @@ public sealed partial class CodeGenerator
         {
             switch (expression)
             {
-                case BoolLiteral b:
-                    return LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, b.Value ? 1ul : 0ul, false);
-                case IntLiteral i:
-                    return LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)i.Value, true);
-                case FloatLiteral f:
-                    return LLVMValueRef.CreateConstReal(LLVMTypeRef.Double, f.Value);
+                case BoolLiteral or IntLiteral or FloatLiteral:
+                    return Literal(expression);
                 case CallExpression { Name: "printLn", Args.Count: 1 } call:
                     EmitPrintLn(call.Args[0]);
                     return default;
                 case CallExpression call:
                     return EmitCall(call);
                 case IdentifierExpression identifier:
-                    var variable = _generator.Variable(identifier.Name);
-                    return _builder.BuildLoad2(variable.Type, variable.Slot, identifier.Name);
+                    return _generator.Value(identifier.Name) switch
+                    {
+                        VariableSlot variable =>
+                            _builder.BuildLoad2(variable.Type, variable.Slot, identifier.Name),
+                        ConstantSymbol constant => constant.Value,
+                        _ => throw new CodegenException($"'{identifier.Name}' is not a value"),
+                    };
                 case BinaryExpression binary:
                     return EmitBinary(binary);
                 case UnaryExpression unary:

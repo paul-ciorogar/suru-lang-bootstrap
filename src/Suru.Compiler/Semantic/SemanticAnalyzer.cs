@@ -13,6 +13,12 @@ public sealed class SemanticAnalyzer
 {
     private const string PrintLn = "printLn";
 
+    /// <summary>
+    /// The entry point, and nothing else: reserved at every level and never callable, so
+    /// <c>main</c> runs exactly once per run.
+    /// </summary>
+    private const string Main = "main";
+
     private static readonly SuruType[] PrintableTypes = [SuruType.Bool, SuruType.I64, SuruType.F64];
 
     private static readonly SuruType[] NumericTypes = [SuruType.I64, SuruType.F64];
@@ -57,7 +63,7 @@ public sealed class SemanticAnalyzer
     private IReadOnlyList<string> _Analyze()
     {
         // The file's scope is never entered, so nothing else would run the pre-pass for it.
-        DeclareSignatures(_module.Statements, isDeclarationContext: true);
+        DeclareSignatures(_module.Statements, isDeclarationContext: true, isFileLevel: true);
 
         foreach (var statement in _module.Statements)
             AnalyzeStatement(statement);
@@ -138,7 +144,7 @@ public sealed class SemanticAnalyzer
                 if (parameter.Type is { } parameterType)
                     _scopes.Declare(parameter.Name, new VariableBinding(parameterType));
 
-        DeclareSignatures(block.Statements, IsDeclarationContext(block.Kind));
+        DeclareSignatures(block.Statements, IsDeclarationContext(block.Kind), isFileLevel: false);
 
         foreach (var statement in block.Statements)
             AnalyzeStatement(statement);
@@ -163,8 +169,13 @@ public sealed class SemanticAnalyzer
     /// <c>unknown function</c> — the same reasoning <see cref="AnalyzeLet"/> gives for declaring
     /// a binding whose initialiser failed.
     /// </para>
+    /// <para>
+    /// A misplaced <c>main</c> is the exception: it is reported in place of every other placement
+    /// error and not registered, since there is no function it could be.
+    /// </para>
     /// </summary>
-    private void DeclareSignatures(IReadOnlyList<Statement> statements, bool isDeclarationContext)
+    private void DeclareSignatures(
+        IReadOnlyList<Statement> statements, bool isDeclarationContext, bool isFileLevel)
     {
         foreach (var statement in statements)
         {
@@ -184,8 +195,24 @@ public sealed class SemanticAnalyzer
                 // written rather than from what resolved.
                 parameters.Add(parameter.Type);
 
-                if (!names.Add(parameter.Name))
+                if (parameter.Name == Main)
+                    Error(parameter.Position, $"'{Main}' is reserved");
+                else if (!names.Add(parameter.Name))
                     Error(parameter.Position, $"'{parameter.Name}' is already declared");
+            }
+
+            if (declaration.Name == Main)
+            {
+                if (!isFileLevel)
+                {
+                    Error(declaration.Position, $"'{Main}' can only be declared at file level");
+                    continue;
+                }
+
+                // An error rather than an ordinary function: a near-miss on the entry point
+                // would otherwise build a program that silently does nothing.
+                if (declaration.Parameters.Count != 0 || declaration.ReturnType != SuruType.Void)
+                    Error(declaration.Position, $"'{Main}' must be declared as 'fn {Main}() void'");
             }
 
             // TODO: since declarations are scoped we could consider shadowing
@@ -366,7 +393,10 @@ public sealed class SemanticAnalyzer
         var declared = ResolveBindingType(let.TypeName, let.TypePosition);
 
         // Only the innermost scope: a name may shadow an outer binding, but not one of its own.
-        if (_scopes.DeclaredHere(let.Name))
+        // A reserved name is reported instead, so it never also reads as a redeclaration.
+        if (let.Name == Main)
+            Error(let.NamePosition, $"'{Main}' is reserved");
+        else if (_scopes.DeclaredHere(let.Name))
         {
             Error(let.Position, $"'{let.Name}' is already declared");
             return;
@@ -378,7 +408,7 @@ public sealed class SemanticAnalyzer
 
         // Registered even when the initialiser or the type name failed, so later uses
         // of the name report their own problems instead of 'unknown variable'.
-        if (declared is not null)
+        if (declared is not null && !_scopes.DeclaredHere(let.Name))
             _scopes.Declare(let.Name, new VariableBinding(declared));
     }
 
@@ -388,11 +418,18 @@ public sealed class SemanticAnalyzer
     /// <summary>
     /// A store into an existing binding. Shared by <c>&lt;name&gt;: &lt;value&gt;</c> and by
     /// <c>#mock</c>, which is that statement restricted to test builds, so the two cannot drift
-    /// on what they accept or what they say when they refuse.
+    /// on what they accept or what they say when they refuse. That includes refusing a
+    /// constant, which is why mocking one is an error rather than a feature.
     /// </summary>
     private void AnalyzeStore(SourcePosition position, string name, Expression value)
     {
         var valueType = AnalyzeExpression(value);
+
+        if (_scopes.LookupVariable(name) is Ok<Binding, Unbound>(ConstantBinding))
+        {
+            Error(position, $"'{name}' is a constant and cannot be assigned");
+            return;
+        }
 
         if (VariableType(position, name) is not { } declared)
             return;
@@ -475,8 +512,8 @@ public sealed class SemanticAnalyzer
     /// The type a name reads as, or null with the reason reported. Shared by an identifier, an
     /// assignment and a <c>#mock</c> so the three cannot drift on what they say.
     /// <para>
-    /// A variable of an enclosing function is hidden by the barrier and so reads as unknown. A
-    /// function name gets its own error: the name <i>is</i> declared, but there are no function
+    /// A variable of an enclosing function is hidden by the barrier and so reads as unknown; a
+    /// constant is not, and reads like a variable from anywhere. A function name gets its own error: the name <i>is</i> declared, but there are no function
     /// values to read it as.
     /// </para>
     /// </summary>
@@ -487,7 +524,10 @@ public sealed class SemanticAnalyzer
             case Ok<Binding, Unbound>(VariableBinding variable):
                 return variable.Type;
 
-            case Ok<Binding, Unbound>:
+            case Ok<Binding, Unbound>(ConstantBinding constant):
+                return constant.Type;
+
+            case Ok<Binding, Unbound>(FunctionBinding):
                 Error(position, $"'{name}' is a function and cannot be used as a value");
                 return null;
 
@@ -559,6 +599,14 @@ public sealed class SemanticAnalyzer
         // Matched before the scope is consulted, so no declaration can take the builtin's name.
         if (call.Name == PrintLn)
             return ResolvePrintLn(call);
+
+        // Whether or not the file declares one, so the rule does not depend on the rest of it.
+        // Void is the only type 'main' may have, so the call's context does not cascade.
+        if (call.Name == Main)
+        {
+            Error(call.Position, $"'{Main}' cannot be called");
+            return SuruType.Void;
+        }
 
         var lookup = _scopes.LookupFunction(call.Name);
         if (lookup.IsError)

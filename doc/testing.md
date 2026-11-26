@@ -335,6 +335,29 @@ There is no way yet to name a group of directives and switch between them, so a 
 one set at a time. `#spec` and `#save` are designed for that, with the function as the unit a
 test case belongs to. Functions have landed, so nothing blocks them now, but they are not built.
 
+**Mocking a constant** is not supported, and will not be when file-level constants land
+([RD/main_program_plan.md](RD/main_program_plan.md)). Under that plan, a file-level `let` becomes
+a constant whose value is a literal, visible in every function, and `#mock` on one is rejected
+like an assignment: `'x' is a constant and cannot be assigned`. Constants are a program's
+configuration (`let maxRetries i64: 3`), which makes them the values a test most wants to vary.
+They still can't simply be assigned by `#mock`, because a mock takes effect *where it is
+written*, and a constant has no "where". A `#mock rate: 20` inside one function would change
+`rate` for every function that runs after it. In a test build that makes the constant a global
+variable whose value depends on call order, and a value that outlives the run once one binary
+serves many runs. The intended form is an **override per test case**: "for this case, `rate` is
+20", set before the code under test starts and gone when the case ends. It waits on `#spec` above
+for a case to scope it to. Still open:
+
+- **How it is spelled.** It could be a file-level `#mock`, a form inside `#spec`, or a new
+  directive.
+- **How a test build stores it.** Every mockable constant could become a global, or only the ones
+  some case overrides, so that the rest stay inline in both builds.
+- **Its type rule.** Presumably the constant's declared type, with a literal value, matching what
+  a constant's own value may be.
+
+Until then, copy the constant into a local (`let r i64: rate`) and mock the local. That affects
+only the one function, which is the scope the real feature needs.
+
 A failing `#assert` does **not** stop the program. It records the failure and the run carries
 on, so a loop whose assertion fails on its first pass still runs to the end. Fail-fast — an
 assertion that stops the loop and the rest of the run — is the intended behaviour and is not

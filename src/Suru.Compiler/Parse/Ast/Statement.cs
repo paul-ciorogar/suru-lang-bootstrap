@@ -13,16 +13,19 @@ public sealed class ExpressionStatement(Expression expression) : Statement(expre
 /// <summary>
 /// <c>let &lt;name&gt; &lt;type&gt;: &lt;value&gt;</c>. The type is written out, so
 /// <paramref name="typePosition"/> lets an unknown type name point at the type
-/// rather than at the <c>let</c>.
+/// rather than at the <c>let</c>, and <paramref name="namePosition"/> lets a reserved name point
+/// at the name.
 /// </summary>
 public sealed class LetStatement(
     SourcePosition position,
     string name,
+    SourcePosition namePosition,
     string typeName,
     SourcePosition typePosition,
     Expression value) : Statement(position)
 {
     public string Name { get; } = name;
+    public SourcePosition NamePosition { get; } = namePosition;
     public string TypeName { get; } = typeName;
     public SourcePosition TypePosition { get; } = typePosition;
     public Expression Value { get; } = value;
