@@ -1,7 +1,7 @@
 # Program structure
 
 A Suru program is a single file. The file is a sequence of statements, executed top to
-bottom.
+bottom, and of [function](functions.md) declarations, which run only when called.
 
 ```suru
 printLn(1)
@@ -15,21 +15,25 @@ printLn(3)
 3
 ```
 
-There is no `main` function to declare — the statements in the file *are* the program.
+There is no `main` function to declare — the statements in the file *are* the program. A
+function can be declared anywhere in the file, including below its first call: all of a
+file's functions are known before any of its statements run.
 Compiling an empty file is legal and produces an executable that does nothing and exits
-successfully.
+successfully. (TODO: add a main function, let statements outside a functio are constants and need to be resolved at compile time.)
 
 ## Statements
 
-There are five kinds of statement:
+These are the statements:
 
 | Form | Example | Page |
 | --- | --- | --- |
 | A binding | `let count i64: 1` | [Bindings](bindings.md) |
 | An assignment | `count: 2` | [Bindings](bindings.md) |
-| A call | `printLn(count)` | [Printing](printing.md) |
+| A call | `printLn(count)` | [Printing](printing.md), [Functions](functions.md) |
 | A block | `{ printLn(count) }` | [Blocks](blocks.md) |
-| A branch | `if ready { printLn(count) }` | [Control flow](control-flow.md) |
+| A branch or a loop, and `break`/`continue` | `if ready { printLn(count) }` | [Control flow](control-flow.md) |
+| A function declaration | `fn double(n i64) i64 { return n * 2 }` | [Functions](functions.md) |
+| A return | `return count` | [Functions](functions.md) |
 
 An expression statement must be a **call**. A bare value is parsed fine but rejected:
 
@@ -75,7 +79,8 @@ lines](expressions.md#splitting-an-expression-across-lines).
 ## Comments
 
 `//` starts a comment that runs to the end of the line. It is the only comment syntax —
-there is no block comment, and `#` is a lex error.
+there is no block comment. `#` also runs to the end of the line, but it starts a
+[test directive](testing.md), which `suru build` skips exactly as it skips a comment.
 
 ```suru
 // Comments are whitespace: the lexer drops them and the parser never sees them.
@@ -124,5 +129,4 @@ error: hello.suru(1,12): unexpected character '@'
 
 ## Not yet supported
 
-User-defined functions, imports, and multi-file programs. Each will get
-its own page here when it lands.
+Imports and multi-file programs. Each will get its own page here when it lands.

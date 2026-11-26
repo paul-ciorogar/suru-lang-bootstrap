@@ -1,7 +1,7 @@
 # Printing
 
-`printLn` is the only function in the language. It is a builtin — there is nothing to
-import, and it cannot be redefined.
+`printLn` is the only builtin function. There is nothing to import, and it cannot be
+redeclared — a [function](functions.md) named `printLn` is an error.
 
 ```
 printLn(value)
@@ -57,8 +57,8 @@ There is no way to change the format, and no unbuffered/flush control — output
 
 ### Unknown function
 
-`printLn` is the only name that resolves. Anything else — including a near miss — is
-rejected. Names are case-sensitive.
+A call resolves to `printLn` or to a [function](functions.md) the program declares and can
+see. Anything else — including a near miss — is rejected. Names are case-sensitive.
 
 ```suru
 print(1)

@@ -353,7 +353,11 @@ Nothing else in `Testing/` changes: no protocol change, no shim change, no `Fram
 
 ## Task 9 — docs and changelog
 
-- [ ] Update every page that functions falsify.
+- [x] **Done.** Every example and diagnostic in `doc/functions.md` was compiled against the build. Deviations:
+
+- **`expressions.md` needed nothing**: its Evaluation section already described short-circuiting when task 7 landed.
+- **`doc/testing.md` and `doc/architecture.md` were also falsified** and are fixed. `testing.md`'s Not-yet section said `#spec`/`#save` and `undefined` wait on functions, and it gained a directives-in-a-function section. `architecture.md`'s `fn` row said codegen throws, and its §5 said everything goes into `main` and that there are no phis.
+- **Stale facts fixed in passing:** `program-structure.md` said `#` is a lex error, the architecture matrix spelled equality `==`, and the root README counted four projects.
 
 | File | Change |
 |---|---|

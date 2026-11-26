@@ -2,8 +2,7 @@
 
 Suru has two control-flow statements. `if` runs a block once when a condition holds, and `while`
 runs one over and over for as long as a condition holds; `break` and `continue` leave a loop
-early. That is all of it — there is nothing that leaves a *function* early, because there are no
-functions yet.
+early. Leaving a *function* early is `return`, which belongs to [Functions](functions.md).
 
 ## `if`
 
@@ -58,9 +57,10 @@ if ratio > 1.0 {
 1.5
 ```
 
-A `bool` binding works just as well, and so do `and`, `or` and `not`. Remember that `and` and
-`or` still evaluate both sides, and that there is no operator precedence: `if a and b or c` folds
-left to right like every other expression.
+A `bool` binding works just as well, and so do `and`, `or` and `not`. `and` and `or`
+[short-circuit](expressions.md#evaluation), so a call on the right side runs only when the
+left side has not already decided the answer. There is no operator precedence, so
+`if a and b or c` folds left to right like every other expression.
 
 ### `else` and `else if`
 
@@ -304,6 +304,12 @@ error: hello.suru(1,1): 'break' can only appear inside a loop
 A statement after a `break` never runs. That is not an error — it is simply unreachable, and the
 compiler drops it.
 
+A loop does not reach into a function it calls: a `break` inside a function body looks for a
+loop in that body, and finds none in the caller. See
+[Functions](functions.md#break-and-continue). And because a loop's body might not run, a
+`return` inside a `while` never counts towards a function [returning on every
+path](functions.md#every-path-must-return).
+
 ### Scope
 
 A loop body is a [block](blocks.md), so it is a scope, and — exactly as with an `if` arm — that
@@ -372,5 +378,5 @@ There is no `for`, and no iterator form like `while item in items` — there is 
 over yet. `while` is the only loop.
 
 `break` and `continue` take no label, so an inner loop cannot leave an outer one in one step; the
-usual workaround, a `bool` the outer condition also tests, works. There is no `return`, because
-there are no functions to return from.
+usual workaround, a `bool` the outer condition also tests, works, and so does moving the loops
+into a [function](functions.md) and leaving both with `return`.

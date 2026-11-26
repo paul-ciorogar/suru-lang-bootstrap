@@ -89,9 +89,12 @@ unchanged, or an earlier stage already turned the feature into something general
  literals           | Int/Float,     | (-)n folded into the   | bool / i64 / f64          | const of the LLVM type
   true 1 2.5        | True/False     | literal                |                           |
  -------------------+----------------+------------------------+---------------------------+----------------------------
- operators          | + - * / % ==   | NO precedence:         | operand types must agree; | instruction picked from
+ operators          | + - * / % =    | NO precedence:         | operand types must agree; | instruction picked from
   a + b * c         | < and or not   | folds left to right    | sets result type          | the resolved TYPE, not
-                    |                | ((a + b) * c)          |                           | from the node class
+                    |                | ((a + b) * c)          |                           | from the node class;
+                    |                |                        |                           | and/or SHORT-CIRCUIT:
+                    |                |                        |                           | cond-br into .rhs/.end,
+                    |                |                        |                           | i1 phi in .end
  -------------------+----------------+------------------------+---------------------------+----------------------------
  let x i64: 1       | Let            | LetStatement           | resolve type name, check  | alloca in 'entry',
                     |                | (+ TypePosition)       | value, Declare in scope   | store in 'body'
@@ -117,12 +120,14 @@ unchanged, or an earlier stage already turned the feature into something general
  printLn(x)         | Ident ( )      | CallExpression         | builtin: 1 printable arg, | printf, one format string
                     |                |                        | type void                 | per type
  -------------------+----------------+------------------------+---------------------------+----------------------------
- fn f(a i64) i64 {} | Fn Return      | FunctionDeclaration,   | signatures collected for  | NOT YET: throws
- return x           |                | body Kind = Function;  | the whole block first     | "cannot emit statement"
-  (in progress)     |                | ReturnStatement (value | (recursion, calls before  |
-                    |                | only on the same line) | the declaration); not in  |
-                    |                |                        | if/while; every path must |
-                    |                |                        | return                    |
+ fn f(a i64) i64 {} | Fn Return      | FunctionDeclaration,   | signatures collected for  | own FunctionEmitter; a
+ return x           |                | body Kind = Function;  | the whole block first     | list's fns declared and
+ f(1)               |                | ReturnStatement (value | (recursion, calls before  | emitted at scope entry,
+                    |                | only on the same line) | the declaration); not in  | before its statements;
+                    |                |                        | if/while; every path must | internal, 'outer.helper';
+                    |                |                        | return; calls checked for | param -> 'a.addr' slot;
+                    |                |                        | arity and argument types  | open non-void end ->
+                    |                |                        |                           | unreachable
  -------------------+----------------+------------------------+---------------------------+----------------------------
  #mock x: 5         | Hash (Test     | MockDirective          | checked like assignment   | store, like assignment
                     | only)          |                        |                           |
@@ -146,7 +151,9 @@ an existing one costs nothing in any later stage.
                ^                                         ^
                |                                         |
    SemanticAnalyzer                              CodeGenerator
-   TEntry = Binding (type)                       TEntry = VariableSlot (alloca)
+   TEntry = Binding:                             TEntry = Binding:
+     VariableBinding (type)                        VariableSlot (alloca)
+     FunctionBinding (signature)                   FunctionSymbol (LLVM function)
    TScope = NoScopeData                          TScope = (cond block, end block) for a Loop
 
    Scope kind is set by the PARSER on BlockStatement.Kind and read downstream:
@@ -172,9 +179,11 @@ an existing one costs nothing in any later stage.
      }                   exit scope 1          lookup "x" finds scope 0 again
 ```
 
-## 5. Codegen: basic blocks inside `main`
+## 5. Codegen: basic blocks inside a function
 
-Everything goes into one function, `main`, for now.
+`main` holds the file's statements, and each `fn` is an LLVM function of its own. Every one of
+them is emitted through its own `FunctionEmitter` and has the same shape. `main` is emitted
+first, so its `entry` is the first one in the module.
 
 ```
   main:
@@ -213,7 +222,11 @@ Everything goes into one function, `main`, for now.
      block already has a terminator)
    - EmitStatements stops at the first statement that terminates the block,
      so code after break/continue is analyzed but never emitted
-   - an if.end with no predecessors is fine only because there are no phis
+   - an if.end with no predecessors (both arms left) is fine as long as it
+     holds no phi; the only phis are and/or's, each in an .end block that
+     was just created with an edge into it
+   - a non-void fn whose last block is still open ends in 'unreachable':
+     the analyzer proved every path returns, so the block is never reached
 ```
 
 ## 6. `suru test`: running the program and annotating the file

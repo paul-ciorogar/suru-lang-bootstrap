@@ -297,11 +297,43 @@ One thing to know before putting a `#view` in a hot loop: the program reports *e
 the channel, and all but the last is then discarded. Thousands of iterations cost thousands of
 messages for one number.
 
+## Directives inside a function
+
+A [function](functions.md) body runs once per call, so a directive in one raises the same two
+cases a loop does — reporting many times, or not at all — and gets the same answers. A `#view`
+shows the value from the last call, an `#assert` that failed on any call reads `fail`, and a
+directive in a function that was never called reads `undefined`:
+
+```suru
+fn square(n i64) i64 {
+  let result i64: n * n
+  #view result: 9
+  #assert(result, 4): fail, got 9
+  return result
+}
+
+fn neverCalled(n i64) i64 {
+  #view n: undefined
+  return n
+}
+
+printLn(square(2) + square(3))
+```
+
+```
+13
+error: hello.suru(4,3): assert failed: expected 4, got 9
+0 passed, 1 failed, 1 undefined, 1 view written to hello.suru
+```
+
+A parameter is a variable like any `let`, so `#mock n: 7` as a body's first line replaces
+whatever argument the caller passed.
+
 ## Not yet supported
 
 There is no way yet to name a group of directives and switch between them, so a file carries
-one set at a time. `#spec` and `#save` are designed for that and wait on user-defined
-functions, which is the unit a test case really belongs to.
+one set at a time. `#spec` and `#save` are designed for that, with the function as the unit a
+test case belongs to. Functions have landed, so nothing blocks them now, but they are not built.
 
 A failing `#assert` does **not** stop the program. It records the failure and the run carries
 on, so a loop whose assertion fails on its first pass still runs to the end. Fail-fast — an
@@ -316,7 +348,7 @@ above is really missing: a loop's `#view` can show the last pass, and nothing el
 `undefined` exists so far only as the annotation above: a directive that did not report. The
 rest of it — `undefined` as a *value* that absorbs whatever it takes part in, so
 `#view param1 + param2:` with only `param1` mocked writes `undefined` rather than a number that
-looks like an answer — waits on user-defined functions, since an input nobody mocked presumes a
-parameter.
+looks like an answer — is designed but not built. It was waiting on parameters, the first
+input that can go unmocked, and those now exist.
 
 All of these are described in [RD/todo.md](RD/todo.md).

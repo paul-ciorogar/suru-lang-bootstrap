@@ -319,8 +319,8 @@ Rules:
   outcome worse than a red one.
 
 **This part is designed, not built.** `#view-step-N` no longer waits on anything: `while` landed
-and there is a loop for it to count. `undefined` *as a value* still waits on functions, since no
-parameter can go unmocked without one. The open questions:
+and there is a loop for it to count. `undefined` *as a value* is **unblocked** too: functions
+have landed, so a parameter can now go unmocked. Neither is built yet. The open questions:
 
 
 - **Where does the counter live?** One `alloca` per `#view-step-N` directive, next to the
@@ -338,8 +338,8 @@ parameter can go unmocked without one. The open questions:
   cost belongs to test builds only — a production layout must not gain a word because a
   feature exists that production never sees, so the tagged representation has to be a
   codegen-mode decision, not a type-system one.
-- **Where does `undefined` come from first?** Unmocked parameters presume functions.
-  Unreached steps presume loops. Whichever lands first should be the only source, so the
+- **Where does `undefined` come from first?** Unmocked parameters presume functions, and
+  unreached steps presume loops. Both have now landed, so this is a real choice. Whichever lands first should be the only source, so the
   rules above get exercised on one narrow case before they apply everywhere.
 
 ---
@@ -357,13 +357,15 @@ without all of them being live at once.
 itself to `#spec <name>` — you tweak values interactively until the program does what you
 want, then pin the whole arrangement as a named case.
 
-**This part is designed, not built.** It waits on user-defined functions, and the open
-questions are the reason:
+**This part is designed, not built.** It used to wait on user-defined functions. Those have
+landed, so it is **unblocked**, and the open questions below are now all that stands in the way:
 
-- **What is the unit?** A spec is a test case, and a test case is per-function. Suru has no
-  functions, so today the only unit is the file. Building it file-scoped now means
-  reworking it the moment functions land. The `test:<function>:<case>` selector in the
-  original sketch presumes functions outright.
+- **What is the unit?** A spec is a test case, and a test case is per-function. Functions
+  exist now, so the unit can be the function from the start rather than the file. What is
+  still open is how a function under test is told apart from one it merely calls, since a
+  callee's directives should not fire as part of its caller's case (see the TODO at the top
+  of `tests/fixtures/directives-in-function/main.suru`). The `test:<function>:<case>`
+  selector in the original sketch is now writable.
 - **How are directives anchored?** A spec has to put each directive back where it came
   from. By line number is trivial and goes stale the instant the code moves. By statement
   index within the unit survives edits inside a line but not reordering. Whichever is

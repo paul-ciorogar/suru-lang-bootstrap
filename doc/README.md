@@ -5,7 +5,7 @@ typing and no garbage collection.
 
 **This documents the language as the bootstrap compiler implements it today, and nothing
 more.** That language is very small: a program binds values to names, computes with
-operators, branches, loops, and prints. There are no user-defined functions and no
+operators, branches, loops, declares and calls functions, and prints. There are no
 strings yet. Every page here describes something you can compile and run right now; a
 feature gets a page when it lands, not when it is designed.
 
@@ -57,7 +57,8 @@ There is no runtime and no interpreter — `build/hello` is an ordinary native e
 | [Expressions](expressions.md) | Operators, the absence of precedence, and how types combine |
 | [Bindings](bindings.md) | `let`, assignment, and scope |
 | [Blocks](blocks.md) | `{}`, block scope and shadowing |
-| [Control flow](control-flow.md) | `if`, `else`, `else if`, and what a condition may be |
+| [Control flow](control-flow.md) | `if`, `else`, `else if`, `while`, `break`, `continue`, and what a condition may be |
+| [Functions](functions.md) | `fn`, `return`, calls, recursion, and what a body can see |
 | [Printing](printing.md) | `printLn`, the only builtin function |
 | [Testing](testing.md) | `#mock`, `#view`, `#assert` and `suru test` |
 

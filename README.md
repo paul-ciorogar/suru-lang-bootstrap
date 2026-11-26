@@ -29,7 +29,7 @@ let height i64: 4
 printLn(width * height)
 ```
 
-That is close to the whole language today: bindings, operators and `printLn`. [doc/](doc/README.md) is the language reference — what a program is, which types and literals exist, how expressions combine, and what `printLn` accepts, all limited to what the compiler implements.
+That is close to the whole language today: bindings, operators, blocks, `if`/`while`, functions and `printLn`. [doc/](doc/README.md) is the language reference — what a program is, which types and literals exist, how expressions combine, and what `printLn` accepts, all limited to what the compiler implements.
 
 ## Debugging the compiler
 
@@ -74,4 +74,4 @@ dotnet build Suru.slnx          # build all projects
 dotnet test                     # run all tests
 ```
 
-Four projects: `Suru.Compiler` (the pipeline — lex, parse, semantic analysis, codegen), `Suru.CLI` (argument parsing), `Suru.LSP` (scaffold), and `Suru.Tests`. See [CLAUDE.md](CLAUDE.md) for the architecture in detail and [CHANGELOG.md](CHANGELOG.md) for what has landed.
+Five projects: `Suru.Compiler` (the pipeline — lex, parse, semantic analysis, codegen), `Suru.Lib` (shared code belonging to no stage), `Suru.CLI` (argument parsing), `Suru.LSP` (scaffold), and `Suru.Tests`. See [CLAUDE.md](CLAUDE.md) for the architecture in detail and [CHANGELOG.md](CHANGELOG.md) for what has landed.

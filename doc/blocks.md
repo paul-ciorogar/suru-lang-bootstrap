@@ -19,8 +19,10 @@ printLn(4)
 4
 ```
 
-What a block adds is a **scope**. That is also what an [`if`](control-flow.md) takes as a body:
-an arm is a block, so everything on this page is true of one. Written on its own, as above, the
+What a block adds is a **scope**. That is also what an [`if`](control-flow.md), a
+[`while`](control-flow.md#while) and a [function](functions.md) take as a body, so everything
+on this page is true of an arm and of a loop body. It is true of a function body too, with
+one exception: a function body cannot see the variables around it (see the end of this page). Written on its own, as above, the
 scope is the only reason to write it.
 
 ## Scope
@@ -149,5 +151,8 @@ error: hello.suru(3,1): expected RightBrace, got Eof
 ## Not yet supported
 
 A block is a statement, not an expression — it produces no value, so it cannot appear
-where one is expected. The things that take a block as a body are [`if`](control-flow.md)
-and [`while`](control-flow.md); user-defined functions are still to come.
+where one is expected.
+
+A function body is the one block that does not see everything around it. It sees its
+parameters and the functions in scope, but no variable from outside — see
+[Functions](functions.md#scope).
