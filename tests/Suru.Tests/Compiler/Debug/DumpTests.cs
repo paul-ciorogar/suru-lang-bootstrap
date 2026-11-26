@@ -63,14 +63,23 @@ public class DumpTests
     [Fact]
     public void DumpsTheAnalyzedAstWithTypes()
     {
-        var dump = AstPrinter.Print(Source.Analyzed("printLn(true)"), withTypes: true);
+        var dump = AstPrinter.Print(
+            Source.Analyzed(
+                """
+                fn main() void {
+                  printLn(true)
+                }
+                """),
+            withTypes: true);
 
         Assert.Equal(
             """
             Module test.suru
-              ExpressionStatement (1,1)
-                CallExpression (1,1) printLn : void
-                  BoolLiteral (1,9) true : bool
+              FunctionDeclaration (1,1) main void : void
+                BlockStatement (1,16) function
+                  ExpressionStatement (2,3)
+                    CallExpression (2,3) printLn : void
+                      BoolLiteral (2,11) true : bool
 
             """,
             dump);
@@ -122,7 +131,15 @@ public class DumpTests
     public void DumpsAFunctionWithItsResolvedTypes()
     {
         var dump = AstPrinter.Print(
-            Source.Analyzed("fn f(a i64, b f64) i64 {\n  return a\n}\nprintLn(f(1, 2.5))"),
+            Source.Analyzed(
+                """
+                fn f(a i64, b f64) i64 {
+                  return a
+                }
+                fn main() void {
+                  printLn(f(1, 2.5))
+                }
+                """),
             withTypes: true);
 
         Assert.Equal(
@@ -134,11 +151,13 @@ public class DumpTests
                 BlockStatement (1,24) function
                   ReturnStatement (2,3)
                     IdentifierExpression (2,10) a : i64
-              ExpressionStatement (4,1)
-                CallExpression (4,1) printLn : void
-                  CallExpression (4,9) f : i64
-                    IntLiteral (4,11) 1 : i64
-                    FloatLiteral (4,14) 2.5 : f64
+              FunctionDeclaration (4,1) main void : void
+                BlockStatement (4,16) function
+                  ExpressionStatement (5,3)
+                    CallExpression (5,3) printLn : void
+                      CallExpression (5,11) f : i64
+                        IntLiteral (5,13) 1 : i64
+                        FloatLiteral (5,16) 2.5 : f64
 
             """,
             dump);
@@ -148,23 +167,32 @@ public class DumpTests
     public void DumpsBindingsOperatorsAndVariableUses()
     {
         var dump = AstPrinter.Print(
-            Source.Analyzed("let total i64: 1 + 2\ntotal: -total\nprintLn(not false)"),
+            Source.Analyzed(
+                """
+                fn main() void {
+                  let total i64: 1 + 2
+                  total: -total
+                  printLn(not false)
+                }
+                """),
             withTypes: true);
 
         Assert.Equal(
             """
             Module test.suru
-              LetStatement (1,1) total i64
-                BinaryExpression (1,16) + : i64
-                  IntLiteral (1,16) 1 : i64
-                  IntLiteral (1,20) 2 : i64
-              AssignmentStatement (2,1) total
-                UnaryExpression (2,8) - : i64
-                  IdentifierExpression (2,9) total : i64
-              ExpressionStatement (3,1)
-                CallExpression (3,1) printLn : void
-                  UnaryExpression (3,9) not : bool
-                    BoolLiteral (3,13) false : bool
+              FunctionDeclaration (1,1) main void : void
+                BlockStatement (1,16) function
+                  LetStatement (2,3) total i64
+                    BinaryExpression (2,18) + : i64
+                      IntLiteral (2,18) 1 : i64
+                      IntLiteral (2,22) 2 : i64
+                  AssignmentStatement (3,3) total
+                    UnaryExpression (3,10) - : i64
+                      IdentifierExpression (3,11) total : i64
+                  ExpressionStatement (4,3)
+                    CallExpression (4,3) printLn : void
+                      UnaryExpression (4,11) not : bool
+                        BoolLiteral (4,15) false : bool
 
             """,
             dump);
@@ -174,24 +202,36 @@ public class DumpTests
     public void DumpsABlockWithItsStatementsIndentedOneLevel()
     {
         var dump = AstPrinter.Print(
-            Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\nprintLn(x)\n}\nprintLn(x)"),
+            Source.Analyzed(
+                """
+                fn main() void {
+                  let x i64: 1
+                  {
+                    let x f64: 1.5
+                    printLn(x)
+                  }
+                  printLn(x)
+                }
+                """),
             withTypes: true);
 
         // The two 'x' uses differ only in type: the inner one resolves to the shadow.
         Assert.Equal(
             """
             Module test.suru
-              LetStatement (1,1) x i64
-                IntLiteral (1,12) 1 : i64
-              BlockStatement (2,1)
-                LetStatement (3,1) x f64
-                  FloatLiteral (3,12) 1.5 : f64
-                ExpressionStatement (4,1)
-                  CallExpression (4,1) printLn : void
-                    IdentifierExpression (4,9) x : f64
-              ExpressionStatement (6,1)
-                CallExpression (6,1) printLn : void
-                  IdentifierExpression (6,9) x : i64
+              FunctionDeclaration (1,1) main void : void
+                BlockStatement (1,16) function
+                  LetStatement (2,3) x i64
+                    IntLiteral (2,14) 1 : i64
+                  BlockStatement (3,3)
+                    LetStatement (4,5) x f64
+                      FloatLiteral (4,16) 1.5 : f64
+                    ExpressionStatement (5,5)
+                      CallExpression (5,5) printLn : void
+                        IdentifierExpression (5,13) x : f64
+                  ExpressionStatement (7,3)
+                    CallExpression (7,3) printLn : void
+                      IdentifierExpression (7,11) x : i64
 
             """,
             dump);
@@ -201,7 +241,17 @@ public class DumpTests
     public void DumpsAnIfWithItsConditionAndArms()
     {
         var dump = AstPrinter.Print(
-            Source.Analyzed("let x i64: 1\nif x > 0 {\nprintLn(x)\n} else {\nprintLn(0)\n}"),
+            Source.Analyzed(
+                """
+                fn main() void {
+                  let x i64: 1
+                  if x > 0 {
+                    printLn(x)
+                  } else {
+                    printLn(0)
+                  }
+                }
+                """),
             withTypes: true);
 
         // The condition types as 'bool' although both its operands are 'i64' — that is what
@@ -209,20 +259,22 @@ public class DumpTests
         Assert.Equal(
             """
             Module test.suru
-              LetStatement (1,1) x i64
-                IntLiteral (1,12) 1 : i64
-              IfStatement (2,1)
-                BinaryExpression (2,4) > : bool
-                  IdentifierExpression (2,4) x : i64
-                  IntLiteral (2,8) 0 : i64
-                BlockStatement (2,10) branch
-                  ExpressionStatement (3,1)
-                    CallExpression (3,1) printLn : void
-                      IdentifierExpression (3,9) x : i64
-                BlockStatement (4,8) branch
-                  ExpressionStatement (5,1)
-                    CallExpression (5,1) printLn : void
-                      IntLiteral (5,9) 0 : i64
+              FunctionDeclaration (1,1) main void : void
+                BlockStatement (1,16) function
+                  LetStatement (2,3) x i64
+                    IntLiteral (2,14) 1 : i64
+                  IfStatement (3,3)
+                    BinaryExpression (3,6) > : bool
+                      IdentifierExpression (3,6) x : i64
+                      IntLiteral (3,10) 0 : i64
+                    BlockStatement (3,12) branch
+                      ExpressionStatement (4,5)
+                        CallExpression (4,5) printLn : void
+                          IdentifierExpression (4,13) x : i64
+                    BlockStatement (5,10) branch
+                      ExpressionStatement (6,5)
+                        CallExpression (6,5) printLn : void
+                          IntLiteral (6,13) 0 : i64
 
             """,
             dump);

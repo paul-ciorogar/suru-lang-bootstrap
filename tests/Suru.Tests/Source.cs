@@ -29,7 +29,18 @@ internal static class Source
         return module;
     }
 
-    /// <summary>The single statement of <paramref name="text"/>, as its expression.</summary>
-    public static Expression SingleExpression(Module module) =>
-        Assert.IsType<ExpressionStatement>(Assert.Single(module.Statements)).Expression;
+    /// <summary>The single statement of <paramref name="module"/>, as its expression.</summary>
+    public static Expression SingleExpression(Module module) => SingleExpression(module.Statements);
+
+    /// <summary>The single statement of a list, as its expression.</summary>
+    public static Expression SingleExpression(IReadOnlyList<Statement> statements) =>
+        Assert.IsType<ExpressionStatement>(Assert.Single(statements)).Expression;
+
+    /// <summary>
+    /// The statements of the file-level <c>fn main</c>'s body, so a test can read the types of
+    /// the code written in it.
+    /// </summary>
+    public static IReadOnlyList<Statement> MainBody(Module module) =>
+        Assert.Single(module.Statements.OfType<FunctionDeclaration>(), f => f.Name == "main")
+            .Body.Statements;
 }

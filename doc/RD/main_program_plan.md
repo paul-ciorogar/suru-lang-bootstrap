@@ -142,23 +142,35 @@ called. It exists so tasks 2a and 2b can move code into `main` one test at a tim
 
 ### 2a. Move the fixtures into `main` *(~2h)*
 
-- [ ] Every `tests/fixtures/*/main.suru` moves its statements into `fn main() void { … }`. Its
+- [x] Every `tests/fixtures/*/main.suru` moves its statements into `fn main() void { … }`. Its
       functions stay at file level. A file-level `let` moves into `main` too, so this task
-      changes no fixture's meaning. **No compiler change and no test-class change**: every
-      fixture's stdout and every annotated line must be identical. The `directives*` fixtures'
-      annotations are rewritten in the temp-dir copy, so their checked-in tails stay what they
-      are.
-      *Done when:* `dotnet test` is green with only `.suru` files in the diff.
+      changes no fixture's meaning. **No compiler change**: every fixture's stdout and every
+      annotated line must be identical. The `directives*` fixtures' annotations are rewritten in
+      the temp-dir copy, so their checked-in tails stay what they are.
+      Two test assertions had to change, because they depended on where the code sits in the
+      file rather than on what it does. `TestModeTests` asserts the failing `#assert`'s position,
+      which moved from `(16,1)` to `(17,3)`. `EveryStackSlotSitsInTheEntryBlock` sliced the
+      module's first `entry`, which is now the C wrapper's and holds no allocas, so it slices
+      `@suru.main`'s instead.
+      *Done when:* `dotnet test` is green with only `.suru` files and those two assertions in the
+      diff.
 
 ### 2b. Move the unit tests into `main` *(~4h)*
 
-- [ ] The sources in `SemanticTests`, `FunctionSemanticTests`, `DumpTests` and the directive
-      cases in `TestModeTests` that rely on file-level statements wrap them in `main`, written out
+- [x] The sources in `SemanticTests`, `FunctionSemanticTests`, `DumpTests` and the analyzer
+      cases in `DirectiveTests` that rely on file-level statements wrap them in `main`, written out
       in each raw string literal. There is no `Source.InMain` helper that prepends a line,
       because the positions in an asserted diagnostic must refer to text the reader can see.
-      Every asserted diagnostic's line and column moves with it.
-      `ParserTests`, `LexerTests` and `DirectiveTests` **stay as they are**. The parser still
-      accepts any statement at file level, so they keep testing what they test.
+      Every asserted diagnostic's line and column moves with it. (`Source.MainBody` only *reads*
+      `main`'s statements, for the tests that check a resolved type.)
+      `ParserTests`, `LexerTests` and the parse-only cases in `DirectiveTests` and `DumpTests`
+      **stay as they are**. The parser still accepts any statement at file level, so they keep
+      testing what they test.
+      Left at file level for task 3: `AcceptsAnEmptyModule`, `ABodyCannotSeeAFileLevelBinding`,
+      `ReportsAReturnOutsideAFunction`, `ReportsAReturnInABlockOutsideAFunction`, and three that
+      bind only literals at file level and so stay valid as constants:
+      `ReportsALetNamedMainAtFileLevel`, `ReportsALetNamedMainBesideTheEntryPointOnce` and
+      `DirectiveNamesAreNotKeywords`.
       A case whose point is the file level itself (`return` outside a function, or "a body cannot
       see a file-level `let`") is left alone here. Task 3 rewrites it, since that is where its
       meaning changes.

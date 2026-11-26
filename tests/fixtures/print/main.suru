@@ -1,4 +1,6 @@
-printLn(true)
-printLn(false)
-printLn(1)
-printLn(1.2)
+fn main() void {
+  printLn(true)
+  printLn(false)
+  printLn(1)
+  printLn(1.2)
+}

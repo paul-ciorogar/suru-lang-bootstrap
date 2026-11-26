@@ -7,29 +7,31 @@ fn loud(tag i64, v bool) bool {
   return v
 }
 
-// The dead side is never called.
-printLn(false and loud(1, true))      // false — and 1 is never printed
-printLn(true or loud(2, false))       // true — and 2 is never printed
+fn main() void {
+  // The dead side is never called.
+  printLn(false and loud(1, true))      // false — and 1 is never printed
+  printLn(true or loud(2, false))       // true — and 2 is never printed
 
-// The live side is called, and its value is the answer.
-printLn(true and loud(3, false))      // 3, then false
-printLn(false or loud(4, true))       // 4, then true
+  // The live side is called, and its value is the answer.
+  printLn(true and loud(3, false))      // 3, then false
+  printLn(false or loud(4, true))       // 4, then true
 
-// A chain folds left: (false and loud(5)) and loud(6). The inner 'and' is false, so neither
-// call happens — the outer one's left operand ends in a block the inner one created.
-printLn(false and loud(5, true) and loud(6, true))   // false
-// (loud(7) or loud(8)) and loud(9): 7 is true, so 8 is skipped and 9 runs.
-printLn(loud(7, true) or loud(8, true) and loud(9, false))   // 7, 9, then false
+  // A chain folds left: (false and loud(5)) and loud(6). The inner 'and' is false, so neither
+  // call happens — the outer one's left operand ends in a block the inner one created.
+  printLn(false and loud(5, true) and loud(6, true))   // false
+  // (loud(7) or loud(8)) and loud(9): 7 is true, so 8 is skipped and 9 runs.
+  printLn(loud(7, true) or loud(8, true) and loud(9, false))   // 7, 9, then false
 
-// As a condition. The loop stops on its left operand alone, so the last test calls nothing.
-let i i64: 0
-while i < 2 and loud(10 + i, true) {
-  i: i + 1
-}
-printLn(i)                            // 10, 11, then 2
+  // As a condition. The loop stops on its left operand alone, so the last test calls nothing.
+  let i i64: 0
+  while i < 2 and loud(10 + i, true) {
+    i: i + 1
+  }
+  printLn(i)                            // 10, 11, then 2
 
-if i = 0 and loud(12, true) {
-  printLn(0)
-} else {
-  printLn(13)                         // 13 — and 12 is never printed
+  if i = 0 and loud(12, true) {
+    printLn(0)
+  } else {
+    printLn(13)                         // 13 — and 12 is never printed
+  }
 }

@@ -44,7 +44,9 @@ fn early() i64 {
   #view 2: undefined
 }
 
-printLn(square(1) + square(2) + square(3))
-printLn(echo(1))
-printLn(outer(4))
-printLn(early())
+fn main() void {
+  printLn(square(1) + square(2) + square(3))
+  printLn(echo(1))
+  printLn(outer(4))
+  printLn(early())
+}

@@ -6,10 +6,10 @@ namespace Suru.Tests.Compiler.Semantic;
 public class SemanticTests
 {
     [Theory]
-    [InlineData("printLn(true)")]
-    [InlineData("printLn(false)")]
-    [InlineData("printLn(1)")]
-    [InlineData("printLn(1.2)")]
+    [InlineData("fn main() void { printLn(true) }")]
+    [InlineData("fn main() void { printLn(false) }")]
+    [InlineData("fn main() void { printLn(1) }")]
+    [InlineData("fn main() void { printLn(1.2) }")]
     public void AcceptsPrintableArguments(string text)
     {
         Assert.Empty(Source.Analyze(text));
@@ -22,12 +22,13 @@ public class SemanticTests
     }
 
     [Theory]
-    [InlineData("printLn(true)", "bool")]
-    [InlineData("printLn(1)", "i64")]
-    [InlineData("printLn(1.2)", "f64")]
+    [InlineData("fn main() void { printLn(true) }", "bool")]
+    [InlineData("fn main() void { printLn(1) }", "i64")]
+    [InlineData("fn main() void { printLn(1.2) }", "f64")]
     public void AnnotatesTheArgumentWithItsType(string text, string typeName)
     {
-        var call = Assert.IsType<CallExpression>(Source.SingleExpression(Source.Analyzed(text)));
+        var call = Assert.IsType<CallExpression>(
+            Source.SingleExpression(Source.MainBody(Source.Analyzed(text))));
 
         Assert.Equal(new SuruType(typeName), Assert.Single(call.Args).Type);
     }
@@ -35,7 +36,8 @@ public class SemanticTests
     [Fact]
     public void AnnotatesAPrintLnCallAsVoid()
     {
-        var call = Source.SingleExpression(Source.Analyzed("printLn(1)"));
+        var call = Source.SingleExpression(
+            Source.MainBody(Source.Analyzed("fn main() void { printLn(1) }")));
 
         Assert.Equal(SuruType.Void, call.Type);
     }
@@ -43,37 +45,59 @@ public class SemanticTests
     [Fact]
     public void ReportsUnknownFunction()
     {
-        var error = Assert.Single(Source.Analyze("printLn(1)\nfoo(2)"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              printLn(1)
+              foo(2)
+            }
+            """));
 
-        Assert.Equal("test.suru(2,1): unknown function 'foo'", error);
+        Assert.Equal("test.suru(3,3): unknown function 'foo'", error);
     }
 
     [Fact]
     public void ReportsWrongArity()
     {
-        var errors = Source.Analyze("printLn(1, 2)\nprintLn()");
+        var errors = Source.Analyze(
+            """
+            fn main() void {
+              printLn(1, 2)
+              printLn()
+            }
+            """);
 
         Assert.Collection(errors,
-            error => Assert.Equal("test.suru(1,1): 'printLn' expects 1 argument, got 2", error),
-            error => Assert.Equal("test.suru(2,1): 'printLn' expects 1 argument, got 0", error));
+            error => Assert.Equal("test.suru(2,3): 'printLn' expects 1 argument, got 2", error),
+            error => Assert.Equal("test.suru(3,3): 'printLn' expects 1 argument, got 0", error));
     }
 
     [Fact]
     public void ReportsUnprintableArgumentAtTheArgumentPosition()
     {
-        var error = Assert.Single(Source.Analyze("printLn(printLn(1))"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              printLn(printLn(1))
+            }
+            """));
 
         Assert.Equal(
-            "test.suru(1,9): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'",
+            "test.suru(2,11): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'",
             error);
     }
 
     [Fact]
     public void ReportsNonCallStatement()
     {
-        var error = Assert.Single(Source.Analyze("42"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              42
+            }
+            """));
 
-        Assert.Equal("test.suru(1,1): only call expressions are allowed as statements", error);
+        Assert.Equal("test.suru(2,3): only call expressions are allowed as statements", error);
     }
 
     [Fact]
@@ -81,23 +105,29 @@ public class SemanticTests
     {
         // The argument's type is null, so the printability check stays quiet
         // rather than piling a second error onto the same expression.
-        var error = Assert.Single(Source.Analyze("printLn(foo())"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              printLn(foo())
+            }
+            """));
 
-        Assert.Equal("test.suru(1,9): unknown function 'foo'", error);
+        Assert.Equal("test.suru(2,11): unknown function 'foo'", error);
     }
 
     [Theory]
-    [InlineData("printLn(1 + 2)", "i64")]
-    [InlineData("printLn(1.0 * 2.0)", "f64")]
-    [InlineData("printLn(1 < 2)", "bool")]
-    [InlineData("printLn(1.0 <> 2.0)", "bool")]
-    [InlineData("printLn(true and false)", "bool")]
-    [InlineData("printLn(true = false)", "bool")]
-    [InlineData("printLn(-1)", "i64")]
-    [InlineData("printLn(not true)", "bool")]
+    [InlineData("fn main() void { printLn(1 + 2) }", "i64")]
+    [InlineData("fn main() void { printLn(1.0 * 2.0) }", "f64")]
+    [InlineData("fn main() void { printLn(1 < 2) }", "bool")]
+    [InlineData("fn main() void { printLn(1.0 <> 2.0) }", "bool")]
+    [InlineData("fn main() void { printLn(true and false) }", "bool")]
+    [InlineData("fn main() void { printLn(true = false) }", "bool")]
+    [InlineData("fn main() void { printLn(-1) }", "i64")]
+    [InlineData("fn main() void { printLn(not true) }", "bool")]
     public void AnnotatesAnOperatorWithItsResultType(string text, string typeName)
     {
-        var call = Assert.IsType<CallExpression>(Source.SingleExpression(Source.Analyzed(text)));
+        var call = Assert.IsType<CallExpression>(
+            Source.SingleExpression(Source.MainBody(Source.Analyzed(text))));
 
         Assert.Equal(new SuruType(typeName), Assert.Single(call.Args).Type);
     }
@@ -105,26 +135,36 @@ public class SemanticTests
     [Fact]
     public void AnnotatesAVariableWithTheTypeItWasBoundAt()
     {
-        var module = Source.Analyzed("let count i64: 1\nprintLn(count)");
+        var module = Source.Analyzed(
+            """
+            fn main() void {
+              let count i64: 1
+              printLn(count)
+            }
+            """);
 
-        var call = Assert.IsType<CallExpression>(
-            Assert.IsType<ExpressionStatement>(module.Statements[1]).Expression);
-        Assert.Equal(SuruType.I64, Assert.Single(call.Args).Type);
+        Assert.Equal(SuruType.I64, PrintedArgument(Source.MainBody(module)[1]).Type);
     }
 
     [Fact]
     public void AcceptsAnAssignmentOfTheBoundType()
     {
-        Assert.Empty(Source.Analyze("let count i64: 1\ncount: count + 1"));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1
+              count: count + 1
+            }
+            """));
     }
 
     [Theory]
-    [InlineData("printLn(1 + 1.5)", "test.suru(1,9): operator '+' cannot be applied to 'i64' and 'f64'")]
-    [InlineData("printLn(true = 1)", "test.suru(1,9): operator '=' cannot be applied to 'bool' and 'i64'")]
-    [InlineData("printLn(true < false)", "test.suru(1,9): operator '<' cannot be applied to 'bool' and 'bool'")]
-    [InlineData("printLn(1 and 2)", "test.suru(1,9): operator 'and' cannot be applied to 'i64' and 'i64'")]
-    [InlineData("printLn(not 1)", "test.suru(1,9): operator 'not' cannot be applied to 'i64'")]
-    [InlineData("printLn(-true)", "test.suru(1,9): operator '-' cannot be applied to 'bool'")]
+    [InlineData("fn main() void { printLn(1 + 1.5) }", "test.suru(1,26): operator '+' cannot be applied to 'i64' and 'f64'")]
+    [InlineData("fn main() void { printLn(true = 1) }", "test.suru(1,26): operator '=' cannot be applied to 'bool' and 'i64'")]
+    [InlineData("fn main() void { printLn(true < false) }", "test.suru(1,26): operator '<' cannot be applied to 'bool' and 'bool'")]
+    [InlineData("fn main() void { printLn(1 and 2) }", "test.suru(1,26): operator 'and' cannot be applied to 'i64' and 'i64'")]
+    [InlineData("fn main() void { printLn(not 1) }", "test.suru(1,26): operator 'not' cannot be applied to 'i64'")]
+    [InlineData("fn main() void { printLn(-true) }", "test.suru(1,26): operator '-' cannot be applied to 'bool'")]
     public void ReportsAnOperatorAppliedToTheWrongTypes(string text, string expected)
     {
         Assert.Equal(expected, Assert.Single(Source.Analyze(text)));
@@ -135,17 +175,27 @@ public class SemanticTests
     {
         // The left operand has no type, so the operator check stays quiet rather
         // than piling a second error onto the same expression.
-        var error = Assert.Single(Source.Analyze("printLn(missing + 1)"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              printLn(missing + 1)
+            }
+            """));
 
-        Assert.Equal("test.suru(1,9): unknown variable 'missing'", error);
+        Assert.Equal("test.suru(2,11): unknown variable 'missing'", error);
     }
 
     [Fact]
     public void ReportsAnUnknownTypeAtTheTypeName()
     {
-        var error = Assert.Single(Source.Analyze("let count int: 1"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count int: 1
+            }
+            """));
 
-        Assert.Equal("test.suru(1,11): unknown type 'int'", error);
+        Assert.Equal("test.suru(2,13): unknown type 'int'", error);
     }
 
     [Fact]
@@ -154,43 +204,71 @@ public class SemanticTests
         // Not 'unknown type': 'void' is the type of a printLn call and the compiler knows it
         // perfectly well. What is wrong is binding to it — which is why a function may write
         // 'void' as its return type and nothing else may write it at all.
-        var error = Assert.Single(Source.Analyze("let nothing void: printLn(1)"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let nothing void: printLn(1)
+            }
+            """));
 
-        Assert.Equal("test.suru(1,13): nothing can be bound to 'void'", error);
+        Assert.Equal("test.suru(2,15): nothing can be bound to 'void'", error);
     }
 
     [Fact]
     public void ReportsARedeclaredBinding()
     {
-        var error = Assert.Single(Source.Analyze("let count i64: 1\nlet count i64: 2"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1
+              let count i64: 2
+            }
+            """));
 
-        Assert.Equal("test.suru(2,1): 'count' is already declared", error);
+        Assert.Equal("test.suru(3,3): 'count' is already declared", error);
     }
 
     [Fact]
     public void ReportsABindingWhoseValueHasTheWrongType()
     {
-        var error = Assert.Single(Source.Analyze("let count i64: 1.5"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1.5
+            }
+            """));
 
-        Assert.Equal("test.suru(1,16): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
+        Assert.Equal("test.suru(2,18): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
     }
 
     [Fact]
     public void ReportsAnAssignmentOfTheWrongType()
     {
-        var error = Assert.Single(Source.Analyze("let count i64: 1\ncount: true"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1
+              count: true
+            }
+            """));
 
-        Assert.Equal("test.suru(2,8): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
+        Assert.Equal("test.suru(3,10): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
     }
 
     [Fact]
     public void ReportsAnUnknownVariable()
     {
-        var errors = Source.Analyze("printLn(count)\ncount: 1");
+        var errors = Source.Analyze(
+            """
+            fn main() void {
+              printLn(count)
+              count: 1
+            }
+            """);
 
         Assert.Collection(errors,
-            error => Assert.Equal("test.suru(1,9): unknown variable 'count'", error),
-            error => Assert.Equal("test.suru(2,1): unknown variable 'count'", error));
+            error => Assert.Equal("test.suru(2,11): unknown variable 'count'", error),
+            error => Assert.Equal("test.suru(3,3): unknown variable 'count'", error));
     }
 
     [Fact]
@@ -198,24 +276,45 @@ public class SemanticTests
     {
         // One error for the initialiser; the later use resolves rather than
         // reporting 'unknown variable' as well.
-        var error = Assert.Single(Source.Analyze("let count i64: 1.5\nprintLn(count)"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1.5
+              printLn(count)
+            }
+            """));
 
-        Assert.Equal("test.suru(1,16): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
+        Assert.Equal("test.suru(2,18): cannot bind a value of type 'f64' to 'count' of type 'i64'", error);
     }
 
     [Fact]
     public void ReportsAVariableUsedBeforeItIsBound()
     {
-        var error = Assert.Single(Source.Analyze("printLn(count)\nlet count i64: 1"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              printLn(count)
+              let count i64: 1
+            }
+            """));
 
-        Assert.Equal("test.suru(1,9): unknown variable 'count'", error);
+        Assert.Equal("test.suru(2,11): unknown variable 'count'", error);
     }
 
     [Fact]
     public void ABindingInsideABlockShadowsAnOuterOne()
     {
-        var module = Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\nprintLn(x)\n}");
-        var block = Assert.IsType<BlockStatement>(module.Statements[1]);
+        var module = Source.Analyzed(
+            """
+            fn main() void {
+              let x i64: 1
+              {
+                let x f64: 1.5
+                printLn(x)
+              }
+            }
+            """);
+        var block = Assert.IsType<BlockStatement>(Source.MainBody(module)[1]);
 
         Assert.Equal(SuruType.F64, PrintedArgument(block.Statements[1]).Type);
     }
@@ -223,137 +322,233 @@ public class SemanticTests
     [Fact]
     public void TheOuterBindingComesBackAfterTheBlock()
     {
-        var module = Source.Analyzed("let x i64: 1\n{\nlet x f64: 1.5\n}\nprintLn(x)");
+        var module = Source.Analyzed(
+            """
+            fn main() void {
+              let x i64: 1
+              {
+                let x f64: 1.5
+              }
+              printLn(x)
+            }
+            """);
 
-        Assert.Equal(SuruType.I64, PrintedArgument(module.Statements[2]).Type);
+        Assert.Equal(SuruType.I64, PrintedArgument(Source.MainBody(module)[2]).Type);
     }
 
     [Fact]
     public void ABindingDoesNotEscapeItsBlock()
     {
-        var error = Assert.Single(Source.Analyze("{\nlet x i64: 1\n}\nprintLn(x)"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              {
+                let x i64: 1
+              }
+              printLn(x)
+            }
+            """));
 
-        Assert.Equal("test.suru(4,9): unknown variable 'x'", error);
+        Assert.Equal("test.suru(5,11): unknown variable 'x'", error);
     }
 
     [Fact]
     public void ReportsARedeclarationWithinTheSameBlock()
     {
         // Shadowing crosses nesting levels; it does not license rebinding in one scope.
-        var error = Assert.Single(Source.Analyze("{\nlet x i64: 1\nlet x i64: 2\n}"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              {
+                let x i64: 1
+                let x i64: 2
+              }
+            }
+            """));
 
-        Assert.Equal("test.suru(3,1): 'x' is already declared", error);
+        Assert.Equal("test.suru(4,5): 'x' is already declared", error);
     }
 
     [Fact]
     public void ABlockCanBindANameThatIsFreeOutsideIt()
     {
-        Assert.Empty(Source.Analyze("{\nlet x i64: 1\nprintLn(x)\n}\n{\nlet x i64: 2\nprintLn(x)\n}"));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              {
+                let x i64: 1
+                printLn(x)
+              }
+              {
+                let x i64: 2
+                printLn(x)
+              }
+            }
+            """));
     }
 
     [Fact]
     public void ABlockCanReadAndAssignAnOuterBinding()
     {
-        Assert.Empty(Source.Analyze("let count i64: 1\n{\ncount: count + 1\n}\nprintLn(count)"));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1
+              {
+                count: count + 1
+              }
+              printLn(count)
+            }
+            """));
     }
 
     [Fact]
     public void AnAssignmentInsideABlockStillChecksTheOuterType()
     {
-        var error = Assert.Single(Source.Analyze("let count i64: 1\n{\ncount: true\n}"));
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              let count i64: 1
+              {
+                count: true
+              }
+            }
+            """));
 
-        Assert.Equal("test.suru(3,8): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
+        Assert.Equal("test.suru(4,12): cannot assign a value of type 'bool' to 'count' of type 'i64'", error);
     }
 
     [Fact]
     public void ABlockReportsTheErrorsInsideIt()
     {
-        var errors = Source.Analyze("{\nprintLn(missing)\n1\n}");
+        var errors = Source.Analyze(
+            """
+            fn main() void {
+              {
+                printLn(missing)
+                1
+              }
+            }
+            """);
 
         Assert.Collection(errors,
-            error => Assert.Equal("test.suru(2,9): unknown variable 'missing'", error),
-            error => Assert.Equal("test.suru(3,1): only call expressions are allowed as statements", error));
+            error => Assert.Equal("test.suru(3,13): unknown variable 'missing'", error),
+            error => Assert.Equal("test.suru(4,5): only call expressions are allowed as statements", error));
     }
 
     [Theory]
-    [InlineData("if true { }")]
-    [InlineData("if not false { }")]
-    [InlineData("let x i64: 1\nif x = 1 { } else { }")]
-    [InlineData("let ok bool: true\nif ok { } else if not ok { } else { }")]
+    [InlineData("fn main() void { if true { } }")]
+    [InlineData("fn main() void { if not false { } }")]
+    [InlineData("fn main() void {\n  let x i64: 1\n  if x = 1 { } else { }\n}")]
+    [InlineData("fn main() void {\n  let ok bool: true\n  if ok { } else if not ok { } else { }\n}")]
     public void AcceptsABooleanCondition(string text)
     {
         Assert.Empty(Source.Analyze(text));
     }
 
     [Theory]
-    [InlineData("if 1 { }", "i64")]
-    [InlineData("if 1.5 { }", "f64")]
-    [InlineData("if printLn(1) { }", "void")]
+    [InlineData("fn main() void { if 1 { } }", "i64")]
+    [InlineData("fn main() void { if 1.5 { } }", "f64")]
+    [InlineData("fn main() void { if printLn(1) { } }", "void")]
     public void ReportsANonBooleanCondition(string text, string typeName)
     {
         // Nothing converts implicitly, so a number is not a truth value.
         Assert.Equal(
-            $"test.suru(1,4): 'if' cannot branch on a value of type '{typeName}'; expected 'bool'",
+            $"test.suru(1,21): 'if' cannot branch on a value of type '{typeName}'; expected 'bool'",
             Assert.Single(Source.Analyze(text)));
     }
 
     [Fact]
     public void SaysNothingMoreWhenTheConditionAlreadyFailed()
     {
-        Assert.Equal("test.suru(1,4): unknown variable 'missing'",
-            Assert.Single(Source.Analyze("if missing { }")));
+        Assert.Equal("test.suru(2,6): unknown variable 'missing'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  if missing { }
+                }
+                """)));
     }
 
     [Fact]
     public void ChecksTheConditionOfEveryArmInAChain()
     {
-        Assert.Equal("test.suru(1,21): 'if' cannot branch on a value of type 'i64'; expected 'bool'",
-            Assert.Single(Source.Analyze("if true { } else if 1 { }")));
+        Assert.Equal("test.suru(2,23): 'if' cannot branch on a value of type 'i64'; expected 'bool'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  if true { } else if 1 { }
+                }
+                """)));
     }
 
     [Fact]
     public void EachArmIsItsOwnScope()
     {
         // Both arms bind 'x', which is only legal if neither can see the other's.
-        Assert.Equal("test.suru(6,9): unknown variable 'x'",
-            Assert.Single(Source.Analyze("if true {\nlet x i64: 1\n} else {\nlet x f64: 1.5\n}\nprintLn(x)")));
+        Assert.Equal("test.suru(7,11): unknown variable 'x'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  if true {
+                    let x i64: 1
+                  } else {
+                    let x f64: 1.5
+                  }
+                  printLn(x)
+                }
+                """)));
     }
 
     [Fact]
     public void ReportsTheErrorsInBothArms()
     {
-        var errors = Source.Analyze("if true {\nfoo()\n} else {\nbar()\n}");
+        var errors = Source.Analyze(
+            """
+            fn main() void {
+              if true {
+                foo()
+              } else {
+                bar()
+              }
+            }
+            """);
 
         Assert.Collection(errors,
-            error => Assert.Equal("test.suru(2,1): unknown function 'foo'", error),
-            error => Assert.Equal("test.suru(4,1): unknown function 'bar'", error));
+            error => Assert.Equal("test.suru(3,5): unknown function 'foo'", error),
+            error => Assert.Equal("test.suru(5,5): unknown function 'bar'", error));
     }
 
     [Theory]
-    [InlineData("while 1 { }", "i64")]
-    [InlineData("while 1.5 { }", "f64")]
-    [InlineData("while printLn(1) { }", "void")]
+    [InlineData("fn main() void { while 1 { } }", "i64")]
+    [InlineData("fn main() void { while 1.5 { } }", "f64")]
+    [InlineData("fn main() void { while printLn(1) { } }", "void")]
     public void ReportsANonBooleanLoopCondition(string text, string typeName)
     {
         // The same rule an 'if' condition follows, down to sharing the check — only the verb
         // differs, because a loop does not branch.
         Assert.Equal(
-            $"test.suru(1,7): 'while' cannot loop on a value of type '{typeName}'; expected 'bool'",
+            $"test.suru(1,24): 'while' cannot loop on a value of type '{typeName}'; expected 'bool'",
             Assert.Single(Source.Analyze(text)));
     }
 
     [Fact]
     public void SaysNothingMoreWhenTheLoopConditionAlreadyFailed()
     {
-        Assert.Equal("test.suru(1,7): unknown variable 'missing'",
-            Assert.Single(Source.Analyze("while missing { }")));
+        Assert.Equal("test.suru(2,9): unknown variable 'missing'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  while missing { }
+                }
+                """)));
     }
 
     [Theory]
-    [InlineData("break", "test.suru(1,1): 'break' can only appear inside a loop")]
-    [InlineData("continue", "test.suru(1,1): 'continue' can only appear inside a loop")]
-    [InlineData("{ break }", "test.suru(1,3): 'break' can only appear inside a loop")]
-    [InlineData("if true { continue }", "test.suru(1,11): 'continue' can only appear inside a loop")]
+    [InlineData("fn main() void { break }", "test.suru(1,18): 'break' can only appear inside a loop")]
+    [InlineData("fn main() void { continue }", "test.suru(1,18): 'continue' can only appear inside a loop")]
+    [InlineData("fn main() void { { break } }", "test.suru(1,20): 'break' can only appear inside a loop")]
+    [InlineData("fn main() void { if true { continue } }", "test.suru(1,28): 'continue' can only appear inside a loop")]
     public void ReportsBreakAndContinueOutsideALoop(string text, string expected)
     {
         // A block is not a loop and neither is an 'if', so neither gives one somewhere to go.
@@ -361,11 +556,11 @@ public class SemanticTests
     }
 
     [Theory]
-    [InlineData("while true { break }")]
-    [InlineData("while true { continue }")]
-    [InlineData("while true { if true { break } }")]
-    [InlineData("while true { { continue } }")]
-    [InlineData("while true { while true { break } break }")]
+    [InlineData("fn main() void { while true { break } }")]
+    [InlineData("fn main() void { while true { continue } }")]
+    [InlineData("fn main() void { while true { if true { break } } }")]
+    [InlineData("fn main() void { while true { { continue } } }")]
+    [InlineData("fn main() void { while true { while true { break } break } }")]
     public void AcceptsBreakAndContinueInsideALoop(string text)
     {
         // An 'if' or a block between the statement and its loop changes nothing: the loop is
@@ -376,8 +571,16 @@ public class SemanticTests
     [Fact]
     public void ALoopBodyIsItsOwnScope()
     {
-        Assert.Equal("test.suru(4,9): unknown variable 'x'",
-            Assert.Single(Source.Analyze("while true {\nlet x i64: 1\n}\nprintLn(x)")));
+        Assert.Equal("test.suru(5,11): unknown variable 'x'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  while true {
+                    let x i64: 1
+                  }
+                  printLn(x)
+                }
+                """)));
     }
 
     [Fact]
@@ -386,8 +589,16 @@ public class SemanticTests
         // Codegen drops what follows a 'break', but analysis does not: a statement that would
         // never run is still a statement, and being unreachable is no reason to stop reporting
         // that it does not typecheck.
-        Assert.Equal("test.suru(3,1): unknown function 'foo'",
-            Assert.Single(Source.Analyze("while true {\nbreak\nfoo()\n}")));
+        Assert.Equal("test.suru(4,5): unknown function 'foo'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  while true {
+                    break
+                    foo()
+                  }
+                }
+                """)));
     }
 
     [Fact]
@@ -395,13 +606,13 @@ public class SemanticTests
     {
         // The depth is a count, not a flag: the 'break' after the inner loop's '}' is still
         // inside the outer one.
-        Assert.Empty(Source.Analyze("while true { while true { } break }"));
+        Assert.Empty(Source.Analyze("fn main() void { while true { while true { } break } }"));
     }
 
     [Fact]
     public void ErrorsAreReportedWithTheSourcePathAndPosition()
     {
-        var error = Assert.Single(Source.Analyze("42"));
+        var error = Assert.Single(Source.Analyze("fn main() void { 42 }"));
 
         Assert.Matches(@"^test\.suru\(\d+,\d+\): ", error);
     }

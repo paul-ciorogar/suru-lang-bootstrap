@@ -2,33 +2,36 @@
 // way in and again on the way out, so the output ramps up and back down: every level's
 // slot has to survive the inner shadow that hid it.
 
-let base i64: 100
-let x i64: 1
-printLn(x)
-{
-  let x i64: 2
+fn main() void {
+  let base i64: 100
+  let x i64: 1
   printLn(x)
   {
-    let x i64: 3
+    let x i64: 2
     printLn(x)
     {
-      let x i64: 4
+      let x i64: 3
       printLn(x)
       {
-        let x i64: 5
+        let x i64: 4
         printLn(x)
         {
-          let x i64: 6
+          let x i64: 5
           printLn(x)
           {
-            let x i64: 7
+            let x i64: 6
             printLn(x)
             {
-              let x i64: 8
+              let x i64: 7
               printLn(x)
-              // 'base' is bound outermost and shadowed nowhere: a lookup out through
-              // all eight frames.
-              printLn(base + x)
+              {
+                let x i64: 8
+                printLn(x)
+                // 'base' is bound outermost and shadowed nowhere: a lookup out through
+                // all eight frames.
+                printLn(base + x)
+              }
+              printLn(x)
             }
             printLn(x)
           }
@@ -42,4 +45,3 @@ printLn(x)
   }
   printLn(x)
 }
-printLn(x)

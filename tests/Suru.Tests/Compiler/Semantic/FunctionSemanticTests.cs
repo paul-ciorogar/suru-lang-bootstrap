@@ -16,13 +16,13 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsAFunctionAndACallToIt()
     {
-        Assert.Empty(Source.Analyze("fn double(n i64) i64 {\n  return n + n\n}\nprintLn(double(21))"));
+        Assert.Empty(Source.Analyze("fn double(n i64) i64 {\n  return n + n\n}\nfn main() void {\n  printLn(double(21))\n}"));
     }
 
     [Fact]
     public void AcceptsAZeroParameterFunction()
     {
-        Assert.Empty(Source.Analyze("fn one() i64 {\n  return 1\n}\nprintLn(one())"));
+        Assert.Empty(Source.Analyze("fn one() i64 {\n  return 1\n}\nfn main() void {\n  printLn(one())\n}"));
     }
 
     /// <summary>
@@ -32,7 +32,7 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsACallToAFunctionDeclaredLater()
     {
-        Assert.Empty(Source.Analyze("printLn(one())\nfn one() i64 {\n  return 1\n}"));
+        Assert.Empty(Source.Analyze("fn main() void {\n  printLn(one())\n}\nfn one() i64 {\n  return 1\n}"));
     }
 
     [Fact]
@@ -97,13 +97,13 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsAVoidFunctionThatFallsOffItsEnd()
     {
-        Assert.Empty(Source.Analyze("fn shout(n i64) void {\n  printLn(n)\n}\nshout(1)"));
+        Assert.Empty(Source.Analyze("fn shout(n i64) void {\n  printLn(n)\n}\nfn main() void {\n  shout(1)\n}"));
     }
 
     [Fact]
     public void AcceptsABareReturnInAVoidFunction()
     {
-        Assert.Empty(Source.Analyze("fn stop() void {\n  return\n}\nstop()"));
+        Assert.Empty(Source.Analyze("fn stop() void {\n  return\n}\nfn main() void {\n  stop()\n}"));
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsAnAssignmentToAParameter()
     {
-        Assert.Empty(Source.Analyze("fn f(n i64) i64 {\n  n: n + 1\n  return n\n}\nprintLn(f(1))"));
+        Assert.Empty(Source.Analyze("fn f(n i64) i64 {\n  n: n + 1\n  return n\n}\nfn main() void {\n  printLn(f(1))\n}"));
     }
 
     [Fact]
@@ -153,14 +153,23 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsANonVoidCallAsAStatement()
     {
-        Assert.Empty(Source.Analyze("fn one() i64 {\n  return 1\n}\none()"));
+        Assert.Empty(Source.Analyze("fn one() i64 {\n  return 1\n}\nfn main() void {\n  one()\n}"));
     }
 
     [Fact]
     public void AcceptsShadowingAnOuterFunctionsNameInsideABody()
     {
         // The parameter is declared in the body's own scope, so it shadows rather than collides.
-        Assert.Empty(Source.Analyze("let n i64: 1\nfn f(n i64) i64 {\n  return n\n}\nprintLn(f(n))"));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              let n i64: 1
+              fn f(n i64) i64 {
+                return n
+              }
+              printLn(f(n))
+            }
+            """));
     }
 
     // ---- a body sees only its parameters -----------------------------------------------------
@@ -209,8 +218,10 @@ public class FunctionSemanticTests
             fn f() void {
               break
             }
-            while true {
-              f()
+            fn main() void {
+              while true {
+                f()
+              }
             }
             """));
 
@@ -220,15 +231,15 @@ public class FunctionSemanticTests
     // ---- where a 'fn' may be written ----------------------------------------------------------
 
     [Theory]
-    [InlineData("if true {\n  fn f() void { }\n}")]
-    [InlineData("if false { } else {\n  fn f() void { }\n}")]
-    [InlineData("while true {\n  fn f() void { }\n}")]
+    [InlineData("fn main() void {\n  if true {\n    fn f() void { }\n  }\n}")]
+    [InlineData("fn main() void {\n  if false { } else {\n    fn f() void { }\n  }\n}")]
+    [InlineData("fn main() void {\n  while true {\n    fn f() void { }\n  }\n}")]
     public void ReportsAFunctionDeclaredInsideControlFlow(string text)
     {
         var error = Assert.Single(Source.Analyze(text));
 
         Assert.Equal(
-            "test.suru(2,3): a function cannot be declared inside an 'if' or a 'while'", error);
+            "test.suru(3,5): a function cannot be declared inside an 'if' or a 'while'", error);
     }
 
     /// <summary>
@@ -238,16 +249,32 @@ public class FunctionSemanticTests
     [Fact]
     public void AcceptsAFunctionInsideABareBlockAndKeepsItThere()
     {
-        Assert.Empty(Source.Analyze("{\n  fn f() void { }\n  f()\n}"));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              {
+                fn f() void { }
+                f()
+              }
+            }
+            """));
 
-        var error = Assert.Single(Source.Analyze("{\n  fn f() void { }\n}\nf()"));
-        Assert.Equal("test.suru(4,1): unknown function 'f'", error);
+        var error = Assert.Single(Source.Analyze(
+            """
+            fn main() void {
+              {
+                fn f() void { }
+              }
+              f()
+            }
+            """));
+        Assert.Equal("test.suru(5,3): unknown function 'f'", error);
     }
 
     [Fact]
     public void AcceptsAFunctionDeclaredAfterAnotherStatement()
     {
-        Assert.Empty(Source.Analyze("let x i64: 1\nprintLn(x)\nfn f() void { }\nf()"));
+        Assert.Empty(Source.Analyze("fn main() void {\n  let x i64: 1\n  printLn(x)\n  fn f() void { }\n  f()\n}"));
     }
 
     // ---- names ------------------------------------------------------------------------------
@@ -267,8 +294,8 @@ public class FunctionSemanticTests
     /// reason a call may precede its declaration.
     /// </summary>
     [Theory]
-    [InlineData("let f i64: 1\nfn f() void { }", "test.suru(1,1)")]
-    [InlineData("fn f() void { }\nlet f i64: 1", "test.suru(2,1)")]
+    [InlineData("fn main() void {\n  let f i64: 1\n  fn f() void { }\n}", "test.suru(2,3)")]
+    [InlineData("fn main() void {\n  fn f() void { }\n  let f i64: 1\n}", "test.suru(3,3)")]
     public void ReportsABindingCollidingWithAFunction(string text, string position)
     {
         var error = Assert.Single(Source.Analyze(text));
@@ -304,25 +331,25 @@ public class FunctionSemanticTests
     [Fact]
     public void ReportsAFunctionNameUsedAsAValue()
     {
-        var error = Assert.Single(Source.Analyze("fn f() i64 {\n  return 1\n}\nprintLn(f)"));
+        var error = Assert.Single(Source.Analyze("fn f() i64 {\n  return 1\n}\nfn main() void {\n  printLn(f)\n}"));
 
-        Assert.Equal("test.suru(4,9): 'f' is a function and cannot be used as a value", error);
+        Assert.Equal("test.suru(5,11): 'f' is a function and cannot be used as a value", error);
     }
 
     [Fact]
     public void ReportsAnAssignmentToAFunctionName()
     {
-        var error = Assert.Single(Source.Analyze("fn f() void { }\nf: 1"));
+        var error = Assert.Single(Source.Analyze("fn f() void { }\nfn main() void {\n  f: 1\n}"));
 
-        Assert.Equal("test.suru(2,1): 'f' is a function and cannot be used as a value", error);
+        Assert.Equal("test.suru(3,3): 'f' is a function and cannot be used as a value", error);
     }
 
     [Fact]
     public void ReportsACallToAVariable()
     {
-        var error = Assert.Single(Source.Analyze("let f i64: 1\nf()"));
+        var error = Assert.Single(Source.Analyze("fn main() void {\n  let f i64: 1\n  f()\n}"));
 
-        Assert.Equal("test.suru(2,1): 'f' is not a function", error);
+        Assert.Equal("test.suru(3,3): 'f' is not a function", error);
     }
 
     // ---- types ------------------------------------------------------------------------------
@@ -362,12 +389,12 @@ public class FunctionSemanticTests
     [Fact]
     public void AFunctionWithABadReturnTypeIsStillDeclared()
     {
-        var errors = Source.Analyze("fn f(n i64) int {\n  return n\n}\nf(1, 2)");
+        var errors = Source.Analyze("fn f(n i64) int {\n  return n\n}\nfn main() void {\n  f(1, 2)\n}");
 
         Assert.Equal(
             [
                 "test.suru(1,13): unknown type 'int'",
-                "test.suru(4,1): 'f' expects 1 argument, got 2",
+                "test.suru(5,3): 'f' expects 1 argument, got 2",
             ],
             errors);
     }
@@ -377,33 +404,32 @@ public class FunctionSemanticTests
     [Fact]
     public void ReportsTooFewArguments()
     {
-        var error = Assert.Single(Source.Analyze("fn f(a i64, b i64) void { }\nf(1)"));
+        var error = Assert.Single(Source.Analyze("fn f(a i64, b i64) void { }\nfn main() void {\n  f(1)\n}"));
 
-        Assert.Equal("test.suru(2,1): 'f' expects 2 arguments, got 1", error);
+        Assert.Equal("test.suru(3,3): 'f' expects 2 arguments, got 1", error);
     }
 
     [Fact]
     public void ReportsTooManyArguments()
     {
-        var error = Assert.Single(Source.Analyze("fn f() void { }\nf(1)"));
+        var error = Assert.Single(Source.Analyze("fn f() void { }\nfn main() void {\n  f(1)\n}"));
 
-        Assert.Equal("test.suru(2,1): 'f' expects 0 arguments, got 1", error);
+        Assert.Equal("test.suru(3,3): 'f' expects 0 arguments, got 1", error);
     }
 
     [Fact]
     public void ReportsAnArgumentOfTheWrongTypeAtItsOwnPosition()
     {
-        var error = Assert.Single(Source.Analyze("fn f(a i64, b i64) void { }\nf(1, 2.5)"));
+        var error = Assert.Single(Source.Analyze("fn f(a i64, b i64) void { }\nfn main() void {\n  f(1, 2.5)\n}"));
 
-        Assert.Equal("test.suru(2,6): argument 2 of 'f' is of type 'f64'; expected 'i64'", error);
+        Assert.Equal("test.suru(3,8): argument 2 of 'f' is of type 'f64'; expected 'i64'", error);
     }
 
     [Fact]
     public void AnnotatesACallWithTheFunctionsReturnType()
     {
-        var module = Source.Analyzed("fn f() f64 {\n  return 1.5\n}\nprintLn(f())");
-        var call = Assert.IsType<CallExpression>(
-            Assert.IsType<ExpressionStatement>(module.Statements[1]).Expression);
+        var module = Source.Analyzed("fn f() f64 {\n  return 1.5\n}\nfn main() void {\n  printLn(f())\n}");
+        var call = Assert.IsType<CallExpression>(Source.SingleExpression(Source.MainBody(module)));
 
         Assert.Equal(SuruType.F64, Assert.Single(call.Args).Type);
     }
@@ -413,13 +439,13 @@ public class FunctionSemanticTests
     /// refuses a value of type <c>void</c>, wherever it came from.
     /// </summary>
     [Theory]
-    [InlineData("let x i64: v()", "test.suru(5,12): cannot bind a value of type 'void' to 'x' of type 'i64'")]
-    [InlineData("printLn(v())", "test.suru(5,9): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'")]
-    [InlineData("let x i64: v() + 1", "test.suru(5,12): operator '+' cannot be applied to 'void' and 'i64'")]
-    [InlineData("if v() { }", "test.suru(5,4): 'if' cannot branch on a value of type 'void'; expected 'bool'")]
+    [InlineData("let x i64: v()", "test.suru(6,14): cannot bind a value of type 'void' to 'x' of type 'i64'")]
+    [InlineData("printLn(v())", "test.suru(6,11): 'printLn' cannot print a value of type 'void'; expected 'bool', 'i64', 'f64'")]
+    [InlineData("let x i64: v() + 1", "test.suru(6,14): operator '+' cannot be applied to 'void' and 'i64'")]
+    [InlineData("if v() { }", "test.suru(6,6): 'if' cannot branch on a value of type 'void'; expected 'bool'")]
     public void ReportsAVoidCallUsedAsAValue(string text, string expected)
     {
-        var error = Assert.Single(Source.Analyze($"fn v() void {{\n  printLn(1)\n}}\n\n{text}"));
+        var error = Assert.Single(Source.Analyze($"fn v() void {{\n  printLn(1)\n}}\n\nfn main() void {{\n  {text}\n}}"));
 
         Assert.Equal(expected, error);
     }
@@ -585,18 +611,18 @@ public class FunctionSemanticTests
     [Fact]
     public void ReportsAnEntryPointInABareBlock()
     {
-        var error = Assert.Single(Source.Analyze("{\n  fn main() void { }\n}"));
+        var error = Assert.Single(Source.Analyze("fn main() void {\n  {\n    fn main() void { }\n  }\n}"));
 
-        Assert.Equal("test.suru(2,3): 'main' can only be declared at file level", error);
+        Assert.Equal("test.suru(3,5): 'main' can only be declared at file level", error);
     }
 
     /// <summary>Reported in place of the placement error an ordinary function would get.</summary>
     [Fact]
     public void ReportsAnEntryPointInAnIfArmOnce()
     {
-        var error = Assert.Single(Source.Analyze("if true {\n  fn main() void { }\n}"));
+        var error = Assert.Single(Source.Analyze("fn main() void {\n  if true {\n    fn main() void { }\n  }\n}"));
 
-        Assert.Equal("test.suru(2,3): 'main' can only be declared at file level", error);
+        Assert.Equal("test.suru(3,5): 'main' can only be declared at file level", error);
     }
 
     [Fact]
@@ -652,16 +678,16 @@ public class FunctionSemanticTests
     [Fact]
     public void ReportsACallToMainInAFileThatDeclaresNone()
     {
-        var error = Assert.Single(Source.Analyze("main()"));
+        var error = Assert.Single(Source.Analyze("fn f() void {\n  main()\n}"));
 
-        Assert.Equal("test.suru(1,1): 'main' cannot be called", error);
+        Assert.Equal("test.suru(2,3): 'main' cannot be called", error);
     }
 
     [Fact]
     public void ReportsMainUsedAsAValue()
     {
-        var error = Assert.Single(Source.Analyze("fn main() void { }\nprintLn(main)"));
+        var error = Assert.Single(Source.Analyze("fn main() void {\n  printLn(main)\n}"));
 
-        Assert.Equal("test.suru(2,9): 'main' is a function and cannot be used as a value", error);
+        Assert.Equal("test.suru(2,11): 'main' is a function and cannot be used as a value", error);
     }
 }

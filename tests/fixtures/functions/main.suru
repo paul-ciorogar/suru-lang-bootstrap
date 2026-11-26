@@ -6,27 +6,22 @@
 fn greet() void {
   printLn(1)
 }
-greet()
-greet()
 
 // An i64 function inside a larger expression. No precedence, so this is (square(3) + 1) * 2.
 fn square(n i64) i64 {
   return n * n
 }
-printLn(square(3) + 1 * 2)            // 20
 
 // Argument order: a swap would print 7.
 fn minus(a i64, b i64) i64 {
   return a - b
 }
-printLn(minus(10, 3))                 // 7
 
 // Recursion.
 fn factorial(n i64) i64 {
   if n <= 1 { return 1 }
   return n * factorial(n - 1)
 }
-printLn(factorial(5))                 // 120
 
 // Mutual recursion, and a call from the first to a function declared after it.
 fn isEven(n i64) bool {
@@ -37,21 +32,12 @@ fn isOdd(n i64) bool {
   if n = 0 { return false }
   return isEven(n - 1)
 }
-printLn(isEven(10))                   // true
-printLn(isOdd(7))                     // true
-printLn(isEven(7))                    // false
-
-// A call to a function the file declares further down.
-printLn(later())                      // 42
 
 // Both arms return, so 'if.end' is left with no predecessors and no terminator — the case the
 // end-of-function 'unreachable' exists for.
 fn sign(n i64) i64 {
   if n < 0 { return -1 } else if n = 0 { return 0 } else { return 1 }
 }
-printLn(sign(-5))                     // -1
-printLn(sign(0))                      // 0
-printLn(sign(9))                      // 1
 
 // An early return from inside a loop, skipping both the rest of the loop and what follows it.
 fn firstOver(limit i64) i64 {
@@ -62,7 +48,6 @@ fn firstOver(limit i64) i64 {
   }
   return 0
 }
-printLn(firstOver(50))                // 8
 
 // 'break' and 'continue' in a body find the body's own loop.
 fn sumOdd(upTo i64) i64 {
@@ -76,7 +61,6 @@ fn sumOdd(upTo i64) i64 {
   }
   return total
 }
-printLn(sumOdd(9))                    // 25
 
 // A parameter is a slot like any binding: assignable, and the caller's value is untouched.
 fn countdown(n i64) void {
@@ -87,9 +71,6 @@ fn countdown(n i64) void {
   return
   printLn(999)                        // after a bare return: never runs
 }
-let start i64: 3
-countdown(start)                      // 3 2 1
-printLn(start)                        // 3
 
 // A nested helper: visible only in its parent, calling its parent's sibling.
 fn hypotenuseSquared(a i64, b i64) i64 {
@@ -98,24 +79,50 @@ fn hypotenuseSquared(a i64, b i64) i64 {
   }
   return sq(a) + sq(b)
 }
-printLn(hypotenuseSquared(3, 4))      // 25
 
 // f64 and bool returns, and zero parameters.
 fn half(x f64) f64 {
   return x / 2.0
 }
-printLn(half(5.0))                    // 2.5
 fn yes() bool {
   return true
 }
-printLn(yes() and not false)          // true
 
-// A function in a bare block is scoped to it.
-{
-  fn inner() i64 {
-    return 5
+fn main() void {
+  greet()
+  greet()
+  printLn(square(3) + 1 * 2)            // 20
+  printLn(minus(10, 3))                 // 7
+  printLn(factorial(5))                 // 120
+  printLn(isEven(10))                   // true
+  printLn(isOdd(7))                     // true
+  printLn(isEven(7))                    // false
+
+  // A call to a function the file declares further down.
+  printLn(later())                      // 42
+
+  printLn(sign(-5))                     // -1
+  printLn(sign(0))                      // 0
+  printLn(sign(9))                      // 1
+  printLn(firstOver(50))                // 8
+  printLn(sumOdd(9))                    // 25
+
+  // The argument is a copy: 'countdown' steps its own 'n' down and 'start' is untouched.
+  let start i64: 3
+  countdown(start)                      // 3 2 1
+  printLn(start)                        // 3
+
+  printLn(hypotenuseSquared(3, 4))      // 25
+  printLn(half(5.0))                    // 2.5
+  printLn(yes() and not false)          // true
+
+  // A function in a bare block is scoped to it.
+  {
+    fn inner() i64 {
+      return 5
+    }
+    printLn(inner())                    // 5
   }
-  printLn(inner())                    // 5
 }
 
 fn later() i64 {

@@ -73,7 +73,7 @@ public class TestModeTests
         var run = _fixtures.GetTestRun("directives");
 
         var failure = Assert.Single(run.Result.Failures);
-        Assert.EndsWith("main.suru(16,1): assert failed: expected 12, got 40", failure);
+        Assert.EndsWith("main.suru(17,3): assert failed: expected 12, got 40", failure);
     }
 
     [Fact]

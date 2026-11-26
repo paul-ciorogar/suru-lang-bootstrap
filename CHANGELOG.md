@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — fixtures and unit tests run from `main`
+- **Every `tests/fixtures/*/main.suru` now puts its statements in `fn main() void { … }`.** Its functions stay at file level. A file-level `let` moves into `main` too, so no fixture changes meaning: every fixture prints exactly what it did before, and every directive is annotated the same way. The compiler is unchanged. This is what lets a later change stop running statements at file level without breaking any fixture
+- **The unit tests' sources moved too**, in `SemanticTests`, `FunctionSemanticTests`, the analyzed dumps in `DumpTests` and the analyzer cases in `DirectiveTests`. Each source is written out in full, so an asserted position still points at text the reader can see. The new `Source.MainBody` only reads `main`'s statements back, for the tests that check a resolved type. Tests that only lex or parse stay at file level, since the parser still accepts any statement there
+- **A few cases stay at file level on purpose**, for the change that ends file-level statements to rewrite: an empty file, a body that cannot see a file-level `let`, and `return` outside a function
+- Two fixture-based tests change with the move rather than with any behaviour. The failing `#assert` in `directives` is now reported at `(17,3)`, not `(16,1)`. `EveryStackSlotSitsInTheEntryBlock` used to check the module's first `entry` block, which now belongs to the C wrapper and holds no stack slots, so it checks `@suru.main`'s instead
+
 ### Added — `fn main() void` as an entry point, alongside the file's statements
 - **A file-level `fn main() void` is called after the file's statements run.** It is optional: a file without one behaves exactly as before, with identical IR. This is a transitional state, so fixtures and tests can move into `main` one at a time while both forms work. A later change removes the statements from the file level
 - **Codegen emits the C `main` as a wrapper**: the file's statements, then `call void @suru.main()`, framed by `run-started`/`run-finished` in a test build. Suru's `main` is an ordinary internal function under the symbol `suru.main`, which no Suru or C identifier can spell

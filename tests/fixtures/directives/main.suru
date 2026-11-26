@@ -1,47 +1,49 @@
 // Every '#' line is a test directive: 'suru build' never lexes them and prints 12,
 // 'suru test' runs them and prints 40.
 
-let width i64: 3
-let height i64: 4
+fn main() void {
+  let width i64: 3
+  let height i64: 4
 
-// A mock takes effect where it is written, so the line above it still ran with 3.
-#mock width: 10
+  // A mock takes effect where it is written, so the line above it still ran with 3.
+  #mock width: 10
 
-let area i64: width * height
+  let area i64: width * height
 
-#view area:
-#view area + 1:
-
-#assert(area, 40)
-#assert(area, 12)
-
-// A mock is an ordinary assignment, so it reaches the binding a block can see.
-{
-  #mock height: 5
-}
-#view area:
-#assert(height, 5)
-
-// Every printable type, viewed and asserted.
-let ratio f64: 1.5
-let ready bool: area > 0
-#view ratio:
-#view ready:
-#assert(ratio, 1.5)
-#assert(ready, true)
-
-printLn(area)
-
-// An arm is a scope like any other block, and the driver has to walk into one to find the
-// directive a record belongs to at all.
-if area = 40 {
   #view area:
+  #view area + 1:
+
   #assert(area, 40)
-}
+  #assert(area, 12)
 
-// A branch that is not taken never reports, so the compiler writes 'undefined' into both
-// lines. The second run re-reads that tail, which is not an expression either.
-if area = 0 {
+  // A mock is an ordinary assignment, so it reaches the binding a block can see.
+  {
+    #mock height: 5
+  }
   #view area:
-  #assert(area, 0)
+  #assert(height, 5)
+
+  // Every printable type, viewed and asserted.
+  let ratio f64: 1.5
+  let ready bool: area > 0
+  #view ratio:
+  #view ready:
+  #assert(ratio, 1.5)
+  #assert(ready, true)
+
+  printLn(area)
+
+  // An arm is a scope like any other block, and the driver has to walk into one to find the
+  // directive a record belongs to at all.
+  if area = 40 {
+    #view area:
+    #assert(area, 40)
+  }
+
+  // A branch that is not taken never reports, so the compiler writes 'undefined' into both
+  // lines. The second run re-reads that tail, which is not an expression either.
+  if area = 0 {
+    #view area:
+    #assert(area, 0)
+  }
 }

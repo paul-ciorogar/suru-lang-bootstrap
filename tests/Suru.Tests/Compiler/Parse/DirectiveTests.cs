@@ -303,42 +303,51 @@ public class DirectiveTests
     public void MockReportsAnUnknownVariable()
     {
         Assert.Equal(
-            $"{Source.Path}(1,7): unknown variable 'nope'",
-            Assert.Single(Source.Analyze("#mock nope: 1", BuildMode.Test)));
+            $"{Source.Path}(2,9): unknown variable 'nope'",
+            Assert.Single(Source.Analyze("fn main() void {\n  #mock nope: 1\n}", BuildMode.Test)));
     }
 
     [Fact]
     public void MockReportsATypeMismatchTheSameWayAnAssignmentDoes()
     {
-        var mocked = Assert.Single(Source.Analyze("let x i64: 1\n#mock x: 1.5", BuildMode.Test));
-        var assigned = Assert.Single(Source.Analyze("let x i64: 1\nx: 1.5"));
+        var mocked = Assert.Single(Source.Analyze("fn main() void {\n  let x i64: 1\n  #mock x: 1.5\n}", BuildMode.Test));
+        var assigned = Assert.Single(Source.Analyze("fn main() void {\n  let x i64: 1\n  x: 1.5\n}"));
 
-        Assert.Equal($"{Source.Path}(2,10): cannot assign a value of type 'f64' to 'x' of type 'i64'", mocked);
-        Assert.Equal(assigned.Replace("(2,4)", "(2,10)"), mocked);
+        Assert.Equal($"{Source.Path}(3,12): cannot assign a value of type 'f64' to 'x' of type 'i64'", mocked);
+        Assert.Equal(assigned.Replace("(3,6)", "(3,12)"), mocked);
     }
 
     [Fact]
     public void MockObeysBlockScope()
     {
         Assert.Equal(
-            $"{Source.Path}(4,7): unknown variable 'x'",
-            Assert.Single(Source.Analyze("{\n  let x i64: 1\n}\n#mock x: 2", BuildMode.Test)));
+            $"{Source.Path}(5,9): unknown variable 'x'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  {
+                    let x i64: 1
+                  }
+                  #mock x: 2
+                }
+                """,
+                BuildMode.Test)));
     }
 
     [Fact]
     public void ViewRejectsAnUnprintableValue()
     {
         Assert.Equal(
-            $"{Source.Path}(1,7): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
-            Assert.Single(Source.Analyze("#view printLn(1):", BuildMode.Test)));
+            $"{Source.Path}(2,9): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
+            Assert.Single(Source.Analyze("fn main() void {\n  #view printLn(1):\n}", BuildMode.Test)));
     }
 
     [Fact]
     public void AssertRejectsMismatchedOperands()
     {
         Assert.Equal(
-            $"{Source.Path}(1,1): '#assert' cannot compare 'i64' with 'bool'",
-            Assert.Single(Source.Analyze("#assert(1, true)", BuildMode.Test)));
+            $"{Source.Path}(2,3): '#assert' cannot compare 'i64' with 'bool'",
+            Assert.Single(Source.Analyze("fn main() void {\n  #assert(1, true)\n}", BuildMode.Test)));
     }
 
     [Fact]
@@ -347,19 +356,30 @@ public class DirectiveTests
         Assert.Equal(
             """
             Module test.suru
-              LetStatement (1,1) x i64
-                IntLiteral (1,12) 1 : i64
-              ViewDirective (2,1) #0
-                BinaryExpression (2,7) + : i64
-                  IdentifierExpression (2,7) x : i64
-                  IntLiteral (2,11) 1 : i64
-              AssertDirective (3,1) #1
-                IdentifierExpression (3,9) x : i64
-                IntLiteral (3,12) 1 : i64
+              FunctionDeclaration (1,1) main void : void
+                BlockStatement (1,16) function
+                  LetStatement (2,3) x i64
+                    IntLiteral (2,14) 1 : i64
+                  ViewDirective (3,3) #0
+                    BinaryExpression (3,9) + : i64
+                      IdentifierExpression (3,9) x : i64
+                      IntLiteral (3,13) 1 : i64
+                  AssertDirective (4,3) #1
+                    IdentifierExpression (4,11) x : i64
+                    IntLiteral (4,14) 1 : i64
 
             """,
             AstPrinter.Print(
-                Source.Analyzed("let x i64: 1\n#view x + 1:\n#assert(x, 1)", BuildMode.Test), withTypes: true));
+                Source.Analyzed(
+                    """
+                    fn main() void {
+                      let x i64: 1
+                      #view x + 1:
+                      #assert(x, 1)
+                    }
+                    """,
+                    BuildMode.Test),
+                withTypes: true));
     }
 
     // Dumps.
@@ -374,7 +394,16 @@ public class DirectiveTests
     [Fact]
     public void AMockInsideAnArmSeesTheArmsScope()
     {
-        Assert.Empty(Source.Analyze("let seed i64: 7\nif true {\n#mock seed: 1\n}", BuildMode.Test));
+        Assert.Empty(Source.Analyze(
+            """
+            fn main() void {
+              let seed i64: 7
+              if true {
+                #mock seed: 1
+              }
+            }
+            """,
+            BuildMode.Test));
     }
 
     [Fact]
@@ -382,8 +411,16 @@ public class DirectiveTests
     {
         // Nesting changes nothing about what a directive accepts.
         Assert.Equal(
-            "test.suru(2,7): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
-            Assert.Single(Source.Analyze("if true {\n#view printLn(1):\n}", BuildMode.Test)));
+            "test.suru(3,11): '#view' cannot show a value of type 'void'; expected 'bool', 'i64', 'f64'",
+            Assert.Single(Source.Analyze(
+                """
+                fn main() void {
+                  if true {
+                    #view printLn(1):
+                  }
+                }
+                """,
+                BuildMode.Test)));
     }
 
     [Fact]

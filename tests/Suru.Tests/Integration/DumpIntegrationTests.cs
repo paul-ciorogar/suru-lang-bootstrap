@@ -52,16 +52,18 @@ public class DumpIntegrationTests : IDisposable
     [Fact]
     public void EveryStackSlotSitsInTheEntryBlock()
     {
+        // Suru's 'main' rather than the C entry point, which holds no bindings of its own.
         var dump = Compile(Dump.Llvm, "if");
+        var main = dump[dump.IndexOf("define internal void @suru.main()", StringComparison.Ordinal)..];
 
         // 'entry' is the frame and nothing else: allocas, then the jump into the code.
-        var entry = dump[dump.IndexOf("entry:", StringComparison.Ordinal)..];
+        var entry = main[main.IndexOf("entry:", StringComparison.Ordinal)..];
         entry = entry[..entry.IndexOf("body:", StringComparison.Ordinal)];
 
         Assert.Contains("alloca", entry);
         Assert.Contains("br label %body", entry);
         Assert.DoesNotContain("call", entry);
-        Assert.DoesNotContain("alloca", dump[dump.IndexOf("body:", StringComparison.Ordinal)..]);
+        Assert.DoesNotContain("alloca", main[main.IndexOf("body:", StringComparison.Ordinal)..]);
     }
 
     [Fact]
@@ -81,8 +83,7 @@ public class DumpIntegrationTests : IDisposable
     {
         var dump = Compile(Dump.Llvm, "functions");
 
-        // 'main' first, so its 'entry' is the first one in the module — what
-        // EveryStackSlotSitsInTheEntryBlock slices from.
+        // The C entry point first, so the IR opens with where the program starts.
         Assert.True(
             dump.IndexOf("define i32 @main()", StringComparison.Ordinal)
             < dump.IndexOf("define internal", StringComparison.Ordinal));
