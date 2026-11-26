@@ -1,0 +1,25 @@
+// File-level constants of every type, both signs, read from a function written above them and
+// from one nested in 'main'.
+fn scaled(n i64) i64 {
+  return n * rate + offset
+}
+
+let rate i64: 12
+let offset i64: -3
+let ratio f64: 2.5
+let drop f64: -0.25
+let verbose bool: true
+
+fn main() void {
+  fn adjusted(x f64) f64 {
+    return x * ratio + drop
+  }
+
+  printLn(rate)
+  printLn(offset)
+  printLn(ratio)
+  printLn(drop)
+  printLn(verbose)
+  printLn(scaled(2))
+  printLn(adjusted(2.0))
+}

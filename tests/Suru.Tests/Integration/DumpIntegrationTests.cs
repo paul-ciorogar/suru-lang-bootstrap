@@ -114,6 +114,19 @@ public class DumpIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void AConstantIsAnImmediateWithNoSlotOrGlobal()
+    {
+        var dump = Compile(Dump.Llvm, "constants");
+        var scaled = dump[dump.IndexOf("define internal i64 @scaled", StringComparison.Ordinal)..];
+        scaled = scaled[..scaled.IndexOf('}')];
+
+        Assert.Contains("mul i64 %n1, 12", scaled);
+        Assert.Contains("add i64 %0, -3", scaled);
+        Assert.DoesNotContain("@rate", dump);
+        Assert.DoesNotContain("%rate", dump);
+    }
+
+    [Fact]
     public void AndOrBranchToAPhiInsteadOfComputingBothSides()
     {
         var dump = Compile(Dump.Llvm, "short-circuit");

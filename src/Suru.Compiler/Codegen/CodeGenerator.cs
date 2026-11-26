@@ -116,17 +116,20 @@ public sealed partial class CodeGenerator
         if (_mode == BuildMode.Test)
             main.WriteFrame(Frame.RunStarted, ("run", "%d", Int32(0)));
 
+        // Before any body, so every function sees every constant wherever it is written. The
+        // analyzer has already rejected every file-level statement but 'let' and 'fn'.
+        foreach (var let in _module.Statements.OfType<LetStatement>())
+            _scopes.Declare(let.Name, new ConstantSymbol(Literal(let.Value)));
+
         // The file's scope is never entered, so nothing else would emit its functions.
         EmitFunctions(_module.Statements);
-        main.EmitStatements(_module.Statements);
 
-        // After the file's statements, for now: both forms run while code moves into 'main'.
         if (_scopes.LookupFunction(Main) is Ok<Binding, Unbound>(FunctionSymbol entry))
             main.CallVoid(entry);
 
         // 'run-finished' is how the driver tells a run that died from one that never reached a
-        // directive. It needs no terminator guard: 'break', 'continue' and 'return' are all
-        // rejected at the top level, so nothing can have left this block already.
+        // directive. It needs no terminator guard: the wrapper holds no user code, so nothing
+        // can have left this block already.
         if (_mode == BuildMode.Test)
             main.WriteFrame(Frame.RunFinished, ("run", "%d", Int32(0)), ("exit", "%d", Int32(MainExitCode)));
 

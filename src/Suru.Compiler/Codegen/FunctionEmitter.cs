@@ -312,7 +312,7 @@ public sealed partial class CodeGenerator
         /// unreachable, and emitting it after a terminator would fail verification. It has still
         /// been analyzed, so unreachable code still reports its own errors.
         /// </summary>
-        public void EmitStatements(IReadOnlyList<Statement> statements)
+        private void EmitStatements(IReadOnlyList<Statement> statements)
         {
             foreach (var statement in statements)
             {

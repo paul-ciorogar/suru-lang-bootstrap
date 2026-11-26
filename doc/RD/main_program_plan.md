@@ -179,7 +179,7 @@ called. It exists so tasks 2a and 2b can move code into `main` one test at a tim
 
 ### 3. The flip: constants, and nothing else at file level *(~3h)*
 
-- [ ] **Analyzer: the file pass.** `_Analyze` stops treating the file as a statement list and
+- [x] **Analyzer: the file pass.** `_Analyze` stops treating the file as a statement list and
       makes three passes over it:
       1. `DeclareSignatures`, unchanged, so a constant named like a function collides.
       2. Constants. For each file-level `let`: if its value is not a `BoolLiteral`, `IntLiteral`
@@ -192,14 +192,17 @@ called. It exists so tasks 2a and 2b can move code into `main` one test at a tim
          errors. A file-level directive is `a directive can only appear inside a function`.
       3. Function bodies, through `AnalyzeFunction` as today.
 
-      After this pass, `'return' can only appear inside a function` can only fire for a
-      file-level `return`, which the general rule now reaches first. Whether that message is
-      deleted or kept as the more specific one for that statement is open question 3.
-- [ ] **Codegen.** `_Generate` declares a `ConstantSymbol` per file-level `let` before
+      After this pass, `'return' can only appear inside a function` could only fire for a
+      file-level `return`, which the general rule now reaches first, so it is deleted (open
+      question 3). A `return` with no enclosing function is a compiler bug from then on.
+      A constant whose value was rejected is still declared, so its uses do not also read as
+      `unknown variable`. `AnalyzeLet` and the constant pass share `DeclareBinding`, so the two
+      cannot drift on what they say about a name or a type.
+- [x] **Codegen.** `_Generate` declares a `ConstantSymbol` per file-level `let` before
       `EmitFunctions`, and the wrapper stops emitting file-level statements: it is frames,
       `call @suru.main`, `ret`. The "it needs no terminator guard" comment on `run-finished` stays
       true for a better reason now: the wrapper contains no user code at all.
-- [ ] **Tests.** In `SemanticTests`: every new diagnostic, asserted whole. Also a constant used in
+- [x] **Tests.** In `SemanticTests`: every new diagnostic, asserted whole. Also a constant used in
       a function, a constant used in a function declared *above* it, shadowing by a parameter and
       by a body's `let`, a constant `#mock`ed in a function, a negative literal, and an operator in
       a constant's value. The task-2b leftovers get rewritten. An integration fixture `constants/`
@@ -244,9 +247,11 @@ None of the questions still open blocks a task.
    function-as-test-unit and Phase B.
 2. ~~**Is `main` reserved below file level?**~~ **Decided: reserved at every level, and never
    callable.** See the decisions table and task 1.
-3. **Specific or general file-level messages.** `return`, `break` and `continue` already have
-   messages of their own. At file level, does one general message replace them, or do they keep
-   theirs? The plan reports the general one, once, and analyzes no further.
+3. ~~**Specific or general file-level messages.**~~ **Decided: the general one only.** A
+   file-level `return`, `break` or `continue` is `only 'let' and 'fn' may appear outside a
+   function`, like every other misplaced statement, and `'return' can only appear inside a
+   function` is deleted, since nothing can reach it any more. `'break'`/`'continue' can only
+   appear inside a loop` stay, because a function body can still reach them.
 4. **Constant expressions later.** Literal-only means `let area i64: 3 * 4` and a constant
    defined from another constant are both errors. If either is wanted later, it needs a
    compile-time evaluator whose arithmetic matches the runtime's exactly (wrapping `i64`, and

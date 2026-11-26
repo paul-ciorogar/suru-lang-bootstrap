@@ -1,4 +1,5 @@
 using Suru.Compiler;
+using Suru.Compiler.Debug;
 using Suru.Compiler.Parse.Ast;
 
 namespace Suru.Tests.Compiler.Semantic;
@@ -615,6 +616,184 @@ public class SemanticTests
         var error = Assert.Single(Source.Analyze("fn main() void { 42 }"));
 
         Assert.Matches(@"^test\.suru\(\d+,\d+\): ", error);
+    }
+
+    // ---- what a file may hold ---------------------------------------------------------------
+
+    [Theory]
+    [InlineData("printLn(1)")]
+    [InlineData("x: 1")]
+    [InlineData("{ }")]
+    [InlineData("if true { }")]
+    [InlineData("while true { }")]
+    [InlineData("break")]
+    [InlineData("continue")]
+    [InlineData("return")]
+    public void ReportsAnythingButLetAndFnAtFileLevel(string text)
+    {
+        var error = Assert.Single(Source.Analyze(text));
+
+        Assert.Equal("test.suru(1,1): only 'let' and 'fn' may appear outside a function", error);
+    }
+
+    /// <summary>Reported once and not analyzed, so the body's own errors do not cascade.</summary>
+    [Fact]
+    public void DoesNotAnalyzeTheBodyOfAFileLevelStatement()
+    {
+        var error = Assert.Single(Source.Analyze("if 1 {\n  printLn(x)\n  42\n}"));
+
+        Assert.Equal("test.suru(1,1): only 'let' and 'fn' may appear outside a function", error);
+    }
+
+    [Theory]
+    [InlineData("#view 1:")]
+    [InlineData("#assert(1, 1)")]
+    [InlineData("#mock x: 1")]
+    public void ReportsADirectiveAtFileLevel(string text)
+    {
+        var error = Assert.Single(Source.Analyze(text, BuildMode.Test));
+
+        Assert.Equal("test.suru(1,1): a directive can only appear inside a function", error);
+    }
+
+    // ---- constants --------------------------------------------------------------------------
+
+    /// <summary>
+    /// Every type and both signs, read from a function written above the constants and from a
+    /// function nested in another, so neither order nor depth hides one.
+    /// </summary>
+    [Fact]
+    public void AConstantIsVisibleInEveryFunction()
+    {
+        var dump = AstPrinter.Print(
+            Source.Analyzed(
+                """
+                fn scaled(n i64) i64 {
+                  return n * rate + offset
+                }
+                let rate i64: 12
+                let offset i64: -3
+                let ratio f64: -1.5
+                let verbose bool: false
+                fn main() void {
+                  fn inner() f64 {
+                    return ratio
+                  }
+                  printLn(scaled(2))
+                  printLn(inner())
+                  printLn(verbose)
+                }
+                """),
+            withTypes: true);
+
+        Assert.Equal(
+            """
+            Module test.suru
+              FunctionDeclaration (1,1) scaled i64 : i64
+                Parameter (1,11) n i64 : i64
+                BlockStatement (1,22) function
+                  ReturnStatement (2,3)
+                    BinaryExpression (2,10) + : i64
+                      BinaryExpression (2,10) * : i64
+                        IdentifierExpression (2,10) n : i64
+                        IdentifierExpression (2,14) rate : i64
+                      IdentifierExpression (2,21) offset : i64
+              LetStatement (4,1) rate i64
+                IntLiteral (4,15) 12 : i64
+              LetStatement (5,1) offset i64
+                IntLiteral (5,17) -3 : i64
+              LetStatement (6,1) ratio f64
+                FloatLiteral (6,16) -1.5 : f64
+              LetStatement (7,1) verbose bool
+                BoolLiteral (7,19) false : bool
+              FunctionDeclaration (8,1) main void : void
+                BlockStatement (8,16) function
+                  FunctionDeclaration (9,3) inner f64 : f64
+                    BlockStatement (9,18) function
+                      ReturnStatement (10,5)
+                        IdentifierExpression (10,12) ratio : f64
+                  ExpressionStatement (12,3)
+                    CallExpression (12,3) printLn : void
+                      CallExpression (12,11) scaled : i64
+                        IntLiteral (12,18) 2 : i64
+                  ExpressionStatement (13,3)
+                    CallExpression (13,3) printLn : void
+                      CallExpression (13,11) inner : f64
+                  ExpressionStatement (14,3)
+                    CallExpression (14,3) printLn : void
+                      IdentifierExpression (14,11) verbose : bool
+
+            """,
+            dump);
+    }
+
+    /// <summary>
+    /// The shadows have another type than the constant, so a body that still read the constant
+    /// would fail to return.
+    /// </summary>
+    [Theory]
+    [InlineData("let x bool: true\nfn f(x i64) i64 {\n  return x\n}")]
+    [InlineData("let x bool: true\nfn f() i64 {\n  let x i64: 1\n  return x\n}")]
+    public void AFunctionMayShadowAConstant(string text)
+    {
+        Assert.Empty(Source.Analyze(text));
+    }
+
+    [Theory]
+    [InlineData("let a i64: 3 * 4", "test.suru(1,12)")]
+    [InlineData("let a i64: x + 1", "test.suru(1,12)")]
+    [InlineData("let a i64: -x", "test.suru(1,12)")]
+    [InlineData("let a i64: 1\nlet b i64: a", "test.suru(2,12)")]
+    [InlineData("fn f() i64 {\n  return 1\n}\nlet c i64: f()", "test.suru(4,12)")]
+    public void ReportsAConstantWhoseValueIsNotALiteral(string text, string position)
+    {
+        var error = Assert.Single(Source.Analyze(text));
+
+        Assert.Equal($"{position}: a constant's value must be a literal", error);
+    }
+
+    /// <summary>The name is still declared, so its uses do not also read as unknown.</summary>
+    [Fact]
+    public void ARejectedConstantIsStillDeclared()
+    {
+        var error = Assert.Single(Source.Analyze("let a i64: 3 * 4\nfn main() void {\n  printLn(a)\n}"));
+
+        Assert.Equal("test.suru(1,12): a constant's value must be a literal", error);
+    }
+
+    [Fact]
+    public void ReportsAConstantOfTheWrongType()
+    {
+        var error = Assert.Single(Source.Analyze("let a i64: true"));
+
+        Assert.Equal("test.suru(1,12): cannot bind a value of type 'bool' to 'a' of type 'i64'", error);
+    }
+
+    [Theory]
+    [InlineData("let a i64: 1\nlet a i64: 2")]
+    [InlineData("fn a() void { }\nlet a i64: 2")]
+    public void ReportsAConstantNamedLikeAnotherDeclaration(string text)
+    {
+        var error = Assert.Single(Source.Analyze(text));
+
+        Assert.Equal("test.suru(2,1): 'a' is already declared", error);
+    }
+
+    [Fact]
+    public void ReportsAnAssignmentToAConstant()
+    {
+        var error = Assert.Single(Source.Analyze("let x i64: 1\nfn main() void {\n  x: 2\n}"));
+
+        Assert.Equal("test.suru(3,3): 'x' is a constant and cannot be assigned", error);
+    }
+
+    [Fact]
+    public void ReportsAMockOfAConstant()
+    {
+        var error = Assert.Single(
+            Source.Analyze("let x i64: 1\nfn main() void {\n  #mock x: 2\n}", BuildMode.Test));
+
+        Assert.Equal("test.suru(3,9): 'x' is a constant and cannot be assigned", error);
     }
 
     /// <summary>The lone argument of a <c>printLn</c> statement, to read its resolved type off.</summary>

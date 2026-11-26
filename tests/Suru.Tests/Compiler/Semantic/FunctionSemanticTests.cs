@@ -174,14 +174,11 @@ public class FunctionSemanticTests
 
     // ---- a body sees only its parameters -----------------------------------------------------
 
-    // TODO: this will change as the language progresses variables declared at the file leve will be constants
-    // and therefor can be seen in a function 
+    /// <summary>A file-level <c>let</c> is a constant, which the barrier lets through.</summary>
     [Fact]
-    public void ABodyCannotSeeAFileLevelBinding()
+    public void ABodySeesAFileLevelConstant()
     {
-        var error = Assert.Single(Source.Analyze("let x i64: 1\nfn f() i64 {\n  return x\n}"));
-
-        Assert.Equal("test.suru(3,10): unknown variable 'x'", error);
+        Assert.Empty(Source.Analyze("let x i64: 1\nfn f() i64 {\n  return x\n}"));
     }
 
     [Fact]
@@ -457,15 +454,16 @@ public class FunctionSemanticTests
     {
         var error = Assert.Single(Source.Analyze("return 1"));
 
-        Assert.Equal("test.suru(1,1): 'return' can only appear inside a function", error);
+        Assert.Equal("test.suru(1,1): only 'let' and 'fn' may appear outside a function", error);
     }
 
+    /// <summary>The loop is reported, and its body is not analyzed, so the 'return' adds nothing.</summary>
     [Fact]
-    public void ReportsAReturnInABlockOutsideAFunction()
+    public void ReportsAReturnInABlockOutsideAFunctionOnlyThroughItsLoop()
     {
         var error = Assert.Single(Source.Analyze("while true {\n  return\n}"));
 
-        Assert.Equal("test.suru(2,3): 'return' can only appear inside a function", error);
+        Assert.Equal("test.suru(1,1): only 'let' and 'fn' may appear outside a function", error);
     }
 
     [Fact]

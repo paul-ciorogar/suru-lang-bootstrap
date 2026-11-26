@@ -60,14 +60,58 @@ public sealed class SemanticAnalyzer
         return analyzer._Analyze();
     }
 
+    /// <summary>
+    /// A file is declarations, not code: every constant is declared before any body is analyzed,
+    /// so a body sees every constant wherever the two are written.
+    /// </summary>
     private IReadOnlyList<string> _Analyze()
     {
         // The file's scope is never entered, so nothing else would run the pre-pass for it.
         DeclareSignatures(_module.Statements, isDeclarationContext: true, isFileLevel: true);
 
+        // Anything misplaced is reported once and not analyzed, so a file-level 'while' does not
+        // also cascade into its body's errors.
         foreach (var statement in _module.Statements)
-            AnalyzeStatement(statement);
+        {
+            switch (statement)
+            {
+                case LetStatement let:
+                    DeclareConstant(let);
+                    break;
+                case FunctionDeclaration:
+                    break;
+                case Directive:
+                    Error(statement.Position, "a directive can only appear inside a function");
+                    break;
+                default:
+                    Error(statement.Position, "only 'let' and 'fn' may appear outside a function");
+                    break;
+            }
+        }
+
+        foreach (var declaration in _module.Statements.OfType<FunctionDeclaration>())
+            AnalyzeFunction(declaration);
+
         return _errors;
+    }
+
+    /// <summary>
+    /// A file-level <c>let</c>. Its value must be a literal because nothing evaluates at compile
+    /// time; widening that is where constant expressions would start.
+    /// <para>
+    /// A rejected value is not analyzed, so <c>x + 1</c> does not also report <c>x</c>, but the
+    /// name is still declared, so its uses do not report <c>unknown variable</c>.
+    /// </para>
+    /// </summary>
+    private void DeclareConstant(LetStatement let)
+    {
+        SuruType? valueType = null;
+        if (let.Value is BoolLiteral or IntLiteral or FloatLiteral)
+            valueType = AnalyzeExpression(let.Value);
+        else
+            Error(let.Value.Position, "a constant's value must be a literal");
+
+        DeclareBinding(let, valueType, type => new ConstantBinding(type));
     }
 
     private void AnalyzeStatement(Statement statement)
@@ -254,11 +298,11 @@ public sealed class SemanticAnalyzer
     {
         var valueType = returned.Value is null ? null : AnalyzeExpression(returned.Value);
 
-        if (_function is not { } function)
-        {
-            Error(returned.Position, "'return' can only appear inside a function");
-            return;
-        }
+        // The file pass rejects a file-level 'return' before any body is analyzed, so a 'return'
+        // reached here is always inside one.
+        var function = _function
+            ?? throw new InvalidOperationException(
+                $"'return' at {returned.Position} was analyzed outside a function");
 
         // A return type that did not resolve already reported itself, and leaves nothing to
         // compare the value against.
@@ -386,10 +430,15 @@ public sealed class SemanticAnalyzer
     private SuruType? ResolveReturnType(string name, SourcePosition position) =>
         name == SuruType.Void.Name ? SuruType.Void : ResolveBindingType(name, position);
 
-    private void AnalyzeLet(LetStatement let)
-    {
-        var valueType = AnalyzeExpression(let.Value);
+    private void AnalyzeLet(LetStatement let) =>
+        DeclareBinding(let, AnalyzeExpression(let.Value), type => new VariableBinding(type));
 
+    /// <summary>
+    /// Shared by a variable and a constant, so the two cannot drift on what they say about a
+    /// name or a type. A null <paramref name="valueType"/> means the value already reported.
+    /// </summary>
+    private void DeclareBinding(LetStatement let, SuruType? valueType, Func<SuruType, Binding> bind)
+    {
         var declared = ResolveBindingType(let.TypeName, let.TypePosition);
 
         // Only the innermost scope: a name may shadow an outer binding, but not one of its own.
@@ -409,7 +458,7 @@ public sealed class SemanticAnalyzer
         // Registered even when the initialiser or the type name failed, so later uses
         // of the name report their own problems instead of 'unknown variable'.
         if (declared is not null && !_scopes.DeclaredHere(let.Name))
-            _scopes.Declare(let.Name, new VariableBinding(declared));
+            _scopes.Declare(let.Name, bind(declared));
     }
 
     private void AnalyzeAssignment(AssignmentStatement assignment) =>
